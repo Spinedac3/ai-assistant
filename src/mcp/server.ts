@@ -6,6 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Database } from "../db/client.js";
 import { removeHidden } from "../lib/hiddenText.js";
+import { withCapFields } from "../tools/cap.js";
 import type { JsonSchema, ToolOrigin } from "../tools/contract.js";
 import type { Caller, ToolRegistry } from "../tools/registry.js";
 import { findCapabilities, howToGetAccess, META_DEFINITIONS, rankByWords } from "./capabilities.js";
@@ -112,7 +113,8 @@ export function buildMcpServer(
           name,
           (definition?.inputSchema ?? { type: "object" }) as JsonSchema,
         ),
-        ...(direct?.outputSchema ? { outputSchema: direct.outputSchema } : {}),
+        // Declared with the fields a size cut may add, so a cut result is still a valid one
+        ...(direct?.outputSchema ? { outputSchema: withCapFields(direct.outputSchema) } : {}),
         annotations: {
           readOnlyHint: definition?.readOnly ?? false,
           destructiveHint: !(definition?.readOnly ?? false),

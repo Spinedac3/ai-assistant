@@ -60,6 +60,27 @@ services:
     volumes:
       - demo-data:/var/lib/postgresql/data
 
+  # The same demo data on the other two engines the tool builder supports; heavier, so they start
+  # only with: docker compose --profile engines up -d
+  demo-mysql:
+    image: mysql:8.4
+    profiles: [engines]
+    environment:
+      MYSQL_ROOT_PASSWORD: demo-root
+      MYSQL_DATABASE: demo
+    ports:
+      - "127.0.0.1:3307:3306"
+
+  demo-mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    profiles: [engines]
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: Demo-Root-2026
+      MSSQL_PID: Developer
+    ports:
+      - "127.0.0.1:1434:1433"
+
 volumes:
   postgres-data:
   solr-data:

@@ -21,6 +21,11 @@ const SCOPES = [
     description: "Subir, reindexar y borrar documentos",
     sensitive: true,
   },
+  {
+    code: "sources.manage",
+    description: "Registrar y administrar las bases de datos que leen las tools",
+    sensitive: true,
+  },
   // Each area of documents is one of these; the admin creates the rest as needed
   { code: "docs.general.read", description: "Leer los documentos generales", sensitive: false },
 ];

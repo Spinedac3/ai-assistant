@@ -30,12 +30,21 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Solr needs the versioned configset from the checkout, so it starts here and not as a service
-      - run: docker compose up -d solr minio
+      - run: docker compose --profile engines up -d solr minio demo-db demo-mysql demo-mssql
       - run: |
           for i in $(seq 1 60); do
             curl -sf "http://localhost:8983/solr/docs/admin/ping" > /dev/null && break
             sleep 2
           done
+      # The demo engines take a while to accept logins; the seed retries until each one answers
+      - run: |
+          seeded=0
+          for i in $(seq 1 30); do
+            pnpm demo:seed 2>&1 | tee seed.log
+            if [ "$(grep -c ": clientes" seed.log)" = "3" ]; then seeded=1; break; fi
+            sleep 5
+          done
+          [ "$seeded" = "1" ]
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test:integration

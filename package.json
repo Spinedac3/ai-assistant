@@ -29,6 +29,8 @@
     "db:migrate": "tsx --env-file-if-exists=.env src/cli/migrate.ts",
     "db:seed": "tsx --env-file-if-exists=.env src/cli/seed.ts",
     "keys:generate": "tsx src/cli/generateKeys.ts",
+    "kek:generate": "tsx src/cli/generateKek.ts",
+    "demo:seed": "tsx src/cli/seedDemo.ts",
     "admin:create": "tsx --env-file-if-exists=.env src/cli/createAdmin.ts",
     "docs:load": "tsx --env-file-if-exists=.env src/cli/loadDocuments.ts"
   },
@@ -45,11 +47,14 @@
     "fastify-plugin": "^5.1.0",
     "jose": "^6.2.12",
     "minio": "^8.0.7",
+    "mssql": "^12.7.2",
+    "mysql2": "^3.24.5",
     "pg": "^8.23.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.6",
+    "@types/mssql": "^12.3.0",
     "@types/node": "^22.20.1",
     "@types/pg": "^8.23.1",
     "cross-env": "^10.1.0",
