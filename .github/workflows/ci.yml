@@ -38,11 +38,13 @@ jobs:
           done
       # The demo engines take a while to accept logins; the seed retries until each one answers
       - run: |
+          seeded=0
           for i in $(seq 1 30); do
             pnpm demo:seed 2>&1 | tee seed.log
-            [ "$(grep -c ": clientes" seed.log)" = "3" ] && break
+            if [ "$(grep -c ": clientes" seed.log)" = "3" ]; then seeded=1; break; fi
             sleep 5
           done
+          [ "$seeded" = "1" ]
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test:integration

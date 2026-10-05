@@ -17,7 +17,7 @@ Necesitás Node 22, pnpm, Docker y el [CLI de Claude](https://docs.claude.com/en
 ```bash
 pnpm install
 cp .env.example .env
-docker compose up -d            # postgres, solr, embed, minio y demo-db
+docker compose --profile engines up -d   # postgres, solr, embed, minio y las bases demo
 pnpm keys:generate              # llave RS256 en secrets/, nunca en variables
 pnpm kek:generate               # llave maestra de las contraseñas de las fuentes
 pnpm db:migrate
@@ -212,8 +212,11 @@ registra una vez en `POST /admin/sources` (permiso `sources.manage`):
   `secrets/kek.key`, `SECRETS_KEK_FILE`), nunca la base ni una variable de entorno: respáldala
   aparte, sin ella las contraseñas guardadas no se pueden leer. La API nunca devuelve una
   contraseña.
-- **Zona horaria**: las fechas que la fuente guarda sin zona se leen tal cual y se interpretan
-  con `timeZone` de la fuente, o con `APP_TIMEZONE` si no tiene.
+- **Zona horaria**: las fechas que la fuente guarda sin zona se leen tal cual, igual en los tres
+  motores; `timeZone` de la fuente (o `APP_TIMEZONE` si no tiene) queda guardada para que el
+  creador de tools las interprete.
+- **Postgres 14 o anterior** da permiso de crear tablas en `public` a todos; ahí hay que
+  revocarlo (`revoke create on schema public from public`) o el lector se rechaza.
 - Registrar de nuevo un código existente lo reemplaza, verificándolo otra vez.
 
 | Ruta | Para qué |
@@ -227,9 +230,9 @@ registra una vez en `POST /admin/sources` (permiso `sources.manage`):
 
 Lo que devuelve una tool tiene un tope: 40 KB en el chat y las corridas de agentes, 250 KB para
 clientes externos. Si no cabe, los totales quedan intactos, las listas se recortan y el detalle
-completo va a un Excel con un link firmado que vence a los 7 días (no pide login; quien reciba
-el link reenviado puede bajarlo mientras no venza). El Excel lo escribe el código, nunca el
-modelo.
+completo, hasta 100.000 filas por lista, va a un Excel con un link firmado que vence a los 7
+días (no pide login; quien reciba el link reenviado puede bajarlo mientras no venza). El Excel lo
+escribe el código, nunca el modelo.
 
 **Lo que devuelven las tools viaja al proveedor del modelo** (Anthropic, o el del cliente MCP)
 como parte de la conversación. Registra solo fuentes cuyos datos puedan salir de tu red en esas
