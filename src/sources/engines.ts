@@ -25,12 +25,30 @@ export interface QueryResult {
   rows: Array<Record<string, unknown>>;
 }
 
-export class TooManyRowsError extends Error {}
+export class TooManyRowsError extends Error {
+  constructor() {
+    super("La consulta devolvió más filas de las permitidas; acótala con filtros");
+  }
+}
 
 const CONNECT_TIMEOUT_MS = 10_000;
+// The permission checks read catalogs, slower than a plain query on a large database
+const CHECK_TIMEOUT_MS = 30_000;
 
-// Dates without a zone come back as written; the zone of the source gives them meaning later
+// Dates come back as the source wrote them, so every engine gives the same text; the zone of
+// the source gives the naive ones their meaning later
 const PG_TEXT_TYPES = new Set([1082, 1114, 1184]);
+
+/**
+ * Refuses a result whose columns cannot become one field each
+ *
+ * @param   columns  Column names in order
+ */
+function checkColumns(columns: string[]): void {
+  if (columns.some((column) => column === "") || new Set(columns).size !== columns.length) {
+    throw new Error("La consulta tiene columnas repetidas o sin nombre; ponle un alias a cada una");
+  }
+}
 
 /**
  * Formats a driver date as the naive text the source stored
@@ -80,6 +98,8 @@ async function postgresQuery(
           : pg.types.getTypeParser(oid, format)) as typeof pg.types.getTypeParser,
     },
   });
+  // A connection error after the query ends must not take the whole process down
+  client.on("error", () => {});
   await client.connect();
 
   try {
@@ -88,7 +108,14 @@ async function postgresQuery(
     let columns: string[] = [];
 
     await new Promise<void>((resolve, reject) => {
-      const query = client.query(new pg.Query(sql, params));
+      // The extended protocol takes one statement only, so no text can end the read-only
+      // transaction and go on writing after it
+      const config: pg.QueryConfig & { queryMode: "extended" } = {
+        text: sql,
+        values: params,
+        queryMode: "extended",
+      };
+      const query = client.query(new pg.Query(config));
       let stopped = false;
       query.on("row", (row: Record<string, unknown>, result?: pg.QueryResult) => {
         if (stopped) {
@@ -113,6 +140,7 @@ async function postgresQuery(
     });
 
     await client.query("ROLLBACK");
+    checkColumns(columns);
 
     return { columns, rows };
   } finally {
@@ -148,12 +176,16 @@ async function mysqlQuery(
     supportBigNumbers: true,
     bigNumberStrings: true,
   });
+  // A protocol error with no listener would end the process instead of the query
+  connection.on("error", () => {});
   const run = (text: string) =>
     new Promise<void>((resolve, reject) =>
       connection.query(text, (error) => (error ? reject(error) : resolve())),
     );
 
   try {
+    // The client timeout only stops waiting; this one stops the query on the server too
+    await run(`SET SESSION max_execution_time = ${Math.trunc(limits.timeoutMs)}`);
     await run("START TRANSACTION READ ONLY");
     const rows: Array<Record<string, unknown>> = [];
     let columns: string[] = [];
@@ -162,11 +194,13 @@ async function mysqlQuery(
       let stopped = false;
       connection
         .query({ sql, values: params, timeout: limits.timeoutMs })
-        .on("fields", (fields: Array<{ name: string }>) => {
-          columns = fields.map((field) => field.name);
+        // Statements that return no rows come without fields
+        .on("fields", (fields?: Array<{ name: string }>) => {
+          columns = (fields ?? []).map((field) => field.name);
         })
         .on("result", (row: Record<string, unknown>) => {
-          if (stopped) {
+          // Without columns the "row" is the server's status packet, not data
+          if (stopped || columns.length === 0) {
             return;
           }
           rows.push(row);
@@ -181,6 +215,7 @@ async function mysqlQuery(
     });
 
     await run("ROLLBACK");
+    checkColumns(columns);
 
     return { columns, rows };
   } finally {
@@ -190,7 +225,8 @@ async function mysqlQuery(
 
 /**
  * Runs a query on SQL Server; it has no read-only transaction, so the read-only user is the
- * barrier, checked when the source is registered
+ * barrier, checked when the source is registered, and the query also runs in a transaction that
+ * is always rolled back
  *
  * @param   info    Connection
  * @param   sql     Query with @p1 placeholders
@@ -217,10 +253,14 @@ async function mssqlQuery(
     // Naive dates read as UTC come back with the same digits they were stored with
     options: { encrypt: info.tls, trustServerCertificate: false, useUTC: true },
   });
+  pool.on("error", () => {});
   await pool.connect();
+  const transaction = new mssql.Transaction(pool);
 
   try {
-    const request = pool.request();
+    await transaction.begin();
+    await new mssql.Request(transaction).query("SET XACT_ABORT ON");
+    const request = new mssql.Request(transaction);
     request.stream = true;
     for (const [position, value] of params.entries()) {
       request.input(`p${position + 1}`, value);
@@ -228,9 +268,22 @@ async function mssqlQuery(
     const rows: Array<Record<string, unknown>> = [];
     let columns: string[] = [];
 
-    await new Promise<void>((resolve, reject) => {
-      let stopped = false;
+    // Settled only when the request is done: rolling back while it still runs fails, and the
+    // transaction would then hold the connection forever
+    const failure = await new Promise<Error | null>((resolve) => {
+      let stopped: Error | null = null;
+      let sets = 0;
+      const stop = (error: Error) => {
+        if (!stopped) {
+          stopped = error;
+          request.cancel();
+        }
+      };
       request.on("recordset", (meta: Record<string, unknown>) => {
+        sets++;
+        if (sets > 1) {
+          stop(new Error("La consulta devolvió más de un resultado; debe ser una sola consulta"));
+        }
         columns = Object.keys(meta);
       });
       request.on("row", (row: Record<string, unknown>) => {
@@ -239,18 +292,27 @@ async function mssqlQuery(
         }
         rows.push(Object.fromEntries(Object.entries(row).map(([k, v]) => [k, plainValue(v)])));
         if (rows.length > limits.maxRows) {
-          stopped = true;
-          reject(new TooManyRowsError());
-          request.cancel();
+          stop(new TooManyRowsError());
         }
       });
-      request.on("error", reject);
-      request.on("done", () => resolve());
+      request.on("error", (error: Error) => {
+        stopped ??= error;
+      });
+      request.on("done", () => resolve(stopped));
       request.query(sql);
     });
 
+    if (failure) {
+      throw failure;
+    }
+
+    // Repeated names come back as an array under one key
+    checkColumns(rows.some((row) => Object.values(row).some(Array.isArray)) ? [""] : columns);
+
     return { columns, rows };
   } finally {
+    await new Promise((resolve) => setImmediate(resolve));
+    await transaction.rollback().catch(() => {});
     await pool.close().catch(() => {});
   }
 }
@@ -281,67 +343,104 @@ export function runQuery(
   }
 }
 
-// Each engine answers in one row with one 0/1 or boolean column per way of writing
-const WRITE_CHECKS: Record<EngineName, string> = {
+// Each engine lists, one row per finding, what its user could do besides reading. The rule is
+// inverted on purpose: anything that is not plainly a read counts, so a privilege nobody thought
+// of still blocks the source. On SQL Server the VIEW permissions only show metadata
+const WRITE_CHECKS: Record<"postgres" | "mssql", string> = {
   postgres: `
-    select r.rolsuper as superuser,
-      has_database_privilege(current_database(), 'CREATE') as create_schemas,
-      exists (
+    select ability from (values
+      ('superuser', (select rolsuper from pg_roles where rolname = current_user)),
+      ('create_roles', (select rolcreaterole from pg_roles where rolname = current_user)),
+      ('create_databases', (select rolcreatedb from pg_roles where rolname = current_user)),
+      ('replication', (select rolreplication from pg_roles where rolname = current_user)),
+      ('create_schemas', has_database_privilege(current_database(), 'CREATE')),
+      ('run_server_programs', pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER')),
+      ('write_server_files', pg_has_role(current_user, 'pg_write_server_files', 'MEMBER')),
+      ('read_server_files', pg_has_role(current_user, 'pg_read_server_files', 'MEMBER')),
+      ('signal_backends', pg_has_role(current_user, 'pg_signal_backend', 'MEMBER')),
+      ('create_tables', exists (
         select 1 from pg_namespace n
-        where n.nspname not like 'pg\\_%' and n.nspname <> 'information_schema'
-          and has_schema_privilege(n.oid, 'CREATE')
-      ) as create_tables,
-      exists (
+        where n.nspname not like 'pg_%' and n.nspname <> 'information_schema'
+          and has_schema_privilege(n.oid, 'CREATE'))),
+      ('write_rows', exists (
         select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
-        where c.relkind in ('r', 'p') and n.nspname not like 'pg\\_%'
+        where c.relkind in ('r', 'p', 'v', 'f') and n.nspname not like 'pg_%'
           and n.nspname <> 'information_schema'
           and (has_table_privilege(c.oid, 'INSERT') or has_table_privilege(c.oid, 'UPDATE')
-            or has_table_privilege(c.oid, 'DELETE') or has_table_privilege(c.oid, 'TRUNCATE'))
-      ) as write_rows
-    from pg_roles r where r.rolname = current_user`,
-  mysql: "SHOW GRANTS FOR CURRENT_USER()",
+            or has_table_privilege(c.oid, 'DELETE') or has_table_privilege(c.oid, 'TRUNCATE')
+            or has_any_column_privilege(c.oid, 'INSERT')
+            or has_any_column_privilege(c.oid, 'UPDATE'))))
+    ) as checks(ability, found)
+    where found`,
   mssql: `
-    select is_srvrolemember('sysadmin') as sysadmin,
-      is_rolemember('db_owner') as db_owner,
-      is_rolemember('db_datawriter') as db_datawriter,
-      is_rolemember('db_ddladmin') as db_ddladmin,
-      has_perms_by_name(db_name(), 'DATABASE', 'INSERT') as insert_any,
-      has_perms_by_name(db_name(), 'DATABASE', 'UPDATE') as update_any,
-      has_perms_by_name(db_name(), 'DATABASE', 'DELETE') as delete_any,
-      has_perms_by_name(db_name(), 'DATABASE', 'CREATE TABLE') as create_tables,
-      case when exists (
-        select 1 from sys.objects o where o.type = 'U' and (
-          has_perms_by_name(quotename(schema_name(o.schema_id)) + '.' + quotename(o.name), 'OBJECT', 'INSERT') = 1
-          or has_perms_by_name(quotename(schema_name(o.schema_id)) + '.' + quotename(o.name), 'OBJECT', 'UPDATE') = 1
-          or has_perms_by_name(quotename(schema_name(o.schema_id)) + '.' + quotename(o.name), 'OBJECT', 'DELETE') = 1)
-      ) then 1 else 0 end as write_rows`,
+    select ('server ' + permission_name) collate database_default as ability
+    from fn_my_permissions(null, 'SERVER')
+    where permission_name <> 'CONNECT SQL' and permission_name not like 'VIEW %'
+    union
+    select ('database ' + permission_name) collate database_default
+    from fn_my_permissions(null, 'DATABASE')
+    where permission_name not in ('CONNECT', 'SELECT', 'SHOWPLAN', 'REFERENCES')
+      and permission_name not like 'VIEW %'
+    union
+    select ('schema ' + s.name + ' ' + p.permission_name) collate database_default
+    from sys.schemas s cross apply fn_my_permissions(quotename(s.name), 'SCHEMA') p
+    where s.schema_id between 1 and 16383 and s.name not in ('sys', 'INFORMATION_SCHEMA', 'guest')
+      and p.permission_name not in ('SELECT', 'REFERENCES') and p.permission_name not like 'VIEW %'
+    union
+    select ('object ' + schema_name(o.schema_id) + '.' + o.name + ' ' + p.permission_name)
+      collate database_default
+    from sys.objects o
+    cross apply fn_my_permissions(quotename(schema_name(o.schema_id)) + '.' + quotename(o.name), 'OBJECT') p
+    where o.is_ms_shipped = 0 and o.type in ('U', 'V', 'SN', 'P', 'PC', 'X', 'FN', 'IF', 'TF', 'FS', 'FT')
+      and p.subentity_name = ''
+      and p.permission_name not in ('SELECT', 'REFERENCES') and p.permission_name not like 'VIEW %'
+    union
+    select ('impersonate ' + d.name + ' ' + p.permission_name) collate database_default
+    from sys.database_principals d cross apply fn_my_permissions(quotename(d.name), 'USER') p
+    where d.type in ('S', 'U', 'G', 'E', 'X') and d.name <> user_name()
+      and p.permission_name in ('IMPERSONATE', 'CONTROL', 'ALTER')`,
 };
 
-// MySQL privileges that change data or structure; USAGE and SELECT are harmless
-const MYSQL_WRITES =
-  /\b(ALL PRIVILEGES|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|INDEX|TRIGGER|EXECUTE|GRANT OPTION|REFERENCES|EVENT|LOCK TABLES|FILE|SUPER|PROCESS|SHUTDOWN|RELOAD)\b/i;
+// The only MySQL privileges that read and nothing else
+const MYSQL_READS = new Set(["USAGE", "SELECT", "SHOW VIEW", "SHOW DATABASES"]);
+
+/**
+ * Lists the MySQL privileges of a SHOW GRANTS line that are not plain reads
+ *
+ * @param   grant  One line of SHOW GRANTS
+ *
+ * @return  Those privileges; a granted role counts as one, since its privileges may be activated
+ */
+export function mysqlWrites(grant: string): string[] {
+  const privileges = grant.match(/^GRANT (.+?) ON /i)?.[1];
+  if (!privileges) {
+    return /^GRANT /i.test(grant) ? [`role ${grant.replace(/^GRANT (.+?) TO .*$/i, "$1")}`] : [];
+  }
+
+  // Column grants carry their own commas, as in SELECT (a, b)
+  return privileges
+    .replace(/\([^)]*\)/g, "")
+    .split(",")
+    .map((privilege) => privilege.trim().toUpperCase())
+    .filter((privilege) => privilege !== "" && !MYSQL_READS.has(privilege));
+}
 
 /**
  * Lists what the user of a source can do besides reading; an empty list means read-only
  *
  * @param   info  Connection
  *
- * @return  The ways it can write
+ * @return  The ways it can write or act beyond reading
  */
 export async function writeAbilities(info: ConnectionInfo): Promise<string[]> {
-  const limits = { timeoutMs: CONNECT_TIMEOUT_MS * 3, maxRows: 1_000 };
-  const { rows } = await runQuery(info, WRITE_CHECKS[info.engine], [], limits);
+  const limits = { timeoutMs: CHECK_TIMEOUT_MS, maxRows: 10_000 };
 
   if (info.engine === "mysql") {
-    return rows
-      .map((row) => String(Object.values(row)[0] ?? ""))
-      .map((grant) => grant.match(/^GRANT (.+?) ON /i)?.[1] ?? "")
-      .filter((privileges) => MYSQL_WRITES.test(privileges));
+    const { rows } = await runQuery(info, "SHOW GRANTS FOR CURRENT_USER()", [], limits);
+    return rows.flatMap((row) => mysqlWrites(String(Object.values(row)[0] ?? "")));
   }
 
-  const [found = {}] = rows;
+  const { rows } = await runQuery(info, WRITE_CHECKS[info.engine], [], limits);
 
-  return Object.entries(found)
-    .filter(([, value]) => value === true || value === 1 || value === "1")
-    .map(([ability]) => ability);
+  return rows.map((row) => String(row.ability));
 }
