@@ -1,5 +1,5 @@
 import { Box, Button, Field, Heading, Input, Stack, Text } from "@chakra-ui/react";
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { ApiError, api } from "../api/http";
 import { type SessionUser, setSession } from "../api/session";
 
@@ -14,7 +14,7 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const submit = async (event: FormEvent) => {
+  const submit = async (event: { preventDefault: () => void }) => {
     event.preventDefault();
     setBusy(true);
     setError(null);

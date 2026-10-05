@@ -14,7 +14,7 @@ import {
   Text,
 } from "@chakra-ui/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import { FiDownload, FiRefreshCw, FiTrash2, FiUpload } from "react-icons/fi";
 import { ApiError, api, request } from "../api/http";
 import { can, useSession } from "../api/session";
@@ -225,7 +225,7 @@ function UploadButton({ onQueued }: { onQueued: (job: number) => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const submit = async (event: FormEvent) => {
+  const submit = async (event: { preventDefault: () => void }) => {
     event.preventDefault();
     if (!markdown) {
       return;
