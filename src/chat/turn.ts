@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
-import { type CliCommand, cliArgs, launchCli } from "../llm/cli.js";
+import { type CliCommand, cliArgs, DISALLOWED_CLI_TOOLS, launchCli } from "../llm/cli.js";
 import { MCP_SERVER } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
 import { readSetting } from "../settings.js";
@@ -45,16 +45,6 @@ const CONTEXT_CAP_TOKENS = 150_000;
 
 // Every attempt ends by itself, which is what lets the conversation lock wait without a limit
 const ATTEMPT_TIMEOUT_MS = 300_000;
-
-// Built-in CLI tools a data assistant never needs; each attempt would only burn a step
-export const DISALLOWED_CLI_TOOLS = [
-  "Bash WebFetch WebSearch Agent Task Monitor",
-  "Read Edit Write Glob Grep NotebookEdit",
-  "Skill Workflow ReportFindings ScheduleWakeup SendMessage PushNotification",
-  "RemoteTrigger EnterWorktree ExitWorktree",
-  "CronCreate CronDelete CronList",
-  "TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate",
-].join(" ");
 
 export interface ChatDependencies {
   db: Database;

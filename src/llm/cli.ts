@@ -27,6 +27,16 @@ export interface CliProcess {
   closed: Promise<number | null>;
 }
 
+// Built-in CLI tools a data assistant never needs; each attempt would only burn a step
+export const DISALLOWED_CLI_TOOLS = [
+  "Bash WebFetch WebSearch Agent Task Monitor",
+  "Read Edit Write Glob Grep NotebookEdit",
+  "Skill Workflow ReportFindings ScheduleWakeup SendMessage PushNotification",
+  "RemoteTrigger EnterWorktree ExitWorktree",
+  "CronCreate CronDelete CronList",
+  "TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate",
+].join(" ");
+
 const KILL_GRACE_MS = 5_000;
 
 // Only what the CLI needs to run and find its own login; nothing else of the server reaches it
