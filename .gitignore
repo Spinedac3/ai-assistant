@@ -19,3 +19,6 @@ Thumbs.db
 
 # Working files of the SDD flow (run logs, drafts)
 _local/
+
+# Keys and secrets are files, never committed
+secrets/
