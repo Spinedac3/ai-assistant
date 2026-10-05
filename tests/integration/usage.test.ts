@@ -136,6 +136,7 @@ describe("usage", () => {
       { key: "hugo", role: "temporal" },
       { key: "ivan", role: null },
       { key: "juan", role: null },
+      { key: "viejo", role: null, isService: true, deletedAt: new Date() },
     ];
     for (const person of people) {
       const [row] = await database.db
@@ -172,6 +173,11 @@ describe("usage", () => {
     await call(ids.ana ?? 0, "search", "trial", ago(5));
     // Gabi only builds tools: no question in the chat, but she is not inactive and she costs
     await converse(ids.gabi ?? 0, [{ at: ago(6), cost: 2_000, tokens: 20 }], "pedidos");
+    await call(ids.gabi ?? 0, "search", "trial", ago(6));
+    // Two people and a system use this one: still too few people to name it
+    await call(ids.ana ?? 0, "fetch", "chat", ago(9));
+    await call(ids.carla ?? 0, "fetch", "chat", ago(2));
+    await call(ids.app ?? 0, "fetch", "chat", ago(1));
     // Carla works from an external client, and an agent of hers runs once
     await call(ids.carla ?? 0, "search", "mcp", ago(2));
     await call(ids.carla ?? 0, "search", "mcp", ago(3), { success: false });
@@ -181,6 +187,8 @@ describe("usage", () => {
     const systemAnswer = await converse(ids.app ?? 0, [{ at: ago(1), cost: 7_000, tokens: 700 }]);
     // On a day of its own, which a system alone never puts in the days of people
     await call(ids.app ?? 0, "search", "mcp", ago(24 * 5));
+    // A system deleted since, whose spend in the window must still show
+    await converse(ids.viejo ?? 0, [{ at: ago(3), cost: 3_000, tokens: 30 }]);
     await database.db.insert(messageRatings).values([
       { messageId: answer, userId: ids.ana ?? 0, stars: 4, createdAt: ago(9) },
       { messageId: answer + 2, userId: ids.ana ?? 0, stars: 2, createdAt: ago(8) },
@@ -220,7 +228,7 @@ describe("usage", () => {
     const report = await usageReport(database.db, 30, ZONE, NOW);
 
     // Performs assertions.
-    expect(report.byChannel).toEqual({ chat: 2, mcp: 3, runs: 1, trials: 2, apps: 2 });
+    expect(report.byChannel).toEqual({ chat: 2, mcp: 3, runs: 1, trials: 2, apps: 3 });
     expect(report.totals).toEqual({
       activePeople: 3,
       questions: 2,
@@ -245,7 +253,7 @@ describe("usage", () => {
         mcpCalls: 3,
         trials: 0,
         runs: 1,
-        toolCalls: 4,
+        toolCalls: 5,
         costUsd: 0,
         tokens: 0,
         lastActivity: ago(2).toISOString(),
@@ -259,7 +267,7 @@ describe("usage", () => {
         mcpCalls: 0,
         trials: 1,
         runs: 0,
-        toolCalls: 2,
+        toolCalls: 3,
         costUsd: 0.003,
         tokens: 160,
         lastActivity: ago(5).toISOString(),
@@ -273,7 +281,7 @@ describe("usage", () => {
         mcpCalls: 0,
         trials: 1,
         runs: 0,
-        toolCalls: 0,
+        toolCalls: 1,
         costUsd: 0.002,
         tokens: 20,
         lastActivity: ago(6).toISOString(),
@@ -292,15 +300,24 @@ describe("usage", () => {
         costUsd: 0.007,
         tokens: 700,
       },
+      {
+        userId: ids.viejo,
+        name: "viejo",
+        email: "viejo@example.com",
+        events: 1,
+        costUsd: 0.003,
+        tokens: 30,
+      },
     ]);
     expect(report.byRole).toEqual([
       { role: "user", activePeople: 2, questions: 2, mcpCalls: 0 },
       { role: "admin", activePeople: 1, questions: 0, mcpCalls: 3 },
     ]);
-    // Search was used by three people; calculate only by Ana, so its name is not shown
+    // Search was used by three people; calculate only by Ana and fetch by two people and a system,
+    // so their names are not shown
     expect(report.byTool).toEqual([
-      { tool: "search", calls: 6, errors: 1, avgMs: 100, truncated: 1 },
-      { tool: null, calls: 1, errors: 0, avgMs: 100, truncated: 0 },
+      { tool: "search", calls: 7, errors: 1, avgMs: 100, truncated: 1 },
+      { tool: null, calls: 4, errors: 0, avgMs: 100, truncated: 0 },
     ]);
     expect(report.byDay).toEqual([
       { day: "2026-03-08", questions: 1, mcpCalls: 0 },
@@ -368,6 +385,6 @@ describe("usage", () => {
     ]);
     // A system is never an inactive person, and it is still in sight among the services
     expect(after.inactive.map((person) => person.name)).toEqual(["dora", "juan"]);
-    expect(after.services.map((service) => service.name)).toEqual(["app", "beto"]);
+    expect(after.services.map((service) => service.name)).toEqual(["app", "beto", "viejo"]);
   });
 });

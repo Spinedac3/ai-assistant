@@ -6,7 +6,8 @@ export type Channel = "chat" | "mcp" | "runs" | "trials" | "apps";
 export const CHANNELS: readonly Channel[] = ["chat", "mcp", "runs", "trials", "apps"];
 
 // A tool used by fewer people than this in the window is shown only in a shared row: with one or
-// two users its name alone would tell what a given person asked about
+// two users its name alone would tell what a given person asked about. Systems are not people
+// and do not count toward it
 export const MIN_PEOPLE_PER_TOOL = 3;
 
 export interface PeriodTotals {
@@ -39,7 +40,8 @@ export interface UsageReport {
     tokens: number;
     lastActivity: string | null;
   }[];
-  // Every account marked as a system, active or not, so the mark never hides anything
+  // Every account marked as a system, and a deleted one that still did something in the window,
+  // so the mark never hides anything
   services: {
     userId: number;
     name: string;
@@ -118,7 +120,11 @@ function spendBetween(from: Date, to: Date) {
  *
  * @return  The totals
  */
-async function totalsBetween(db: Database, from: Date, to: Date): Promise<PeriodTotals> {
+async function totalsBetween(
+  db: Pick<Database, "execute">,
+  from: Date,
+  to: Date,
+): Promise<PeriodTotals> {
   const result = await db.execute(sql`
     with events as (${eventsBetween(from, to)}), spend as (${spendBetween(from, to)})
     select
@@ -144,7 +150,7 @@ async function totalsBetween(db: Database, from: Date, to: Date): Promise<Period
  * The window is the last days counted back from now, so its first and last calendar days are
  * partial
  *
- * @param   db        Own database
+ * @param   database  Own database
  * @param   days      Length of the window
  * @param   timeZone  Zone where days are cut
  * @param   now       End of the window
@@ -152,7 +158,7 @@ async function totalsBetween(db: Database, from: Date, to: Date): Promise<Period
  * @return  The report
  */
 export async function usageReport(
-  db: Database,
+  database: Database,
   days: number,
   timeZone: string,
   now: Date = new Date(),
@@ -169,14 +175,18 @@ export async function usageReport(
     where not u.is_service`;
 
   const [totals, previous, channels, persons, services, roles, tools, daily, inactive, ratings] =
-    await Promise.all([
-      totalsBetween(db, from, now),
-      totalsBetween(db, before, from),
-      db.execute(sql`
+    // One read-only snapshot on one connection: the parts agree with each other whatever is
+    // being written meanwhile, and a long window never takes the pool from the chat
+    await database.transaction(
+      (db) =>
+        Promise.all([
+          totalsBetween(db, from, now),
+          totalsBetween(db, before, from),
+          db.execute(sql`
         with events as (${events})
         select channel, count(*)::int as total from events group by channel`),
-      // Everyone who did something of their own or caused a cost, so the rows add up to the totals
-      db.execute(sql`
+          // Everyone who did something of their own or caused a cost, so the rows add up to the totals
+          db.execute(sql`
         with events as (${events}), spend as (${spend}),
         tools as (
           select user_id, count(*)::int as calls from tool_calls
@@ -203,16 +213,17 @@ export async function usageReport(
         left join tools t on t.user_id = p.id
         where a.user_id is not null or s.user_id is not null
         order by coalesce(a.questions, 0) + coalesce(a.mcp, 0) desc, p.id`),
-      db.execute(sql`
+          db.execute(sql`
         with events as (${events}), spend as (${spend})
         select u.id, u.display_name, u.email,
           (select count(*) from events e where e.user_id = u.id)::int as events,
           coalesce(s.cost, 0)::bigint as cost, coalesce(s.tokens, 0)::bigint as tokens
         from users u
         left join spend s on s.user_id = u.id
-        where u.is_service and u.deleted_at is null
+        where u.is_service
+          and (u.deleted_at is null or s.user_id is not null or exists (select 1 from events e where e.user_id = u.id))
         order by u.display_name, u.id`),
-      db.execute(sql`
+          db.execute(sql`
         with events as (${events}), people as (${people})
         select p.role,
           count(distinct p.id)::int as people,
@@ -222,14 +233,16 @@ export async function usageReport(
         join events e on e.user_id = p.id and e.channel <> 'apps'
         group by p.role
         order by people desc, p.role`),
-      db.execute(sql`
+          db.execute(sql`
         with calls as (
           select * from tool_calls where created_at >= ${from} and created_at < ${now}
         ),
         used as (
           select w.*, u.users from calls w
           join (
-            select tool_name, count(distinct user_id) as users from calls group by tool_name
+            select c.tool_name, count(distinct c.user_id) filter (where not u.is_service) as users
+            from calls c join users u on u.id = c.user_id
+            group by c.tool_name
           ) u using (tool_name)
         )
         select case when users >= ${MIN_PEOPLE_PER_TOOL} then tool_name end as tool,
@@ -240,7 +253,7 @@ export async function usageReport(
         from used
         group by 1
         order by tool nulls last, calls desc`),
-      db.execute(sql`
+          db.execute(sql`
         with events as (${events})
         select to_char(created_at at time zone ${timeZone}, 'YYYY-MM-DD') as day,
           count(*) filter (where channel = 'chat')::int as questions,
@@ -249,9 +262,9 @@ export async function usageReport(
         where channel in ('chat', 'mcp')
         group by day
         order by day`),
-      // People who may chat, by their role or an extra scope in force at the end of the window,
-      // and did nothing of their own in it
-      db.execute(sql`
+          // People who may chat, by their role or an extra scope in force at the end of the window,
+          // and did nothing of their own in it
+          db.execute(sql`
         with events as (${events}), people as (${people}),
         allowed as (
           select u.id from users u
@@ -269,12 +282,14 @@ export async function usageReport(
         where p.id in (select id from allowed)
           and not exists (select 1 from events e where e.user_id = p.id and e.channel <> 'apps')
         order by p.display_name, p.id`),
-      db.execute(sql`
+          db.execute(sql`
         select count(*)::int as total, avg(mr.stars)::float as average
         from message_ratings mr
         join users u on u.id = mr.user_id and not u.is_service
         where mr.created_at >= ${from} and mr.created_at < ${now}`),
-    ]);
+        ]),
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
 
   const byChannel = Object.fromEntries(CHANNELS.map((channel) => [channel, 0])) as Record<
     Channel,
