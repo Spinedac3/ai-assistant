@@ -285,3 +285,23 @@ export const oauthClients = pgTable(
   },
   (t) => [uniqueIndex("oauth_clients_client_id_unique").on(t.clientId)],
 );
+
+// Uploaded documents waiting to be indexed, and what happened to each
+export const documentJobs = pgTable(
+  "document_jobs",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    docCode: varchar("doc_code", { length: 100 }).notNull(),
+    kind: varchar("kind", { length: 10, enum: ["upload", "reindex"] }).notNull(),
+    status: varchar("status", { length: 10, enum: ["queued", "running", "done", "failed"] })
+      .notNull()
+      .default("queued"),
+    chunks: integer("chunks"),
+    error: text("error"),
+    userId: integer("user_id").notNull(),
+    startedAt: timestamptz("started_at"),
+    finishedAt: timestamptz("finished_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("document_jobs_status_idx").on(t.status, t.createdAt)],
+);

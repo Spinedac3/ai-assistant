@@ -16,11 +16,18 @@ const SCOPES = [
     description: "Ver el uso del asistente y lo que se pregunta",
     sensitive: true,
   },
+  {
+    code: "docs.manage",
+    description: "Subir, reindexar y borrar documentos",
+    sensitive: true,
+  },
+  // Each area of documents is one of these; the admin creates the rest as needed
+  { code: "docs.general.read", description: "Leer los documentos generales", sensitive: false },
 ];
 
 const ROLES = [
   { code: "admin", description: "Administrador", scopes: SCOPES.map((scope) => scope.code) },
-  { code: "user", description: "Usuario", scopes: ["chat.use"] },
+  { code: "user", description: "Usuario", scopes: ["chat.use", "docs.general.read"] },
 ];
 
 /**
