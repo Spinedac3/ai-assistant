@@ -1,5 +1,6 @@
 name: ai-assistant
 
+# Ports bind to this machine only: Solr and MinIO have no login of their own here
 services:
   postgres:
     image: pgvector/pgvector:pg17
@@ -8,7 +9,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-assistant}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-assistant}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +25,7 @@ services:
       precreate-core docs_historical /var/solr/data/configsets/docs &&
       exec solr-foreground"
     ports:
-      - "8983:8983"
+      - "127.0.0.1:8983:8983"
     volumes:
       - solr-data:/var/solr
       - ./docker/solr/docs:/var/solr/data/configsets/docs:ro
@@ -32,7 +33,7 @@ services:
   embed:
     build: ./docker/embed
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
 
   minio:
     # MinIO stopped publishing community images; this one is built from the same source
@@ -42,8 +43,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-assistant}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-assistant-secret}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - minio-data:/data
 
@@ -55,7 +56,7 @@ services:
       POSTGRES_USER: demo
       POSTGRES_PASSWORD: demo
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - demo-data:/var/lib/postgresql/data
 

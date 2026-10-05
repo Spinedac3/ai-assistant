@@ -157,13 +157,14 @@ export function buildMcpServer(
       });
 
       return {
-        // ChatGPT reads search and fetch as plain JSON; documents are curated by docs.manage holders
-        // and hidden characters are already removed
+        // ChatGPT reads its direct search and fetch calls as plain JSON; documents are curated by
+        // docs.manage holders and hidden characters are already removed. Any other path keeps the
+        // untrusted-data wrapper
         content: [
           {
             type: "text",
             text:
-              caller.channel === "external" && DOCUMENT_TOOLS.includes(target)
+              caller.channel === "external" && name === target && DOCUMENT_TOOLS.includes(target)
                 ? outcome.text
                 : asUntrustedData(target, outcome.text),
           },

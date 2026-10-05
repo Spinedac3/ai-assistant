@@ -61,7 +61,7 @@ export class CapabilityRanker {
       if (missing.length > 0) {
         const vectors = await this.embedder.passages(missing, EMBED_TIMEOUT_MS);
         for (const [position, text] of missing.entries()) {
-          this.vectors.set(text, vectors[position] ?? []);
+          this.vectors.set(text, vectors[position] as number[]);
         }
       }
     } catch {

@@ -103,6 +103,7 @@ export function fetchTool(index: Index): Tool {
             type: "string",
             minLength: 1,
             maxLength: 200,
+            pattern: "^\\S+$",
             description: `Passage id as returned by ${SEARCH}.`,
           },
         },

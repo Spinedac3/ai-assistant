@@ -94,6 +94,8 @@ export interface CapabilityHit {
   description: string;
   // Absent for restricted ones: a schema that cannot be called only tempts a doomed call
   parameters_schema?: JsonSchema;
+  // Meaning similarity from 0 to 1 when ranked by meaning, word score otherwise; a restricted
+  // one is always ranked by words
   relevance: number;
   available?: false;
   how_to_get_access?: string;
