@@ -13,7 +13,7 @@ import { findConversation } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
 import { type BaseColumn, describeBase } from "../creator/columns.js";
-import { definitionSchema, TOOL_NAME } from "../creator/definition.js";
+import { baseSchema, definitionSchema, TOOL_NAME } from "../creator/definition.js";
 import { guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
 import { checkPasted } from "../creator/pasted.js";
 import {
@@ -34,7 +34,7 @@ import {
 import type { Database } from "../db/client.js";
 import { conversations, messages, toolDefinitions } from "../db/schema.js";
 import { removeHiddenDeep } from "../lib/hiddenText.js";
-import { oneAtATime } from "../lib/oneAtATime.js";
+import { isRunning, oneAtATime } from "../lib/oneAtATime.js";
 import { cliToolName } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
@@ -58,10 +58,24 @@ const GUIDE_SAMPLES = 5;
 
 // Checks read the base several times; each read gets the time a slow report would
 const CHECK_LIMITS = { timeoutMs: 60_000, maxRows: 200_000 };
+// Naming the columns reads no row, so anything longer is a base that will not answer
+const DESCRIBE_LIMITS = { timeoutMs: 15_000, maxRows: 1 };
+// Said whenever a name cannot be used, so it never tells whether a tool of another source exists
+const NAME_TAKEN = {
+  ok: false,
+  error: "name_taken",
+  message: "Ya hay una herramienta con ese nombre; usa otro",
+};
 
 const nameParams = z.object({ name: z.string().regex(TOOL_NAME) });
+const describeBody = z.object({ source: z.string().regex(SOURCE_CODE), base: baseSchema }).strict();
 const saveBody = z
-  .object({ source: z.string().regex(SOURCE_CODE), definition: z.unknown() })
+  .object({
+    source: z.string().regex(SOURCE_CODE),
+    definition: z.unknown(),
+    // A new tool never replaces an existing one of the same name
+    create: z.boolean().default(false),
+  })
   .strict();
 const runBody = z.object({ args: z.record(z.string(), z.unknown()).default({}) }).strict();
 const guideBody = z.object({ question: z.string().trim().min(1).max(2_000).optional() }).strict();
@@ -110,12 +124,9 @@ export default async function toolsRoutes(
       reply.code(404).send({ ok: false, error: "tool_not_found" });
       return null;
     }
+    // A tool over a source the caller may not use does not exist for them, so its name is not told
     if (!request.authUser?.scopes.has(sourceScope(found.tool.sourceCode))) {
-      reply.code(403).send({
-        ok: false,
-        error: "source_not_allowed",
-        message: "No tienes el permiso de la fuente de esta herramienta",
-      });
+      reply.code(404).send({ ok: false, error: "tool_not_found" });
       return null;
     }
 
@@ -207,6 +218,64 @@ export default async function toolsRoutes(
     };
   });
 
+  // The columns of a base before anything is saved, so a person picks them instead of typing them
+  app.post("/admin/tools/describe", guard, async (request, reply) => {
+    const body = describeBody.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "invalid_body", message: body.error.issues[0]?.message });
+    }
+    const { source, base } = body.data;
+    if (!request.authUser?.scopes.has(sourceScope(source))) {
+      return reply.code(403).send({
+        ok: false,
+        error: "source_not_allowed",
+        message: "No tienes el permiso de esa fuente",
+      });
+    }
+    const connection = await connectionFor(db, options.secrets, source);
+    if (!connection) {
+      return reply
+        .code(404)
+        .send({ ok: false, error: "source_not_found", message: "Esa fuente ya no existe" });
+    }
+    // One reading of a source's columns at a time; a person who clicks again is told to wait
+    // instead of queueing reads that block the checks of everyone else
+    const key = `describe:${source}`;
+    if (isRunning(key)) {
+      return reply.code(429).send({
+        ok: false,
+        error: "busy",
+        message: "Ya se están leyendo columnas de esa fuente; espera un momento",
+      });
+    }
+    let pasted: string | null = null;
+    if (base.kind === "query") {
+      const checked = checkPasted(base.sql, connection.info.engine);
+      if (!checked.ok) {
+        return reply
+          .code(400)
+          .send({ ok: false, error: "invalid_query", message: checked.message });
+      }
+      pasted = checked.sql;
+    }
+    try {
+      // Reads no row: the source only says which columns the base has
+      const columns = await oneAtATime(key, () =>
+        describeBase(connection.info, base, pasted, DESCRIBE_LIMITS),
+      );
+      return { ok: true, data: { columns } };
+    } catch (error) {
+      request.log.warn({ err: error, source }, "base could not be described");
+      return reply.code(400).send({
+        ok: false,
+        error: "base_unreadable",
+        message: "No se pudo leer esa base en la fuente; revisa la tabla o la consulta",
+      });
+    }
+  });
+
   // Saving a published tool turns it back into a draft until it passes its checks again
   app.put("/admin/tools/:name", guard, async (request, reply) => {
     const { name } = nameParams.parse(request.params);
@@ -244,12 +313,8 @@ export default async function toolsRoutes(
     }
     // A tool moves to another source only by being made again over it
     const existing = await findDefinition(db, name);
-    if (existing && existing.tool.sourceCode !== source) {
-      return reply.code(409).send({
-        ok: false,
-        error: "source_changed",
-        message: "La herramienta ya existe sobre otra fuente; bórrala o usa otro nombre",
-      });
+    if (existing && (body.data.create || existing.tool.sourceCode !== source)) {
+      return reply.code(409).send(NAME_TAKEN);
     }
 
     const connection = await connectionFor(db, options.secrets, source);

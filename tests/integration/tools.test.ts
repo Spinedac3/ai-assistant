@@ -281,7 +281,7 @@ describe("tool creator", () => {
     expect(before).toBe(true);
     expect(edited.body.data.status).toBe("draft");
     expect(after).toBe(false);
-    expect(moved).toMatchObject({ status: 409, body: { error: "source_changed" } });
+    expect(moved).toMatchObject({ status: 409, body: { error: "name_taken" } });
   });
 
   it("keeps every tool of a source away from someone who manages tools but not that source", async () => {
@@ -299,8 +299,81 @@ describe("tool creator", () => {
     await api("DELETE", url);
 
     // Performs assertions.
-    expect(calls.map((call) => call.status)).toEqual([403, 403, 403, 403, 403]);
+    // Over a source they may not use, the tool does not exist for them
+    expect(calls.map((call) => call.status)).toEqual([404, 404, 404, 404, 404]);
     expect(listed.body.data).toEqual([]);
+  });
+
+  it("tells the columns of a base before anything is saved, only over a source the person may use", async () => {
+    // Performs the test.
+    const source = `demo-${available[0]}`;
+    const before = await api("GET", "/admin/tools");
+    const table = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "table", name: "entregas" },
+    });
+    const pasted = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "query", sql: "select ruta, count(*) as total from entregas group by ruta" },
+    });
+    const ordered = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "query", sql: "select * from entregas order by ruta" },
+    });
+    const missing = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "table", name: "no_existe" },
+    });
+    const foreign = await api(
+      "POST",
+      "/admin/tools/describe",
+      { source, base: { kind: "table", name: "entregas" } },
+      managerToken,
+    );
+    const after = await api("GET", "/admin/tools");
+
+    // Performs assertions.
+    expect(table.body.data.columns).toEqual(
+      expect.arrayContaining([
+        { name: "ruta", kind: "text" },
+        { name: "entregado_en", kind: "datetime" },
+        { name: "a_tiempo", kind: "boolean" },
+      ]),
+    );
+    expect(pasted.body.data.columns.map((column: { name: string }) => column.name)).toEqual([
+      "ruta",
+      "total",
+    ]);
+    expect(ordered.body).toMatchObject({ error: "invalid_query" });
+    expect(missing.body).toMatchObject({ error: "base_unreadable" });
+    expect(foreign.status).toBe(403);
+    // Nothing was saved
+    expect(after.body.data).toEqual(before.body.data);
+  });
+
+  it("never lets a new tool replace one of the same name, nor tells of one on another source", async () => {
+    // Performs the test.
+    const url = "/admin/tools/entregas_unicas";
+    const first = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: deliveries,
+      create: true,
+    });
+    const again = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: deliveries,
+      create: true,
+    });
+    const edited = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: deliveries,
+    });
+    await api("DELETE", url);
+
+    // Performs assertions.
+    expect(first.status).toBe(200);
+    expect(again).toMatchObject({ status: 409, body: { error: "name_taken" } });
+    expect(edited.status).toBe(200);
   });
 
   it("publishes only the version that was checked, never one saved in the meantime", async () => {
@@ -362,6 +435,6 @@ describe("tool creator", () => {
     expect(prompt).toContain("¿Qué más le pongo?");
     expect(saved.status).toBe(200);
     expect(failed).toMatchObject({ status: 502, body: { error: "guide_failed" } });
-    expect(notAllowed.status).toBe(403);
+    expect(notAllowed.status).toBe(404);
   });
 });

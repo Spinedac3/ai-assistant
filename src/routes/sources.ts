@@ -52,6 +52,16 @@ export default async function sourcesRoutes(
       });
     }
 
+    // Registering never replaces a source by accident; only changing one does
+    const replace = (request.body as { replace?: unknown } | null)?.replace === true;
+    if (!replace && (await listSources(db)).some((source) => source.code === parsed.data.code)) {
+      return reply.code(409).send({
+        ok: false,
+        error: "source_exists",
+        message: `Ya hay una fuente ${parsed.data.code}; cámbiala desde la lista o usa otro código`,
+      });
+    }
+
     const verification = await verifySource(connectionOf(parsed.data));
     if (!verification.ok) {
       if (verification.error === "connection_failed") {

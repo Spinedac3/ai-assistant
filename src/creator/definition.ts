@@ -55,14 +55,17 @@ export const AGGREGATES = ["sum", "count", "avg", "min", "max"] as const;
 
 const aliasName = z.string().regex(/^[a-z][a-z0-9_]{0,62}$/, "minúsculas, números y guion bajo");
 
+// What a tool reads: a table or view, or a query a person pastes
+export const baseSchema = z.discriminatedUnion("kind", [
+  // A table or a view: both are read the same way
+  z.object({ kind: z.literal("table"), name: relationName }).strict(),
+  // A query a person pastes is a few thousand characters; it travels to the source on every call
+  z.object({ kind: z.literal("query"), sql: z.string().trim().min(1).max(100_000) }).strict(),
+]);
+
 export const definitionSchema = z
   .object({
-    base: z.discriminatedUnion("kind", [
-      // A table or a view: both are read the same way
-      z.object({ kind: z.literal("table"), name: relationName }).strict(),
-      // A query a person pastes is a few thousand characters; it travels to the source on every call
-      z.object({ kind: z.literal("query"), sql: z.string().trim().min(1).max(100_000) }).strict(),
-    ]),
+    base: baseSchema,
     columns: z
       .array(z.object({ name: columnName, label: z.string().trim().min(1).optional() }).strict())
       .min(1),

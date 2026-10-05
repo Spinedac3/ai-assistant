@@ -1,7 +1,16 @@
 import { Box, Flex, IconButton, Menu, Portal, Stack, Text } from "@chakra-ui/react";
 import { useTheme } from "next-themes";
 import type { IconType } from "react-icons";
-import { FiFileText, FiLogOut, FiMessageSquare, FiMoon, FiSun, FiUser } from "react-icons/fi";
+import {
+  FiDatabase,
+  FiFileText,
+  FiLogOut,
+  FiMessageSquare,
+  FiMoon,
+  FiSun,
+  FiTool,
+  FiUser,
+} from "react-icons/fi";
 import { NavLink, Outlet, useMatches } from "react-router";
 import { can, setSession, useSession } from "../api/session";
 
@@ -16,6 +25,8 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: "/chat", label: "Chat", icon: FiMessageSquare, scope: "chat.use" },
   { to: "/documentos", label: "Documentos", icon: FiFileText, scope: "chat.use" },
+  { to: "/herramientas", label: "Herramientas", icon: FiTool, scope: "tools.manage" },
+  { to: "/fuentes", label: "Fuentes", icon: FiDatabase, scope: "sources.manage" },
 ];
 
 /**

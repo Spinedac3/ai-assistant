@@ -180,6 +180,27 @@ describe("sources", () => {
     expect(response.statusCode).toBe(403);
   });
 
+  it("registers a code once, and replaces it only when asked to", async () => {
+    // Performs the test.
+    await register("unica", DEMO.postgres.reader);
+    const again = await register("unica", DEMO.postgres.reader);
+    const replaced = await app.inject({
+      method: "POST",
+      url: "/admin/sources",
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { code: "unica", name: "Otra", ...DEMO.postgres.reader, replace: true },
+    });
+    await app.inject({
+      method: "DELETE",
+      url: "/admin/sources/unica",
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+
+    // Performs assertions.
+    expect(again.json()).toMatchObject({ error: "source_exists" });
+    expect(replaced.statusCode).toBe(201);
+  });
+
   it("tests and deletes a registered source", async () => {
     // Performs the test.
     const headers = { authorization: `Bearer ${adminToken}` };

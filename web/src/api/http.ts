@@ -5,6 +5,8 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly code: string,
+    // What else the server said, such as the checks that failed
+    readonly details?: unknown,
   ) {
     super(message);
   }
@@ -69,7 +71,12 @@ export async function api<T>(
   } | null;
 
   if (!response.ok || !payload?.ok) {
-    throw new ApiError(payload?.message ?? FALLBACK, response.status, payload?.error ?? "unknown");
+    throw new ApiError(
+      payload?.message ?? FALLBACK,
+      response.status,
+      payload?.error ?? "unknown",
+      payload,
+    );
   }
 
   return payload.data as T;

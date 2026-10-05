@@ -2,6 +2,17 @@
 const running = new Map<string, Promise<unknown>>();
 
 /**
+ * Tells whether some work for a key is running or waiting
+ *
+ * @param   key  What the work is about
+ *
+ * @return  Whether there is any
+ */
+export function isRunning(key: string): boolean {
+  return running.has(key);
+}
+
+/**
  * Runs some work after the work already running for the same key, so two calls for one thing
  * never overlap; calls for other keys run alongside
  *
