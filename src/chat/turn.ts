@@ -4,6 +4,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
 import { type CliCommand, cliArgs, launchCli } from "../llm/cli.js";
 import { MCP_SERVER } from "../mcp/names.js";
+import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
 import { readSetting } from "../settings.js";
 import { holdTurn } from "./conversationLock.js";
 import {
@@ -26,7 +27,14 @@ import {
 import { calendar, chatInstructions, type PromptSettings } from "./prompt.js";
 import { type RateLimits, recordTokens, refundMessage, reserveMessage } from "./rateLimit.js";
 import { redactSecrets } from "./redact.js";
-import { addMessage, createConversation, findConversation, latestMessages } from "./repository.js";
+import {
+  addMessage,
+  createConversation,
+  findConversation,
+  lastToolCallId,
+  latestMessages,
+  toolsRunAfter,
+} from "./repository.js";
 import { installSourceGate } from "./sourceGate.js";
 
 // Enough to find a capability, run it and answer
@@ -145,6 +153,8 @@ async function* runCli(
       maxTurns: MAX_TURNS,
       continueSession,
       mcpConfigPath: join(workspace, ".mcp.json"),
+      // With tools, the CLI may call only what the chat catalog offers
+      ...(deps.mcpConfig ? { allowedTools: CHAT_CLI_ALLOWED } : {}),
       disallowedTools: DISALLOWED_CLI_TOOLS,
     }),
     prompt,
@@ -356,6 +366,9 @@ export async function* chatTurn(
       );
     }
 
+    // Calls of this turn are those after the last one stored before it
+    const callsBefore = await lastToolCallId(db, conversation);
+
     if (deps.mcpConfig) {
       releaseMcp = await deps.mcpConfig(workspace, user.id, conversation);
     } else {
@@ -446,7 +459,11 @@ export async function* chatTurn(
           // Without a measurement the cap simply does not apply next turn
         }
 
-        const stored = sealSources(finalAnswer(answer), executed);
+        // The server's own record says what ran; without the server, the CLI trace is all there is
+        const sources = deps.mcpConfig
+          ? await toolsRunAfter(db, conversation, callsBefore)
+          : executed;
+        const stored = sealSources(finalAnswer(answer), sources);
         const assistantMessageId = await addMessage(db, {
           conversationId: conversation,
           role: "assistant",

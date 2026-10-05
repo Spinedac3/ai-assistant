@@ -1,6 +1,6 @@
-import { and, desc, eq, ilike, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, ilike, isNull, sql } from "drizzle-orm";
 import type { Database } from "../db/client.js";
-import { conversations, messageRatings, messages } from "../db/schema.js";
+import { conversations, messageRatings, messages, toolCalls } from "../db/schema.js";
 
 export interface NewMessage {
   conversationId: number;
@@ -232,4 +232,50 @@ export async function rateMessage(
     });
 
   return true;
+}
+
+/**
+ * Gives the id of the last tool call recorded in a conversation, as a marker before a turn
+ *
+ * @param   db              Own database
+ * @param   conversationId  Conversation
+ *
+ * @return  The id, or zero when there is none
+ */
+export async function lastToolCallId(db: Database, conversationId: number): Promise<number> {
+  const [row] = await db
+    .select({ id: sql<number>`coalesce(max(${toolCalls.id}), 0)` })
+    .from(toolCalls)
+    .where(eq(toolCalls.conversationId, conversationId));
+
+  return Number(row?.id ?? 0);
+}
+
+/**
+ * Lists the tools that ran successfully in a conversation after a marker, in order
+ *
+ * @param   db              Own database
+ * @param   conversationId  Conversation
+ * @param   afterId         Marker taken before the turn
+ *
+ * @return  The tool names
+ */
+export async function toolsRunAfter(
+  db: Database,
+  conversationId: number,
+  afterId: number,
+): Promise<string[]> {
+  const rows = await db
+    .select({ toolName: toolCalls.toolName })
+    .from(toolCalls)
+    .where(
+      and(
+        eq(toolCalls.conversationId, conversationId),
+        gt(toolCalls.id, afterId),
+        eq(toolCalls.success, true),
+      ),
+    )
+    .orderBy(toolCalls.id);
+
+  return rows.map((row) => row.toolName);
 }
