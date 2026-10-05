@@ -63,6 +63,9 @@ describe("tool definition", () => {
     expect(
       problems({ base: { kind: "table", name: "t" }, columns: [{ name: "a\nb" }] }),
     ).not.toEqual([]);
+    expect(
+      problems({ base: { kind: "table", name: "t" }, columns: [{ name: "ruta‮" }] }),
+    ).not.toEqual([]);
   });
 
   it("refuses a definition that does not hold together", () => {

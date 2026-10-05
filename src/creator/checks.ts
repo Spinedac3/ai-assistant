@@ -22,8 +22,8 @@ export interface CheckResult {
 
 export interface Runner {
   run(spec: ToolDefinitionSpec, args: Record<string, unknown>): Promise<Row[]>;
-  // Rows with a value in every one of the columns
-  sample(columns: string[]): Promise<Row[]>;
+  // Rows with a value in every one of the columns, or any rows when filled is false
+  sample(columns: string[], filled?: boolean): Promise<Row[]>;
 }
 
 // Enough values to find one for every filter without reading the whole base
@@ -54,8 +54,8 @@ export function runnerFor(
       const query = buildQuery(spec, info.engine, pasted, args, kinds);
       return normalizeRows(await runQuery(info, query.sql, query.params, limits));
     },
-    sample: async (columns) => {
-      const sql = sampleQuery(base, info.engine, pasted, columns, SAMPLE_ROWS);
+    sample: async (columns, filled = true) => {
+      const sql = sampleQuery(base, info.engine, pasted, columns, SAMPLE_ROWS, filled);
       return normalizeRows(await runQuery(info, sql, [], limits));
     },
   };

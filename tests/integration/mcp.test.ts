@@ -384,4 +384,46 @@ describe("mcp", () => {
     expect(latest?.kind).toBe("run");
     expect(latest?.revokedAt).toEqual(expect.any(Date));
   });
+
+  it("lets a trial token reach a draft only it carries, audited apart from real use", async () => {
+    // Performs the test.
+    const draft = {
+      definition: {
+        name: "borrador_pedidos",
+        description: "Counts orders, still a draft.",
+        inputSchema: { type: "object" as const, additionalProperties: false },
+        requiredScopes: [],
+        readOnly: true,
+      },
+      execute: async () => ({ ok: true as const, data: { pedidos: 3 } }),
+    };
+    const shared = new ToolRegistry(database.db);
+    shared.register(calculateTool);
+    const catalog = shared.with(draft);
+    const own = new ToolRegistry(database.db);
+    own.register(draft);
+    const trial = await mintRunToken(database.db, userId, 5, {
+      tools: ["borrador_pedidos"],
+      registry: own,
+      trial: true,
+    });
+    const plain = await mintRunToken(database.db, userId, 5, { tools: ["borrador_pedidos"] });
+    const listed = (await rpc(trial, "tools/list")).json().result.tools;
+    const result = await call(trial, "borrador_pedidos", {});
+    const unreachable = (await rpc(plain, "tools/list")).json().result.tools;
+    const [audit] = await database.db
+      .select()
+      .from(toolCalls)
+      .where(eq(toolCalls.toolName, "borrador_pedidos"));
+    await revokeRunToken(database.db, trial);
+    await revokeRunToken(database.db, plain);
+
+    // Performs assertions.
+    expect(listed.map((tool: { name: string }) => tool.name)).toEqual(["borrador_pedidos"]);
+    expect(result.structuredContent).toEqual({ pedidos: 3 });
+    expect(unreachable).toEqual([]);
+    expect(audit?.origin).toBe("trial");
+    expect(catalog.has("borrador_pedidos") && catalog.has("calculate")).toBe(true);
+    expect(shared.has("borrador_pedidos")).toBe(false);
+  });
 });

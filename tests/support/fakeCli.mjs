@@ -45,9 +45,32 @@ for (const step of run.steps ?? []) {
       type: "assistant",
       message: { content: [{ type: "tool_use", id: step.id, name: step.tool, input: step.input ?? {} }] },
     });
+    // A step marked mcp really calls the server of the turn's .mcp.json, as the real CLI would
+    let content;
+    let failed = step.ok === false;
+    if (step.mcp) {
+      const server = Object.values(JSON.parse(readFileSync(".mcp.json", "utf8")).mcpServers)[0];
+      const response = await fetch(server.url, {
+        method: "POST",
+        headers: {
+          ...server.headers,
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: step.tool.replace(/^mcp__[^_]+__/, ""), arguments: step.input ?? {} },
+        }),
+      });
+      const result = (await response.json()).result ?? {};
+      content = result.content ?? [];
+      failed = result.isError === true;
+    }
     emit({
       type: "user",
-      message: { content: [{ type: "tool_result", tool_use_id: step.id, is_error: step.ok === false }] },
+      message: { content: [{ type: "tool_result", tool_use_id: step.id, is_error: failed, content }] },
     });
   }
 }

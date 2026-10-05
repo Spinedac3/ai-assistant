@@ -176,6 +176,29 @@ export class ToolRegistry {
   }
 
   /**
+   * Copies the registry with one more tool, or a new version of one, leaving this one untouched
+   *
+   * @param   tool  Tool the copy adds
+   *
+   * @return  The copy
+   */
+  with(tool: Tool): ToolRegistry {
+    const copy = new ToolRegistry(this.db);
+    copy.logger = this.logger;
+    copy.exports = this.exports;
+    for (const [name, existing] of this.tools) {
+      copy.tools.set(name, existing);
+      const validators = this.validators.get(name);
+      if (validators) {
+        copy.validators.set(name, validators);
+      }
+    }
+    copy.replace(tool);
+
+    return copy;
+  }
+
+  /**
    * Takes a tool out, so no path can call it from then on
    *
    * @param   name  Tool name

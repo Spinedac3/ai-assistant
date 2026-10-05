@@ -19,6 +19,8 @@ export interface ArgvOptions {
   continueSession?: boolean;
   allowedTools?: string;
   disallowedTools: string;
+  // Built-in tools the model may use; an empty list leaves it none
+  tools?: string;
 }
 
 export interface CliProcess {
@@ -26,6 +28,17 @@ export interface CliProcess {
   events: AsyncGenerator<Record<string, unknown>, void>;
   closed: Promise<number | null>;
 }
+
+// Built-in CLI tools a data assistant never needs; each attempt would only burn a step
+export const DISALLOWED_CLI_TOOLS = [
+  "Bash WebFetch WebSearch Agent Task Monitor",
+  "Read Edit Write Glob Grep NotebookEdit",
+  "Skill Workflow ReportFindings ScheduleWakeup SendMessage PushNotification",
+  "RemoteTrigger EnterWorktree ExitWorktree",
+  "PowerShell LSP TodoWrite NotebookRead ExitPlanMode",
+  "CronCreate CronDelete CronList",
+  "TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate",
+].join(" ");
 
 const KILL_GRACE_MS = 5_000;
 
@@ -96,6 +109,7 @@ export function cliArgs(options: ArgvOptions): string[] {
     ...(options.allowedTools !== undefined ? ["--allowedTools", options.allowedTools] : []),
     "--disallowedTools",
     options.disallowedTools,
+    ...(options.tools !== undefined ? ["--tools", options.tools] : []),
   ];
 }
 

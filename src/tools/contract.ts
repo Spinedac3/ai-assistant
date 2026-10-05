@@ -1,7 +1,8 @@
 export type JsonSchema = Record<string, unknown> & { type: "object" };
 
-// Which path ran a call: the web chat, an external MCP client, or an agent run
-export type ToolOrigin = "chat" | "mcp" | "run";
+// Which path ran a call: the web chat, an external MCP client, an agent run, or a trial of a
+// tool being built
+export type ToolOrigin = "chat" | "mcp" | "run" | "trial";
 
 export interface ToolDefinition {
   name: string;

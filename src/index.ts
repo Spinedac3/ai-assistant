@@ -9,6 +9,7 @@ import { loadEnv } from "./config/env.js";
 import { CreatedTools } from "./creator/store.js";
 import { connectDatabase } from "./db/client.js";
 import { ExportStore } from "./exports/store.js";
+import { askOnce } from "./llm/oneShot.js";
 import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
@@ -47,6 +48,26 @@ const createdTools = new CreatedTools(registry, {
   appTimeZone: env.APP_TIMEZONE,
 });
 
+// The chat's settings, shared by the trial chat of the creator
+const chat = {
+  cli: { bin: env.CLAUDE_BIN },
+  model: env.CHAT_MODEL,
+  // One directory per conversation: it is what lets --continue resume the thread
+  workspacesDir: env.CHAT_WORKSPACES_DIR ?? join(tmpdir(), "ai-assistant-chat"),
+  prompt: {
+    assistantName: env.ASSISTANT_NAME,
+    timeZone: env.APP_TIMEZONE,
+    organizationContext,
+  },
+  limits: {
+    msgsPerHour: env.RATE_LIMIT_MSGS_PER_HOUR,
+    msgsPerDay: env.RATE_LIMIT_MSGS_PER_DAY,
+    tokensPerDay: env.RATE_LIMIT_TOKENS_PER_DAY,
+  },
+};
+// The CLI runs on this host, so it reaches /mcp locally rather than through the public address
+const mcpUrl = `http://127.0.0.1:${env.PORT}/mcp`;
+
 const app = await buildApp({
   db: database.db,
   signer: createTokenSigner(
@@ -56,22 +77,8 @@ const app = await buildApp({
   ),
   systems: loadExternalSystems(env.EXTERNAL_SYSTEMS_FILE),
   chat: {
-    cli: { bin: env.CLAUDE_BIN },
-    model: env.CHAT_MODEL,
-    // One directory per conversation: it is what lets --continue resume the thread
-    workspacesDir: env.CHAT_WORKSPACES_DIR ?? join(tmpdir(), "ai-assistant-chat"),
-    prompt: {
-      assistantName: env.ASSISTANT_NAME,
-      timeZone: env.APP_TIMEZONE,
-      organizationContext,
-    },
-    limits: {
-      msgsPerHour: env.RATE_LIMIT_MSGS_PER_HOUR,
-      msgsPerDay: env.RATE_LIMIT_MSGS_PER_DAY,
-      tokensPerDay: env.RATE_LIMIT_TOKENS_PER_DAY,
-    },
-    // The CLI runs on this host, so it reaches /mcp locally rather than through the public address
-    mcpConfig: chatMcpConfig(database.db, `http://127.0.0.1:${env.PORT}/mcp`),
+    ...chat,
+    mcpConfig: chatMcpConfig(database.db, mcpUrl),
   },
   mcp: {
     registry,
@@ -87,7 +94,22 @@ const app = await buildApp({
   },
   docs: { index, storage },
   sources: { secrets, onSaved: (code, retargeted) => createdTools.sourceChanged(code, retargeted) },
-  tools: { secrets, appTimeZone: env.APP_TIMEZONE, created: createdTools },
+  tools: {
+    secrets,
+    appTimeZone: env.APP_TIMEZONE,
+    created: createdTools,
+    trial: { chat, mcpUrl, registry },
+    // The guide answers with the chat's model, read on each call as the chat reads it
+    ask: async (prompt) =>
+      askOnce(
+        {
+          cli: chat.cli,
+          model: (await readSetting(database.db, "chat.model")) ?? env.CHAT_MODEL,
+          workspacesDir: chat.workspacesDir,
+        },
+        prompt,
+      ),
+  },
   exports: { exports },
   logger: true,
   trustProxy: env.TRUST_PROXY,

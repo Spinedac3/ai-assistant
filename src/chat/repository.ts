@@ -1,6 +1,7 @@
 import { and, desc, eq, gt, ilike, isNull, sql } from "drizzle-orm";
 import type { Database } from "../db/client.js";
 import { conversations, messageRatings, messages, toolCalls } from "../db/schema.js";
+import type { TraceEntry } from "./trace.js";
 
 export interface NewMessage {
   conversationId: number;
@@ -11,6 +12,7 @@ export interface NewMessage {
   costMillionths?: number | null;
   model?: string | null;
   finishReason?: string | null;
+  trace?: TraceEntry[] | null;
 }
 
 export interface StoredMessage {
@@ -28,10 +30,14 @@ export interface StoredMessage {
  *
  * @return  The conversation id
  */
-export async function createConversation(db: Database, userId: number): Promise<number> {
+export async function createConversation(
+  db: Database,
+  userId: number,
+  toolName: string | null = null,
+): Promise<number> {
   const [row] = await db
     .insert(conversations)
-    .values({ userId, createdBy: userId, updatedBy: userId })
+    .values({ userId, toolName, createdBy: userId, updatedBy: userId })
     .returning({ id: conversations.id });
 
   if (!row) {
@@ -50,7 +56,12 @@ export async function createConversation(db: Database, userId: number): Promise<
  *
  * @return  The conversation, or null
  */
-export async function findConversation(db: Database, conversationId: number, userId: number) {
+export async function findConversation(
+  db: Database,
+  conversationId: number,
+  userId: number,
+  toolName: string | null = null,
+) {
   const [row] = await db
     .select()
     .from(conversations)
@@ -59,6 +70,8 @@ export async function findConversation(db: Database, conversationId: number, use
         eq(conversations.id, conversationId),
         eq(conversations.userId, userId),
         isNull(conversations.deletedAt),
+        // A trial belongs to its tool, and the chat has only its own conversations
+        toolName === null ? isNull(conversations.toolName) : eq(conversations.toolName, toolName),
       ),
     )
     .limit(1);
@@ -88,6 +101,7 @@ export function listConversations(db: Database, userId: number, search?: string)
       and(
         eq(conversations.userId, userId),
         isNull(conversations.deletedAt),
+        isNull(conversations.toolName),
         search ? ilike(conversations.title, `%${search}%`) : undefined,
       ),
     )

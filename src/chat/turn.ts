@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
-import { type CliCommand, cliArgs, launchCli } from "../llm/cli.js";
+import { type CliCommand, cliArgs, DISALLOWED_CLI_TOOLS, launchCli } from "../llm/cli.js";
 import { MCP_SERVER } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
 import { readSetting } from "../settings.js";
@@ -36,6 +36,7 @@ import {
   toolsRunAfter,
 } from "./repository.js";
 import { installSourceGate } from "./sourceGate.js";
+import { type TraceEntry, traceCall, traceResult } from "./trace.js";
 
 // Enough to find a capability, run it and answer
 const MAX_TURNS = 12;
@@ -45,16 +46,6 @@ const CONTEXT_CAP_TOKENS = 150_000;
 
 // Every attempt ends by itself, which is what lets the conversation lock wait without a limit
 const ATTEMPT_TIMEOUT_MS = 300_000;
-
-// Built-in CLI tools a data assistant never needs; each attempt would only burn a step
-export const DISALLOWED_CLI_TOOLS = [
-  "Bash WebFetch WebSearch Agent Task Monitor",
-  "Read Edit Write Glob Grep NotebookEdit",
-  "Skill Workflow ReportFindings ScheduleWakeup SendMessage PushNotification",
-  "RemoteTrigger EnterWorktree ExitWorktree",
-  "CronCreate CronDelete CronList",
-  "TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate",
-].join(" ");
 
 export interface ChatDependencies {
   db: Database;
@@ -70,6 +61,8 @@ export interface ChatDependencies {
     userId: number,
     conversationId: number,
   ) => Promise<() => Promise<void>>;
+  // A trial of a tool being built: its own conversations, the tools it may call, and a trace
+  trial?: { toolName: string; allowedTools: string };
 }
 
 export interface ChatUser {
@@ -145,6 +138,7 @@ async function* runCli(
   prompt: string,
   continueSession: boolean,
   abortSignal?: AbortSignal,
+  trace?: TraceEntry[],
 ): AsyncGenerator<TurnEvent, CliOutcome> {
   const cli = launchCli(
     deps.cli,
@@ -153,8 +147,8 @@ async function* runCli(
       maxTurns: MAX_TURNS,
       continueSession,
       mcpConfigPath: join(workspace, ".mcp.json"),
-      // With tools, the CLI may call only what the chat catalog offers
-      ...(deps.mcpConfig ? { allowedTools: CHAT_CLI_ALLOWED } : {}),
+      // With tools, the CLI may call only what the chat catalog, or the trial, offers
+      ...(deps.mcpConfig ? { allowedTools: deps.trial?.allowedTools ?? CHAT_CLI_ALLOWED } : {}),
       disallowedTools: DISALLOWED_CLI_TOOLS,
     }),
     prompt,
@@ -223,6 +217,7 @@ async function* runCli(
             String(block.name ?? ""),
             (block.input ?? {}) as Record<string, unknown>,
           );
+          trace?.push(traceCall(block.id, name, block.input));
           yield { toolPending: { id: block.id, name } };
         }
       }
@@ -237,6 +232,9 @@ async function* runCli(
         Record<string, unknown>
       >) {
         if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+          if (trace) {
+            traceResult(trace, block.tool_use_id, block.content, block.is_error !== true);
+          }
           yield { toolResult: { id: block.tool_use_id, ok: block.is_error !== true } };
         }
       }
@@ -299,8 +297,13 @@ export async function* chatTurn(
   const reservation = await reserveMessage(db, user.id, deps.limits, timeZone);
 
   const content = redactSecrets(rawContent);
-  const owned = conversationId ? await findConversation(db, conversationId, user.id) : null;
-  const conversation = owned?.id ?? (await createConversation(db, user.id));
+  const toolName = deps.trial?.toolName ?? null;
+  const owned = conversationId
+    ? await findConversation(db, conversationId, user.id, toolName)
+    : null;
+  const conversation = owned?.id ?? (await createConversation(db, user.id, toolName));
+  // A trial keeps what each call received and returned, to show it to whoever builds the tool
+  const trace: TraceEntry[] | undefined = deps.trial ? [] : undefined;
   const releaseTurn = await holdTurn(String(conversation), abortSignal);
 
   if (!releaseTurn) {
@@ -373,6 +376,8 @@ export async function* chatTurn(
     }
 
     for (let attempt = 0; attempt < 2; attempt++) {
+      // A discarded attempt's calls are not what answered; only the last attempt's are shown
+      trace?.splice(0);
       // Both retries start a new session: a silent turn means the resumed one went bad
       const resume = attempt === 0 && !freshSession && !resetByContext;
       const names = new Map<string, string>();
@@ -386,7 +391,7 @@ export async function* chatTurn(
       ]);
       // Sources are what ran in this attempt; a discarded attempt's tools must not be credited
       const callsBefore = await lastToolCallId(db, conversation);
-      const run = runCli(deps, model, workspace, prompt, resume, attemptSignal);
+      const run = runCli(deps, model, workspace, prompt, resume, attemptSignal, trace);
       let step = await run.next();
 
       while (!step.done) {
@@ -472,6 +477,7 @@ export async function* chatTurn(
           costMillionths: spent.measured ? spent.costMillionths : null,
           model: outcome.model,
           finishReason: outcome.ok ? "stop" : "error",
+          trace: trace ?? null,
         });
 
         yield {

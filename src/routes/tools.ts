@@ -1,10 +1,20 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
-import { type CheckResult, runChecks, runnerFor } from "../creator/checks.js";
+import { chatMcpConfig } from "../chat/mcpConfig.js";
+import {
+  RateLimitExceededError,
+  type Reservation,
+  refundMessage,
+  reserveMessage,
+} from "../chat/rateLimit.js";
+import { findConversation } from "../chat/repository.js";
+import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
+import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
 import { type BaseColumn, describeBase } from "../creator/columns.js";
-import { definitionSchema, TOOL_NAME, type ToolDefinitionSpec } from "../creator/definition.js";
+import { definitionSchema, TOOL_NAME } from "../creator/definition.js";
+import { guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
 import { checkPasted } from "../creator/pasted.js";
 import {
   type CreatedTools,
@@ -22,15 +32,29 @@ import {
   toolFrom,
 } from "../creator/tool.js";
 import type { Database } from "../db/client.js";
-import { toolDefinitions } from "../db/schema.js";
+import { conversations, messages, toolDefinitions } from "../db/schema.js";
+import { removeHiddenDeep } from "../lib/hiddenText.js";
 import { oneAtATime } from "../lib/oneAtATime.js";
+import { cliToolName } from "../mcp/names.js";
+import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
 import { ToolRegistry } from "../tools/registry.js";
 
 export interface ToolsRoutesOptions extends CreatedToolDependencies {
   db: Database;
   created: CreatedTools;
+  // Asks the model one question with no tools; without it the guide is off
+  ask?: (prompt: string) => Promise<string>;
+  // What a trial chat needs: the chat's own settings, this server's /mcp, and the shared tools
+  trial?: {
+    chat: Omit<ChatDependencies, "db" | "logger" | "mcpConfig" | "trial">;
+    mcpUrl: string;
+    registry: ToolRegistry;
+  };
 }
+
+// Values per column the guide sees, enough to tell what a column holds
+const GUIDE_SAMPLES = 5;
 
 // Checks read the base several times; each read gets the time a slow report would
 const CHECK_LIMITS = { timeoutMs: 60_000, maxRows: 200_000 };
@@ -40,28 +64,19 @@ const saveBody = z
   .object({ source: z.string().regex(SOURCE_CODE), definition: z.unknown() })
   .strict();
 const runBody = z.object({ args: z.record(z.string(), z.unknown()).default({}) }).strict();
-
-/**
- * Lists the columns a definition names that its base does not have
- *
- * @param   spec     Definition
- * @param   columns  Columns of the base
- *
- * @return  The missing names
- */
-function unknownColumns(spec: ToolDefinitionSpec, columns: BaseColumn[]): string[] {
-  const names = new Set(columns.map((column) => column.name));
-  const used = [
-    ...spec.columns.map((column) => column.name),
-    ...spec.filters.map((filter) => filter.column),
-    ...(spec.summary?.group_by ?? []),
-    ...(spec.summary?.aggregates ?? []).flatMap((aggregate) =>
-      aggregate.column ? [aggregate.column] : [],
-    ),
-  ];
-
-  return [...new Set(used.filter((name) => !names.has(name)))];
-}
+const guideBody = z.object({ question: z.string().trim().min(1).max(2_000).optional() }).strict();
+const trialBody = z
+  .object({
+    message: z.string().trim().min(1).max(20_000),
+    conversation_id: z.number().int().positive().optional(),
+    // Only this tool, called directly, or the whole catalog with this tool in it
+    scope: z.enum(["tool", "catalog"]).default("tool"),
+  })
+  .strict();
+const trialParams = z.object({
+  name: z.string().regex(TOOL_NAME),
+  id: z.coerce.number().int().positive(),
+});
 
 /**
  * Registers the creator: tools defined over a registered source, saved as drafts, checked, tried
@@ -108,21 +123,21 @@ export default async function toolsRoutes(
   };
 
   /**
-   * Runs the checks of a stored definition against its source
+   * Builds the runner that reads a stored tool's source as the tool would
    *
    * @param   tool  Stored definition
    *
-   * @return  The results, or why the source could not be reached
+   * @return  The runner, or why the source cannot be read
    */
-  const check = async (tool: StoredTool): Promise<CheckResult[]> => {
+  const runnerOf = async (tool: StoredTool): Promise<Runner | string> => {
     const source = await connectionFor(db, options.secrets, tool.sourceCode);
     if (!source) {
-      return [{ name: "runs", ok: false, detail: "La fuente ya no existe" }];
+      return "La fuente ya no existe";
     }
     const pasted =
       tool.spec.base.kind === "query" ? checkPasted(tool.spec.base.sql, source.info.engine) : null;
     if (pasted && !pasted.ok) {
-      return [{ name: "runs", ok: false, detail: pasted.message }];
+      return pasted.message;
     }
 
     const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
@@ -130,13 +145,25 @@ export default async function toolsRoutes(
       ...CHECK_LIMITS,
       timeZone: tool.spec.time_zone ?? source.timeZone ?? options.appTimeZone,
     };
+
+    return runnerFor(source.info, tool.spec.base, pasted?.sql ?? null, limits, kinds);
+  };
+
+  /**
+   * Runs the checks of a stored definition against its source
+   *
+   * @param   tool  Stored definition
+   *
+   * @return  The results, or why the source could not be reached
+   */
+  const check = async (tool: StoredTool): Promise<CheckResult[]> => {
+    const runner = await runnerOf(tool);
+    if (typeof runner === "string") {
+      return [{ name: "runs", ok: false, detail: runner }];
+    }
+
     // Checks read the source several times; one set at a time per source keeps it answering
-    return oneAtATime(`checks:${tool.sourceCode}`, () =>
-      runChecks(
-        shapeOf(tool),
-        runnerFor(source.info, tool.spec.base, pasted?.sql ?? null, limits, kinds),
-      ),
-    );
+    return oneAtATime(`checks:${tool.sourceCode}`, () => runChecks(shapeOf(tool), runner));
   };
 
   app.get("/admin/tools", guard, async (request) => {
@@ -196,7 +223,8 @@ export default async function toolsRoutes(
         message: `${name} es una herramienta propia del asistente; usa otro nombre`,
       });
     }
-    const parsed = definitionSchema.safeParse(body.data.definition);
+    // Its texts become the description every model reads, so nothing hidden may stay in them
+    const parsed = definitionSchema.safeParse(removeHiddenDeep(body.data.definition));
     if (!parsed.success) {
       return reply.code(400).send({
         ok: false,
@@ -277,6 +305,257 @@ export default async function toolsRoutes(
       ok: true,
       data: { name, status: stored.status, columns, checks: await check(stored) },
     };
+  });
+
+  // The guide only suggests: each chip is a whole definition the person saves with the usual PUT
+  app.post("/admin/tools/:name/guide", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+    const ask = options.ask;
+    if (!ask) {
+      return reply
+        .code(503)
+        .send({ ok: false, error: "guide_off", message: "La guía no está disponible" });
+    }
+    const body = guideBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: "invalid_body" });
+    }
+    const runner = await runnerOf(found.tool);
+    if (typeof runner === "string") {
+      return reply.code(400).send({ ok: false, error: "source_unreadable", message: runner });
+    }
+
+    const tool = found.tool;
+    const userId = request.authUser?.id;
+    let reservation: Reservation | null = null;
+    try {
+      // A call to the model counts as a message of the person, like a chat turn
+      const limits = options.trial?.chat.limits;
+      if (limits && userId !== undefined) {
+        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
+      }
+      const valuesOf = (rows: Record<string, unknown>[], column: string) => [
+        ...new Set(
+          rows
+            .map((row) => row[column])
+            .filter((value) => value != null)
+            .map((value) => (value instanceof Date ? value.toISOString() : String(value))),
+        ),
+      ];
+      // One read of a few rows, whatever the number of columns, so the source is not held long;
+      // only a column empty in those rows is read again on its own
+      const samples = await oneAtATime(`checks:${tool.sourceCode}`, async () => {
+        const rows = await runner.sample(
+          tool.columns.map((column) => column.name),
+          false,
+        );
+        const found: Record<string, string[]> = {};
+        for (const column of tool.columns) {
+          found[column.name] = valuesOf(rows, column.name);
+          if (found[column.name]?.length === 0) {
+            found[column.name] = valuesOf(await runner.sample([column.name], true), column.name);
+          }
+          found[column.name] = found[column.name]?.slice(0, GUIDE_SAMPLES) ?? [];
+        }
+        return found;
+      });
+      const input = {
+        spec: tool.spec,
+        columns: tool.columns,
+        samples,
+        question: body.data.question,
+      };
+
+      const read = readGuide(await ask(guidePrompt(input)), input);
+      if (read.dropped > 0) {
+        request.log.info({ tool: tool.name, dropped: read.dropped }, "guide chips dropped");
+      }
+
+      return { ok: true, data: read };
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
+      }
+      // The person did not get an answer, so the message is theirs again
+      if (reservation && userId !== undefined) {
+        await refundMessage(db, userId, reservation).catch(() => undefined);
+      }
+      request.log.warn({ err: error, tool: tool.name }, "tool guide failed");
+      return reply.code(502).send({
+        ok: false,
+        error: "guide_failed",
+        message: "La guía no pudo responder ahora; vuelve a intentarlo",
+      });
+    }
+  });
+
+  // A chat through the real MCP path, where only this person can reach the draft
+  app.post("/admin/tools/:name/chat", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+    const trial = options.trial;
+    const user = request.authUser;
+    if (!trial || !user) {
+      return reply
+        .code(503)
+        .send({ ok: false, error: "trial_off", message: "El chat de prueba no está disponible" });
+    }
+    const body = trialBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: "invalid_body" });
+    }
+    const conversationId = body.data.conversation_id ?? null;
+    // A trial goes on only in a conversation of this tool and this person
+    if (
+      conversationId !== null &&
+      !(await findConversation(db, conversationId, user.id, found.tool.name))
+    ) {
+      return reply.code(404).send({ ok: false, error: "conversation_not_found" });
+    }
+    const readable = await runnerOf(found.tool);
+    if (typeof readable === "string") {
+      return reply.code(400).send({ ok: false, error: "source_unreadable", message: readable });
+    }
+
+    const { tool, zone } = found;
+    let tools: ToolRegistry;
+    try {
+      tools = trial.registry.with(toolFrom(shapeOf(tool), options, zone));
+    } catch (error) {
+      request.log.warn({ err: error, tool: tool.name }, "trial tool could not be built");
+      return reply.code(400).send({
+        ok: false,
+        error: "invalid_definition",
+        message: "La herramienta no se pudo armar; vuelve a guardarla",
+      });
+    }
+    const only = body.data.scope === "tool";
+    const deps: ChatDependencies = {
+      ...trial.chat,
+      db,
+      logger: request.log,
+      mcpConfig: chatMcpConfig(db, trial.mcpUrl, {
+        tools: only ? [tool.name] : null,
+        registry: tools,
+        trial: true,
+      }),
+      trial: {
+        toolName: tool.name,
+        allowedTools: only ? cliToolName(tool.name) : CHAT_CLI_ALLOWED,
+      },
+    };
+
+    let done: Extract<ChatEvent, { type: "done" }> | null = null;
+    // A person who leaves stops the CLI, as in the chat
+    const controller = new AbortController();
+    const onClose = () => {
+      if (!reply.raw.writableFinished) {
+        controller.abort();
+      }
+    };
+    reply.raw.on("close", onClose);
+    try {
+      for await (const event of chatTurn(
+        deps,
+        { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
+        body.data.message,
+        conversationId,
+        controller.signal,
+      )) {
+        if (event.type === "done") {
+          done = event;
+        }
+      }
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
+      }
+      request.log.error({ err: error, tool: tool.name }, "trial chat failed");
+      return reply
+        .code(502)
+        .send({ ok: false, error: "trial_failed", message: "El chat de prueba no respondió" });
+    } finally {
+      reply.raw.off("close", onClose);
+    }
+    if (!done) {
+      return reply
+        .code(502)
+        .send({ ok: false, error: "trial_failed", message: "El chat de prueba no respondió" });
+    }
+
+    const [stored] = await db
+      .select({ trace: messages.trace })
+      .from(messages)
+      .where(eq(messages.id, done.assistantMessageId));
+
+    return {
+      ok: true,
+      data: {
+        conversation_id: done.conversationId,
+        answer: done.text,
+        trace: stored?.trace ?? [],
+        usage: done.usage,
+      },
+    };
+  });
+
+  app.get("/admin/tools/:name/chats", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+
+    const rows = await db
+      .select({ id: conversations.id, lastMessageAt: conversations.lastMessageAt })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.toolName, found.tool.name),
+          eq(conversations.userId, request.authUser?.id ?? 0),
+          isNull(conversations.deletedAt),
+        ),
+      )
+      .orderBy(desc(conversations.lastMessageAt));
+
+    return {
+      ok: true,
+      data: rows.map((row) => ({ id: row.id, last_message_at: row.lastMessageAt })),
+    };
+  });
+
+  app.get("/admin/tools/:name/chats/:id", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+    const params = trialParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ ok: false, error: "invalid_id" });
+    }
+    const { id } = params.data;
+    const conversation = await findConversation(db, id, request.authUser?.id ?? 0, found.tool.name);
+    if (!conversation) {
+      return reply.code(404).send({ ok: false, error: "conversation_not_found" });
+    }
+
+    const rows = await db
+      .select({
+        id: messages.id,
+        role: messages.role,
+        content: messages.content,
+        trace: messages.trace,
+        createdAt: messages.createdAt,
+      })
+      .from(messages)
+      .where(eq(messages.conversationId, id))
+      .orderBy(messages.id);
+
+    return { ok: true, data: rows.map((row) => ({ ...row, trace: row.trace ?? [] })) };
   });
 
   app.post("/admin/tools/:name/check", guard, async (request, reply) => {
