@@ -74,6 +74,39 @@ const config = defineConfig({
   globalCss: {
     "html, body": { bg: "bg.canvas", color: "fg", fontFeatureSettings: "'cv11'" },
     "::selection": { bg: "brand.200" },
+    // Answers come as markdown; the reset leaves them unstyled
+    ".markdown": { lineHeight: "1.65" },
+    ".markdown > * + *": { marginTop: "0.75em" },
+    ".markdown h1, .markdown h2, .markdown h3": { fontFamily: "heading", fontWeight: "semibold" },
+    ".markdown h1": { fontSize: "lg" },
+    ".markdown h2": { fontSize: "md" },
+    ".markdown ul, .markdown ol": { paddingInlineStart: "1.4em" },
+    ".markdown ul": { listStyleType: "disc" },
+    ".markdown ol": { listStyleType: "decimal" },
+    ".markdown a": { color: "brand.fg", textDecoration: "underline" },
+    ".markdown code": {
+      fontFamily: "mono",
+      fontSize: "0.9em",
+      bg: "bg.muted",
+      px: "1",
+      rounded: "sm",
+    },
+    ".markdown pre": { bg: "bg.muted", p: "3", rounded: "md", overflowX: "auto" },
+    ".markdown table": {
+      borderCollapse: "collapse",
+      fontSize: "sm",
+      display: "block",
+      overflowX: "auto",
+    },
+    ".markdown th, .markdown td": {
+      borderWidth: "1px",
+      borderColor: "border",
+      px: "2",
+      py: "1",
+      textAlign: "left",
+    },
+    ".markdown th": { bg: "bg.subtle", fontWeight: "semibold" },
+    ".markdown td": { fontVariantNumeric: "tabular-nums" },
     "*": {
       _motionReduce: {
         animationDuration: "0.01ms !important",
