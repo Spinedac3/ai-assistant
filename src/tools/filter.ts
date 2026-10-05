@@ -18,15 +18,34 @@ const OPS = [
 ] as const;
 type Op = (typeof OPS)[number];
 
+const isEmpty = (value: unknown): boolean =>
+  value === null || value === undefined || (typeof value === "string" && value.trim() === "");
+
+// A condition without the value its operator needs would compare against nothing and quietly
+// match no row, which reads as a true zero
+const conditionSchema = z
+  .object({ field: z.string().min(1), op: z.enum(OPS), value: z.unknown().optional() })
+  .strict()
+  .refine(
+    ({ op, value }) => {
+      if (op === "empty" || op === "not_empty") {
+        return true;
+      }
+      if (op === "between") {
+        return Array.isArray(value) && value.length === 2 && !value.some(isEmpty);
+      }
+      if (op === "in") {
+        return Array.isArray(value) && value.length > 0;
+      }
+
+      return !isEmpty(value) && !Array.isArray(value);
+    },
+    { message: "between lleva [desde, hasta]; in, una lista; los demás, un valor" },
+  );
+
 const filterSchema = z
   .object({
-    where: z
-      .array(
-        z
-          .object({ field: z.string().min(1), op: z.enum(OPS), value: z.unknown().optional() })
-          .strict(),
-      )
-      .optional(),
+    where: z.array(conditionSchema).optional(),
     count_by: z.array(z.string().min(1)).optional(),
     sum: z.array(z.string().min(1)).optional(),
     list: z.string().min(1).optional(),
@@ -69,109 +88,139 @@ export function takeFilter(args: Record<string, unknown>): FilterRequest {
   }
 
   const parsed = filterSchema.safeParse(value);
+  if (parsed.success) {
+    return { filter: parsed.data, args: rest };
+  }
 
-  return parsed.success
-    ? { filter: parsed.data, args: rest }
-    : { error: `${FILTER_PARAM} no tiene la forma esperada: ${FILTER_SHAPE}`, args: rest };
+  const problems = parsed.error.issues.map((issue) => issue.message).join("; ");
+
+  return {
+    error: `${FILTER_PARAM} no tiene la forma esperada (${problems}): ${FILTER_SHAPE}`,
+    args: rest,
+  };
+}
+
+interface Normal {
+  number: number | null;
+  text: string;
 }
 
 const isRow = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
-const isEmpty = (value: unknown): boolean =>
-  value === null || value === undefined || (typeof value === "string" && value.trim() === "");
-const asText = (value: unknown): string =>
-  String(value).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
-const asNumber = (value: unknown): number | null =>
-  typeof value === "number"
-    ? value
-    : typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value.trim())
-      ? Number(value)
-      : null;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+// A leading zero marks a code, not a quantity: 0123 and 123 are different employees
+const NUMERIC = /^-?(0|[1-9]\d*)(\.\d+)?$/;
 
 /**
- * Orders a cell against a value: numbers as numbers, text without accents or case, and a cell
- * with a time against a bare date by its day
+ * Reads a value the way every comparison sees it: a number when it is one, and text without
+ * accents or case otherwise
  *
- * @param   cell   Row value
- * @param   value  Value asked for
+ * @param   value  Cell or asked value
+ *
+ * @return  Its number and its text
+ */
+function normal(value: unknown): Normal {
+  const number =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && NUMERIC.test(value.trim())
+        ? Number(value)
+        : null;
+
+  return {
+    number,
+    text: String(value).normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim(),
+  };
+}
+
+/**
+ * Names a value for equality and grouping, so 7 and "7" or "Bodega" and "bodega" are one
+ *
+ * @param   value  Normalized value
+ * @param   day    Whether only the day of a date counts
+ *
+ * @return  The key
+ */
+function keyOf(value: Normal, day = false): string {
+  return value.number !== null
+    ? `n:${value.number}`
+    : `t:${day ? value.text.slice(0, 10) : value.text}`;
+}
+
+/**
+ * Orders a cell against a value: numbers as numbers, text as text, and a cell with a time
+ * against a bare date by its day
+ *
+ * @param   cell  Normalized cell
+ * @param   want  Normalized asked value
  *
  * @return  Negative, zero or positive
  */
-function compare(cell: unknown, value: unknown): number {
-  const left = asNumber(cell);
-  const right = asNumber(value);
-  if (left !== null && right !== null) {
-    return left - right;
+function compare(cell: Normal, want: Normal): number {
+  if (cell.number !== null && want.number !== null) {
+    return cell.number - want.number;
   }
 
-  const wanted = asText(value);
-  const found = DATE_ONLY.test(wanted) ? asText(cell).slice(0, 10) : asText(cell);
+  const found = DATE_ONLY.test(want.text) ? cell.text.slice(0, 10) : cell.text;
 
-  return found < wanted ? -1 : found > wanted ? 1 : 0;
+  return found < want.text ? -1 : found > want.text ? 1 : 0;
 }
 
 /**
- * Tells whether a cell meets one condition; an empty cell meets none but the emptiness checks
+ * Turns a condition into a test of one cell, normalizing the asked values once and not per row
  *
- * @param   cell   Row value
  * @param   op     Operator
  * @param   value  Value asked for
  *
- * @return  Whether it meets it
+ * @return  Whether a normalized cell meets it
  */
-function meets(cell: unknown, op: Op, value: unknown): boolean {
-  if (op === "empty") {
-    return isEmpty(cell);
-  }
-  if (op === "not_empty") {
-    return !isEmpty(cell);
-  }
-  if (isEmpty(cell)) {
-    return false;
-  }
+function testFor(op: Op, value: unknown): (cell: Normal) => boolean {
+  const want = normal(value);
+  const values = (Array.isArray(value) ? value : [value]).map(normal);
 
-  const values = Array.isArray(value) ? value : [value];
   switch (op) {
     case "=":
-      return compare(cell, value) === 0;
+      return (cell) => compare(cell, want) === 0;
     case "!=":
-      return compare(cell, value) !== 0;
+      return (cell) => compare(cell, want) !== 0;
     case ">":
-      return compare(cell, value) > 0;
+      return (cell) => compare(cell, want) > 0;
     case ">=":
-      return compare(cell, value) >= 0;
+      return (cell) => compare(cell, want) >= 0;
     case "<":
-      return compare(cell, value) < 0;
+      return (cell) => compare(cell, want) < 0;
     case "<=":
-      return compare(cell, value) <= 0;
-    case "between":
-      return compare(cell, values[0]) >= 0 && compare(cell, values[1]) <= 0;
+      return (cell) => compare(cell, want) <= 0;
+    case "between": {
+      const [low, high] = values as [Normal, Normal];
+      return (cell) => compare(cell, low) >= 0 && compare(cell, high) <= 0;
+    }
     case "contains":
-      return asText(cell).includes(asText(value));
-    case "in":
-      return values.some((item) => compare(cell, item) === 0);
+      return (cell) => cell.text.includes(want.text);
+    case "in": {
+      const keys = new Set(values.map((item) => keyOf(item)));
+      const byDay = values.some((item) => DATE_ONLY.test(item.text));
+      return (cell) => keys.has(keyOf(cell)) || (byDay && keys.has(keyOf(cell, true)));
+    }
+    case "empty":
+    case "not_empty":
+      return () => true;
   }
 }
 
 /**
- * Finds the list a filter works on: the one asked for, or the heaviest
+ * Lists the lists of rows in a result, heaviest first; a list of plain values has no columns
  *
- * @param   data   Tool result
- * @param   asked  List named by the model
+ * @param   data  Tool result
  *
- * @return  The list name, or null when the result has none
+ * @return  Their names
  */
-function listOf(data: Record<string, unknown>, asked?: string): string | null {
-  if (asked && Array.isArray(data[asked])) {
-    return asked;
-  }
-
-  const lists = Object.entries(data).filter((entry) => Array.isArray(entry[1]));
-  const weight = (value: unknown) => JSON.stringify(value).length;
-  lists.sort((a, b) => weight(b[1]) - weight(a[1]));
-
-  return lists[0]?.[0] ?? null;
+function rowLists(data: Record<string, unknown>): string[] {
+  return Object.entries(data)
+    .filter(([, value]) => Array.isArray(value) && value.every(isRow))
+    .map(([name, value]) => ({ name, weight: JSON.stringify(value).length }))
+    .sort((a, b) => b.weight - a.weight)
+    .map((entry) => entry.name);
 }
 
 /**
@@ -181,9 +230,9 @@ function listOf(data: Record<string, unknown>, asked?: string): string | null {
  *
  * @return  Column names in the order they first appear
  */
-function columnsOf(rows: readonly unknown[]): string[] {
+function columnsOf(rows: readonly Record<string, unknown>[]): string[] {
   const columns = new Set<string>();
-  for (const row of rows.filter(isRow)) {
+  for (const row of rows) {
     for (const [key, value] of Object.entries(row)) {
       if (value === null || typeof value !== "object") {
         columns.add(key);
@@ -205,8 +254,8 @@ function columnsOf(rows: readonly unknown[]): string[] {
 export function filterable(
   data: Record<string, unknown>,
 ): { list: string; columns: string[] } | null {
-  const list = listOf(data);
-  const columns = list ? columnsOf(data[list] as unknown[]) : [];
+  const [list] = rowLists(data);
+  const columns = list ? columnsOf(data[list] as Record<string, unknown>[]) : [];
 
   return list && columns.length > 0 ? { list, columns } : null;
 }
@@ -239,12 +288,19 @@ export type Filtered = { ok: true; data: Record<string, unknown> } | { ok: false
  * @return  The result with only the matching rows, or why the filter does not apply
  */
 export function applyFilter(data: Record<string, unknown>, filter: RowFilter): Filtered {
-  const list = listOf(data, filter.list);
-  if (!list) {
-    return { ok: false, message: "Este resultado no tiene una lista que filtrar." };
+  const lists = rowLists(data);
+  const list = filter.list ?? lists[0];
+  if (!list || !lists.includes(list)) {
+    return {
+      ok: false,
+      message:
+        lists.length > 0
+          ? `"${filter.list}" no es una lista de filas de este resultado; usa una de: ${lists.join(", ")}.`
+          : "Este resultado no tiene una lista de filas que filtrar.",
+    };
   }
 
-  const rows = (data[list] as unknown[]).filter(isRow);
+  const rows = data[list] as Record<string, unknown>[];
   const columns = columnsOf(rows);
   const asked = [
     ...(filter.where ?? []).map((condition) => condition.field),
@@ -252,40 +308,58 @@ export function applyFilter(data: Record<string, unknown>, filter: RowFilter): F
     ...(filter.sum ?? []),
   ];
   const unknown = [...new Set(asked.filter((column) => !columns.includes(column)))];
+  // An empty list has no columns to check, and filtering it leaves it empty
   if (rows.length > 0 && unknown.length > 0) {
     return {
       ok: false,
-      message:
-        `"${list}" no tiene la(s) columna(s) ${unknown.join(", ")}. ` +
-        `Usa una de: ${columns.join(", ")}.`,
+      message: `"${list}" no tiene la(s) columna(s) ${unknown.join(", ")}. Usa una de: ${columns.join(", ")}.`,
     };
   }
 
+  const conditions = (filter.where ?? []).map((condition) => ({
+    ...condition,
+    test: testFor(condition.op, condition.value),
+  }));
   // Rows without a value in a compared column are counted, so none drops out unseen
   const withoutValue: Record<string, number> = {};
   const left = rows.filter((row) =>
-    (filter.where ?? []).every((condition) => {
-      if (
-        isEmpty(row[condition.field]) &&
-        condition.op !== "empty" &&
-        condition.op !== "not_empty"
-      ) {
-        withoutValue[condition.field] = (withoutValue[condition.field] ?? 0) + 1;
+    conditions.every(({ field, op, test }) => {
+      const cell = row[field];
+      if (op === "empty") {
+        return isEmpty(cell);
+      }
+      if (op === "not_empty") {
+        return !isEmpty(cell);
+      }
+      if (isEmpty(cell)) {
+        withoutValue[field] = (withoutValue[field] ?? 0) + 1;
+        return false;
       }
 
-      return meets(row[condition.field], condition.op, condition.value);
+      return test(normal(cell));
     }),
   );
 
+  // A value that is not a number is counted, never added as zero to a total that looks complete
   const summed = filter.sum ?? [];
+  const notNumeric: Record<string, number> = {};
   const sums = (group: readonly Record<string, unknown>[]) =>
     Object.fromEntries(
-      summed.map((column) => [
-        column,
-        Math.round(group.reduce((total, row) => total + (asNumber(row[column]) ?? 0), 0) * 100) /
-          100,
-      ]),
+      summed.map((column) => {
+        let total = 0;
+        for (const row of group) {
+          const number = isEmpty(row[column]) ? null : normal(row[column]).number;
+          if (number !== null) {
+            total += number;
+          } else if (!isEmpty(row[column]) && group === left) {
+            notNumeric[column] = (notNumeric[column] ?? 0) + 1;
+          }
+        }
+
+        return [column, Math.round(total * 1e6) / 1e6];
+      }),
     );
+  const totals = sums(left);
 
   let counts: Record<string, unknown>[] | undefined;
   const countBy = filter.count_by ?? [];
@@ -293,14 +367,23 @@ export function applyFilter(data: Record<string, unknown>, filter: RowFilter): F
     const groups = new Map<string, Record<string, unknown>[]>();
     for (const row of left) {
       const key = JSON.stringify(
-        countBy.map((column) => (isEmpty(row[column]) ? null : row[column])),
+        countBy.map((column) => (isEmpty(row[column]) ? null : keyOf(normal(row[column])))),
       );
-      groups.set(key, [...(groups.get(key) ?? []), row]);
+      const group = groups.get(key);
+      if (group) {
+        group.push(row);
+      } else {
+        groups.set(key, [row]);
+      }
     }
-    counts = [...groups.entries()]
-      .map(([key, group]) => ({
+    // Each group shows the value as its first row wrote it
+    counts = [...groups.values()]
+      .map((group) => ({
         ...Object.fromEntries(
-          countBy.map((column, index) => [column, (JSON.parse(key) as unknown[])[index]]),
+          countBy.map((column) => [
+            column,
+            isEmpty(group[0]?.[column]) ? null : group[0]?.[column],
+          ]),
         ),
         filas: group.length,
         ...sums(group),
@@ -308,7 +391,8 @@ export function applyFilter(data: Record<string, unknown>, filter: RowFilter): F
       .sort((a, b) => b.filas - a.filas);
   }
 
-  const noted = Object.keys(withoutValue).length > 0;
+  const missing = Object.keys(withoutValue).length > 0;
+  const odd = Object.keys(notNumeric).length > 0;
 
   return {
     ok: true,
@@ -319,16 +403,20 @@ export function applyFilter(data: Record<string, unknown>, filter: RowFilter): F
         lista: list,
         filas_antes: rows.length,
         filas_despues: left.length,
-        ...(summed.length > 0 ? { sumas: sums(left) } : {}),
-        ...(noted ? { sin_dato: withoutValue } : {}),
+        ...(summed.length > 0 ? { sumas: totals } : {}),
+        ...(missing ? { sin_dato: withoutValue } : {}),
+        ...(odd ? { no_numericas: notNumeric } : {}),
       },
       ...(counts ? { resumen_filtro: counts } : {}),
       nota_filtro:
         `"${list}" quedó filtrada: ${left.length} de ${rows.length} filas. Para contar lo filtrado ` +
         "usa filtro_filas y resumen_filtro; los totales y las otras listas de este resultado son de " +
         "antes del filtro. " +
-        (noted
+        (missing
           ? "sin_dato cuenta las filas sin valor en esa columna, que por eso no entraron: dilo. "
+          : "") +
+        (odd
+          ? "no_numericas cuenta celdas que no son número y no se sumaron: la suma no las incluye, dilo. "
           : "") +
         "Dile a la persona con qué condición filtraste.",
     },

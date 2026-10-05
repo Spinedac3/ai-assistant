@@ -183,4 +183,95 @@ describe("row filter", () => {
     expect(capped.ok && String(capped.data.nota)).toContain(FILTER_PARAM);
     expect(capped.ok && String(capped.data.nota)).toContain("Columnas: codigo, nombre.");
   });
+
+  it("refuses a condition without the value its operator needs", () => {
+    // Performs the test.
+    const refused = [
+      { op: "between", value: 5 },
+      { op: "between", value: ["2026-10-01"] },
+      { op: "between", value: [null, 10] },
+      { op: "=" },
+      { op: "in", value: "Norte" },
+    ].map((condition) =>
+      takeFilter({ [FILTER_PARAM]: { where: [{ field: "monto", ...condition }] } }),
+    );
+    const accepted = takeFilter({ [FILTER_PARAM]: { where: [{ field: "ruta", op: "empty" }] } });
+
+    // Performs assertions.
+    for (const request of refused) {
+      expect("error" in request).toBe(true);
+    }
+    expect("filter" in accepted && accepted.filter).toBeTruthy();
+  });
+
+  it("refuses a list that is missing or holds no rows, and picks a list of rows over plain values", () => {
+    // Performs the test.
+    const data = result({ codigos: Array.from({ length: 500 }, (_, index) => `C${index}`) });
+    const missing = applyFilter(data, { list: "detalle", where: [] });
+    const plain = applyFilter(data, { list: "codigos", where: [] });
+    const chosen = filtered({ where: [{ field: "ruta", op: "empty" }] }, data);
+
+    // Performs assertions.
+    expect(!missing.ok && missing.message).toContain("pedidos");
+    expect(plain.ok).toBe(false);
+    expect(chosen.filtro_filas.lista).toBe("pedidos");
+    expect(filterable(data)?.list).toBe("pedidos");
+  });
+
+  it("keeps codes with a leading zero apart from numbers, and groups as it compares", () => {
+    // Performs the test.
+    const codes = {
+      empleados: [
+        { codigo: "0123", bodega: "Norte" },
+        { codigo: "123", bodega: "norte" },
+        { codigo: 7, bodega: "NORTE" },
+        { codigo: "7", bodega: "Sur" },
+      ],
+    };
+    const exact = applyFilter(codes, { where: [{ field: "codigo", op: "=", value: "0123" }] });
+    const seven = applyFilter(codes, { where: [{ field: "codigo", op: "in", value: [7] }] });
+    const grouped = applyFilter(codes, { count_by: ["bodega"] });
+
+    // Performs assertions.
+    expect(exact.ok && exact.data.empleados).toEqual([{ codigo: "0123", bodega: "Norte" }]);
+    expect(seven.ok && (seven.data.empleados as unknown[]).length).toBe(2);
+    expect(grouped.ok && grouped.data.resumen_filtro).toEqual([
+      { bodega: "Norte", filas: 3 },
+      { bodega: "Sur", filas: 1 },
+    ]);
+  });
+
+  it("counts the cells it could not add instead of adding them as zero", () => {
+    // Performs the test.
+    const data = filtered(
+      { sum: ["monto"] },
+      { pedidos: [{ monto: "1,234.50" }, { monto: 2 }, { monto: "0.001" }, { monto: null }] },
+    );
+
+    // Performs assertions.
+    expect(data.filtro_filas.sumas).toEqual({ monto: 2.001 });
+    expect(data.filtro_filas).toMatchObject({ no_numericas: { monto: 1 } });
+    expect(data.nota_filtro).toContain("no_numericas");
+  });
+
+  it("groups and filters a long list in linear time", () => {
+    // Performs the test.
+    const many = {
+      filas: Array.from({ length: 100_000 }, (_, index) => ({
+        id: index,
+        estado: `E${index % 3}`,
+      })),
+    };
+    const started = Date.now();
+    const outcome = applyFilter(many, {
+      where: [
+        { field: "id", op: "in", value: Array.from({ length: 500 }, (_, index) => index * 2) },
+      ],
+      count_by: ["estado"],
+    });
+
+    // Performs assertions.
+    expect(outcome.ok && (outcome.data.filas as unknown[]).length).toBe(500);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
 });
