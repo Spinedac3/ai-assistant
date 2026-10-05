@@ -16,6 +16,14 @@ const envSchema = z.object({
   JWT_ISSUER: z.string().min(1).default("ai-assistant"),
   JWT_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   EXTERNAL_SYSTEMS_FILE: z.string().min(1).optional(),
+  // Markdown with what the organization is, its vocabulary and what the assistant covers
+  ASSISTANT_CONTEXT_FILE: z.string().min(1).optional(),
+  CLAUDE_BIN: z.string().min(1).default("claude"),
+  CHAT_MODEL: z.string().min(1).default("claude-opus-5-5"),
+  CHAT_WORKSPACES_DIR: z.string().min(1).optional(),
+  RATE_LIMIT_MSGS_PER_HOUR: z.coerce.number().int().positive().default(60),
+  RATE_LIMIT_MSGS_PER_DAY: z.coerce.number().int().positive().default(300),
+  RATE_LIMIT_TOKENS_PER_DAY: z.coerce.number().int().positive().default(2_000_000),
 });
 
 export type Env = z.infer<typeof envSchema>;

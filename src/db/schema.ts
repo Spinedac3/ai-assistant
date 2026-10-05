@@ -131,3 +131,77 @@ export const auditLogs = pgTable(
     index("audit_logs_user_idx").on(t.userId, t.createdAt),
   ],
 );
+
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: integer("user_id").notNull(),
+    title: varchar("title", { length: 200 }),
+    status: varchar("status", { length: 20, enum: ["open", "closed"] })
+      .notNull()
+      .default("open"),
+    msgCount: integer("msg_count").notNull().default(0),
+    lastMessageAt: timestamptz("last_message_at").notNull().defaultNow(),
+    ...auditFields(),
+  },
+  (t) => [index("conversations_user_last_idx").on(t.userId, t.lastMessageAt)],
+);
+
+// Append-only: a conversation is deleted as a whole, its messages are never edited
+export const messages = pgTable(
+  "messages",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    conversationId: bigint("conversation_id", { mode: "number" }).notNull(),
+    role: varchar("role", { length: 20, enum: ["user", "assistant"] }).notNull(),
+    content: text("content").notNull(),
+    tokensIn: integer("tokens_in"),
+    tokensOut: integer("tokens_out"),
+    // Millionths of a dollar, so cost is never a float
+    costMillionths: integer("cost_usd_millionths"),
+    // The model that really answered, which an alias can move without notice
+    model: varchar("model", { length: 60 }),
+    finishReason: varchar("finish_reason", { length: 40 }),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("messages_conversation_idx").on(t.conversationId, t.id)],
+);
+
+export const messageRatings = pgTable(
+  "message_ratings",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    messageId: bigint("message_id", { mode: "number" }).notNull(),
+    userId: integer("user_id").notNull(),
+    stars: integer("stars").notNull(),
+    comment: varchar("comment", { length: 2000 }),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [uniqueIndex("message_ratings_message_user_unique").on(t.messageId, t.userId)],
+);
+
+export const rateLimits = pgTable(
+  "rate_limits",
+  {
+    userId: integer("user_id").notNull(),
+    windowType: varchar("window_type", { length: 10, enum: ["hour", "day"] }).notNull(),
+    windowStart: timestamptz("window_start").notNull(),
+    msgCount: integer("msg_count").notNull().default(0),
+    tokensUsed: integer("tokens_used").notNull().default(0),
+    costMillionths: integer("cost_millionths").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.windowType, t.windowStart] })],
+);
+
+// Settings an administrator changes at runtime, read on every use so no restart is needed
+export const settings = pgTable("settings", {
+  key: varchar("key", { length: 100 }).primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  updatedBy: integer("updated_by"),
+});
