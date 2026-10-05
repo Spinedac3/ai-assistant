@@ -39,7 +39,11 @@ export async function enqueue(
     .values({ docCode, kind, userId })
     .returning({ id: documentJobs.id });
 
-  return row?.id ?? 0;
+  if (!row) {
+    throw new Error("No se pudo encolar el documento");
+  }
+
+  return row.id;
 }
 
 /**
@@ -57,7 +61,7 @@ export async function findJob(db: Database, id: number): Promise<Job | null> {
 }
 
 /**
- * Takes the oldest queued job; two workers never take the same one
+ * Takes the oldest queued job; the claim is atomic, so a job is never started twice
  *
  * @param   db  Own database
  *
@@ -137,19 +141,27 @@ export async function runJob(deps: Omit<WorkerDependencies, "pollMs">, job: Job)
  * Starts the worker that drains the queue, one job at a time
  *
  * The next round is scheduled only after the previous one ends, so a slow document never
- * overlaps with the next poll.
+ * overlaps with the next poll. There is one worker per deployment: at start it fails whatever a
+ * previous process left running.
  *
  * @param   deps  Database, storage, index, logger and poll interval
  *
- * @return  A function that stops it
+ * @return  A function that stops it and resolves once the job in progress ends
  */
-export function startWorker(deps: WorkerDependencies): () => void {
+export function startWorker(deps: WorkerDependencies): () => Promise<void> {
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
+  let current: Promise<void> = Promise.resolve();
 
   const round = async () => {
     try {
-      for (let job = await claimNext(deps.db); job && !stopped; job = await claimNext(deps.db)) {
+      // Checked before each claim, so a stopping worker never takes a job it would abandon
+      while (!stopped) {
+        const job = await claimNext(deps.db);
+        if (!job) {
+          break;
+        }
+
         await runJob(deps, job);
       }
     } catch (error) {
@@ -157,16 +169,19 @@ export function startWorker(deps: WorkerDependencies): () => void {
     }
 
     if (!stopped) {
-      timer = setTimeout(() => void round(), deps.pollMs);
+      timer = setTimeout(() => {
+        current = round();
+      }, deps.pollMs);
     }
   };
 
-  void failInterrupted(deps.db)
+  current = failInterrupted(deps.db)
     .catch((error) => deps.logger.error({ err: error }, "could not fail interrupted jobs"))
     .then(round);
 
-  return () => {
+  return async () => {
     stopped = true;
     clearTimeout(timer);
+    await current;
   };
 }
