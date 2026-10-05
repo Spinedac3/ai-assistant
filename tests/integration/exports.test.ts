@@ -95,7 +95,7 @@ describe("exports", () => {
   it("keeps the chat result small, totals intact, with a link to every row", async () => {
     // Performs the test.
     const result = await runBig("chat");
-    const archived = result.archivo as { url: string; filas: number };
+    const archived = result.archivo as { url: string; filas: Record<string, number> };
     const file = await download(archived.url);
     const [audit] = await database.db.select().from(toolCalls);
 
@@ -103,7 +103,7 @@ describe("exports", () => {
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(40_000);
     expect(result.total_pedidos).toBe(3000);
     expect(result.monto_total).toBe(1234567.89);
-    expect(archived.filas).toBe(3000);
+    expect(archived.filas).toEqual({ pedidos: 3000 });
     expect(String(result.nota)).toContain(archived.url);
     expect(file.statusCode).toBe(200);
     expect(file.headers["content-disposition"]).toMatch(/^attachment; filename="pedidos_del_anio-/);
@@ -162,7 +162,33 @@ describe("exports", () => {
     expect(file).toBe("gone");
   });
 
-  it("sends only the text when a cut result no longer fits its declared shape", async () => {
+  it("keeps the row of a file the storage could not remove, for the next sweep", async () => {
+    // Performs the test.
+    const { url } = (await runBig("chat")).archivo as { url: string };
+    const id = new URL(url).pathname.split("/").pop() ?? "";
+    await database.db.update(exportFiles).set({ expiresAt: sql`now() - interval '1 second'` });
+    const refusing = s3Client(STORAGE);
+    refusing.removeObjects = (async (_bucket: string, keys: string[]) =>
+      keys.map((Key) => ({
+        Key,
+        Code: "AccessDenied",
+      }))) as unknown as typeof refusing.removeObjects;
+    const purged = await new ExportStore(
+      database.db,
+      STORAGE,
+      randomBytes(32),
+      BASE,
+      refusing,
+    ).purge();
+    const left = await database.db.select({ id: exportFiles.id }).from(exportFiles);
+    await store.purge();
+
+    // Performs assertions.
+    expect(purged).toBe(0);
+    expect(left.map((row) => row.id)).toEqual([id]);
+  });
+
+  it("keeps the structured result when the cut only adds the declared cap fields", async () => {
     // Performs the test.
     registry.register({
       definition: {
@@ -183,6 +209,37 @@ describe("exports", () => {
       }),
     });
     const outcome = await registry.execute("estricta", {}, caller, {
+      origin: "chat",
+      timeZone: "UTC",
+    });
+
+    // Performs assertions.
+    expect(outcome.ok).toBe(true);
+    expect(outcome.structured?.archivo).toBeDefined();
+    expect(JSON.parse(outcome.text).nota).toBeDefined();
+  });
+
+  it("sends only the text when a cut result no longer fits its declared shape", async () => {
+    // Performs the test.
+    registry.register({
+      definition: {
+        name: "minima",
+        description: "Returns rows with a strict declared shape.",
+        inputSchema: { type: "object" },
+        outputSchema: {
+          type: "object",
+          properties: { filas: { type: "array", minItems: 2_000 } },
+          additionalProperties: false,
+        },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({
+        ok: true,
+        data: { filas: Array.from({ length: 2_000 }, (_, id) => ({ id, texto: "x".repeat(40) })) },
+      }),
+    });
+    const outcome = await registry.execute("minima", {}, caller, {
       origin: "chat",
       timeZone: "UTC",
     });

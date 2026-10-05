@@ -41,14 +41,16 @@ export class ExportStore {
    * @param   storage        S3 endpoint, credentials and bucket
    * @param   signingKey     Key of the download links
    * @param   publicBaseUrl  Public address of this server
+   * @param   client         S3 client, built from the settings unless given
    */
   constructor(
     private readonly db: Database,
     private readonly storage: StorageConfig,
     private readonly signingKey: Buffer,
     private readonly publicBaseUrl: string,
+    client?: Client,
   ) {
-    this.client = s3Client(storage);
+    this.client = client ?? s3Client(storage);
   }
 
   /**
@@ -161,7 +163,10 @@ export class ExportStore {
       this.storage.bucket,
       expired.map((row) => objectKey(row.id)),
     );
-    const failed = new Set(failures.map((item) => item?.Error?.Key).filter(Boolean));
+    // Its types say { Error: { Key } }, but it returns the error itself, as { Key, Code }
+    const failed = new Set(
+      failures.map((item) => (item as { Key?: string } | null)?.Key ?? item?.Error?.Key),
+    );
     const removed = expired.filter((row) => !failed.has(objectKey(row.id)));
     if (removed.length > 0) {
       await this.db.delete(exportFiles).where(
