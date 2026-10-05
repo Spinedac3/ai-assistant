@@ -39,6 +39,29 @@ function quote(name: string, engine: EngineName): string {
 }
 
 /**
+ * Writes what a tool reads from: the quoted table, or the pasted query in parentheses
+ *
+ * @param   base    Base of the definition
+ * @param   engine  Engine
+ * @param   pasted  Checked pasted query, when the base is one
+ *
+ * @return  The text that follows FROM
+ */
+export function fromClause(
+  base: ToolDefinitionSpec["base"],
+  engine: EngineName,
+  pasted: string | null,
+): string {
+  // A pasted query may end in a line comment, so the closing parenthesis goes on its own line
+  return base.kind === "table"
+    ? base.name
+        .split(".")
+        .map((part) => quote(part, engine))
+        .join(".")
+    : `(\n${pasted ?? base.sql}\n)`;
+}
+
+/**
  * Moves a bare date one day forward, so a range ending on that day keeps the hours of that day
  *
  * @param   date  Date as YYYY-MM-DD
@@ -80,14 +103,7 @@ export function buildQuery(
   };
   const text = engine === "postgres" ? "text" : engine === "mysql" ? "char" : "nvarchar(max)";
 
-  // A pasted query may end in a line comment, so the closing parenthesis goes on its own line
-  const from =
-    spec.base.kind === "table"
-      ? spec.base.name
-          .split(".")
-          .map((part) => quote(part, engine))
-          .join(".")
-      : `(\n${base ?? spec.base.sql}\n)`;
+  const from = fromClause(spec.base, engine, base);
 
   const conditions: string[] = [];
   for (const filter of spec.filters) {
