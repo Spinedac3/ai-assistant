@@ -2,8 +2,6 @@ import { z } from "zod";
 
 const TARGET_CHUNK_CHARS = 600;
 const MAX_CHUNK_CHARS = 1_500;
-// Shorter pieces are page furniture or lone headings, noise for both rankings
-const MIN_CHUNK_CHARS = 50;
 
 // Also the storage key of the original, so no path separators
 export const DOC_CODE = /^[A-Za-z0-9._-]{1,100}$/;
@@ -77,7 +75,7 @@ export function docFamily(docCode: string): string {
 }
 
 /**
- * Reads a flat YAML block: plain, quoted and boolean values and [a, b] lists, nothing nested
+ * Reads a flat YAML block: plain and quoted values and [a, b] lists, nothing nested
  *
  * @param   text  Lines between the --- marks
  *
@@ -87,15 +85,15 @@ function readYaml(text: string): Record<string, unknown> {
   const values: Record<string, unknown> = {};
 
   for (const raw of text.split("\n")) {
-    const match = raw.trim().match(/^([a-zA-Z_][\w-]*):\s*(.*)$/);
-    if (!match?.[1] || match[2] === undefined) {
+    const [, name, rest = ""] = raw.trim().match(/^([a-zA-Z_][\w-]*):\s*(.*)$/) ?? [];
+    if (!name) {
       continue;
     }
 
-    const value = match[2].trim();
+    const value = rest.trim();
     const unquote = (item: string) => item.replace(/^(["'])(.*)\1$/, "$2");
 
-    values[match[1]] =
+    values[name] =
       value.startsWith("[") && value.endsWith("]")
         ? value
             .slice(1, -1)
@@ -176,7 +174,8 @@ export function chunkDocument(document: ParsedDocument, now = new Date()): Chunk
     const text = buffer.join("\n").trim();
     buffer = [];
     length = 0;
-    if (text.length < MIN_CHUNK_CHARS) {
+    // Lone headings carry no answer; any other line does, however short, as a phone number
+    if (text.split("\n").every((line) => line.trim() === "" || /^#{1,4}\s/.test(line))) {
       return;
     }
 
