@@ -154,16 +154,46 @@ export class ToolRegistry {
    * @param   tool  Tool to add
    */
   register(tool: Tool): void {
-    const { name, inputSchema, outputSchema } = tool.definition;
-    if (this.tools.has(name)) {
-      throw new Error(`Tool duplicada: ${name}`);
+    if (this.tools.has(tool.definition.name)) {
+      throw new Error(`Tool duplicada: ${tool.definition.name}`);
     }
 
+    this.replace(tool);
+  }
+
+  /**
+   * Adds a tool or puts a new version in place of the one with its name, without a restart
+   *
+   * @param   tool  Tool to add
+   */
+  replace(tool: Tool): void {
+    const { name, inputSchema, outputSchema } = tool.definition;
     this.tools.set(name, tool);
     this.validators.set(name, {
       input: this.ajv.compile(inputSchema),
       output: outputSchema ? this.ajv.compile(withCapFields(outputSchema)) : undefined,
     });
+  }
+
+  /**
+   * Takes a tool out, so no path can call it from then on
+   *
+   * @param   name  Tool name
+   */
+  remove(name: string): void {
+    this.tools.delete(name);
+    this.validators.delete(name);
+  }
+
+  /**
+   * Tells whether a tool with a name is registered
+   *
+   * @param   name  Tool name
+   *
+   * @return  Whether it is
+   */
+  has(name: string): boolean {
+    return this.tools.has(name);
   }
 
   /**

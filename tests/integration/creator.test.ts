@@ -1,14 +1,18 @@
 import { randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
 import { describeBase, normalizeRows } from "../../src/creator/columns.js";
 import { definitionSchema } from "../../src/creator/definition.js";
 import { checkPasted } from "../../src/creator/pasted.js";
 import { buildQuery } from "../../src/creator/sql.js";
-import { sourceScope, toolFrom } from "../../src/creator/tool.js";
+import { CreatedTools, saveDefinition } from "../../src/creator/store.js";
+import { toolFrom } from "../../src/creator/tool.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
+import { roleScopes, scopes, toolDefinitions } from "../../src/db/schema.js";
 import { type EngineName, runQuery } from "../../src/sources/engines.js";
-import { saveSource } from "../../src/sources/registry.js";
+import { deleteSource, saveSource, sourceScope } from "../../src/sources/registry.js";
+import { calculateTool } from "../../src/tools/native/calculate.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
 import { Secrets } from "../../src/vault/envelope.js";
 import { freshDatabase } from "./support/database.js";
@@ -217,5 +221,96 @@ describe("creator on the demo engines", () => {
     expect(described).toContain("hora de America/Guatemala");
     expect(described).toContain("despachos");
     expect(described).toContain("Ojo: Una entrega por pedido.");
+  });
+
+  it("gives each source its permission, and takes it with its grants when the source goes", async () => {
+    // Performs the test.
+    const engine = available[0] as EngineName;
+    await saveSource(
+      database.db,
+      secrets,
+      { code: "temporal", name: "Temporal", ...DEMO_ENGINES[engine].reader },
+      1,
+    );
+    const [scope] = await database.db
+      .select()
+      .from(scopes)
+      .where(eq(scopes.code, "sources.temporal.use"));
+    await database.db.insert(roleScopes).values({ roleId: 1, scopeId: scope?.id ?? 0 });
+    await saveDefinition(database.db, {
+      name: "temporal_pedidos",
+      sourceCode: "temporal",
+      spec: definitionSchema.parse({
+        base: { kind: "table", name: "pedidos" },
+        columns: [{ name: "id" }],
+        meaning,
+      }),
+      columns: [{ name: "id", kind: "number" }],
+      userId: 1,
+    });
+    const inUse = await deleteSource(database.db, "temporal");
+    await database.db.delete(toolDefinitions).where(eq(toolDefinitions.sourceCode, "temporal"));
+    const deleted = await deleteSource(database.db, "temporal");
+    const left = await database.db
+      .select()
+      .from(scopes)
+      .where(eq(scopes.code, "sources.temporal.use"));
+    const grants = await database.db
+      .select()
+      .from(roleScopes)
+      .where(eq(roleScopes.scopeId, scope?.id ?? 0));
+
+    // Performs assertions.
+    expect(scope).toMatchObject({
+      sensitive: true,
+      description: "Usar las herramientas de la fuente Temporal",
+    });
+    expect(inUse).toBe("in_use");
+    expect(deleted).toBe("deleted");
+    expect(left).toEqual([]);
+    expect(grants).toEqual([]);
+    expect(await deleteSource(database.db, "temporal")).toBe("missing");
+  });
+
+  it("keeps the registry in step: published tools in, drafts out, natives untouched", async () => {
+    // Performs the test.
+    const engine = available[0] as EngineName;
+    const registry = new ToolRegistry(database.db);
+    registry.register(calculateTool);
+    const created = new CreatedTools(registry, { db: database.db, secrets, appTimeZone: "UTC" });
+    const spec = definitionSchema.parse({
+      base: { kind: "table", name: "pedidos" },
+      columns: [{ name: "id" }, { name: "total" }],
+      meaning,
+    });
+    const stored = await saveDefinition(database.db, {
+      name: "pedidos_sync",
+      sourceCode: `demo-${engine}`,
+      spec,
+      columns: [
+        { name: "id", kind: "number" },
+        { name: "total", kind: "number" },
+      ],
+      userId: 1,
+    });
+    created.sync(stored, null);
+    const asDraft = registry.has("pedidos_sync");
+    await database.db
+      .update(toolDefinitions)
+      .set({ status: "published", publishedAt: new Date() })
+      .where(eq(toolDefinitions.name, "pedidos_sync"));
+    const loaded = await created.load();
+    const published = registry.has("pedidos_sync");
+    created.sync({ ...stored, name: "calculate", status: "published" }, null);
+    created.drop("calculate");
+    created.drop("pedidos_sync");
+
+    // Performs assertions.
+    expect(asDraft).toBe(false);
+    expect(loaded).toBeGreaterThanOrEqual(1);
+    expect(published).toBe(true);
+    expect(created.isNative("calculate")).toBe(true);
+    expect(registry.has("calculate")).toBe(true);
+    expect(registry.has("pedidos_sync")).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ CREATE TABLE "tool_definitions" (
 	"source_code" varchar(50) NOT NULL,
 	"status" varchar(10) DEFAULT 'draft' NOT NULL,
 	"spec" jsonb NOT NULL,
+	"columns" jsonb NOT NULL,
 	"created_by" integer NOT NULL,
 	"created_at" timestamp (3) with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp (3) with time zone DEFAULT now() NOT NULL,

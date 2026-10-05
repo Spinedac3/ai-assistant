@@ -12,6 +12,7 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
+import type { BaseColumn } from "../creator/columns.js";
 import type { ToolDefinitionSpec } from "../creator/definition.js";
 
 const timestamptz = (name: string) => timestamp(name, { withTimezone: true, precision: 3 });
@@ -360,6 +361,8 @@ export const toolDefinitions = pgTable(
       .notNull()
       .default("draft"),
     spec: jsonb("spec").$type<ToolDefinitionSpec>().notNull(),
+    // Columns of the base as last described, so loading the tools never waits on every source
+    columns: jsonb("columns").$type<BaseColumn[]>().notNull(),
     createdBy: integer("created_by").notNull(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),

@@ -101,8 +101,16 @@ export default async function sourcesRoutes(
 
   app.delete("/admin/sources/:code", guard, async (request, reply) => {
     const { code } = codeParams.parse(request.params);
-    if (!(await deleteSource(db, code))) {
+    const deleted = await deleteSource(db, code);
+    if (deleted === "missing") {
       return reply.code(404).send({ ok: false, error: "source_not_found" });
+    }
+    if (deleted === "in_use") {
+      return reply.code(409).send({
+        ok: false,
+        error: "source_in_use",
+        message: "La fuente tiene herramientas creadas; bórralas antes de borrar la fuente",
+      });
     }
 
     await logAudit(db, {

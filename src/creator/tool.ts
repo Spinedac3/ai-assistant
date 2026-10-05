@@ -1,6 +1,6 @@
 import type { Database } from "../db/client.js";
 import { type ColumnKind, runQuery, TooManyRowsError } from "../sources/engines.js";
-import { connectionFor } from "../sources/registry.js";
+import { connectionFor, sourceScope } from "../sources/registry.js";
 import type { JsonSchema, Tool, ToolResult } from "../tools/contract.js";
 import type { Secrets } from "../vault/envelope.js";
 import { type BaseColumn, normalizeRows } from "./columns.js";
@@ -31,17 +31,6 @@ const MAX_ROWS = 200_000;
 
 const DATE = "^\\d{4}-\\d{2}-\\d{2}$";
 const DATE_TIME = "^\\d{4}-\\d{2}-\\d{2}( \\d{2}:\\d{2}(:\\d{2})?)?$";
-
-/**
- * Names the permission that lets a person use the tools of a source
- *
- * @param   sourceCode  Source code
- *
- * @return  The scope code
- */
-export function sourceScope(sourceCode: string): string {
-  return `sources.${sourceCode}.use`;
-}
 
 /**
  * Describes one value of a column for the input schema

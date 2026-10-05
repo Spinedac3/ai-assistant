@@ -1,7 +1,7 @@
-import { eq, sql } from "drizzle-orm";
+import { count, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client.js";
-import { sources } from "../db/schema.js";
+import { roleScopes, scopes, sources, toolDefinitions, userExtraScopes } from "../db/schema.js";
 import type { Secrets } from "../vault/envelope.js";
 import { type ConnectionInfo, writeAbilities } from "./engines.js";
 
@@ -14,6 +14,17 @@ const zone = z
   });
 
 export const SOURCE_CODE = /^[a-z0-9_-]{2,50}$/;
+
+/**
+ * Names the permission that lets a person use the tools made over a source
+ *
+ * @param   code  Source code
+ *
+ * @return  The scope code
+ */
+export function sourceScope(code: string): string {
+  return `sources.${code}.use`;
+}
 
 export const sourceInput = z.object({
   code: z.string().regex(SOURCE_CODE, "minúsculas, números, guion y guion bajo"),
@@ -171,13 +182,21 @@ export async function saveSource(
     tls: input.tls,
   };
 
-  await db
-    .insert(sources)
-    .values({ ...values, code: input.code, createdBy: userId })
-    .onConflictDoUpdate({
-      target: sources.code,
-      set: { ...values, updatedAt: sql`now()` },
-    });
+  await db.transaction(async (tx) => {
+    await tx
+      .insert(sources)
+      .values({ ...values, code: input.code, createdBy: userId })
+      .onConflictDoUpdate({
+        target: sources.code,
+        set: { ...values, updatedAt: sql`now()` },
+      });
+    // The admin then grants it to the roles that may read this source's data
+    const description = `Usar las herramientas de la fuente ${input.name}`;
+    await tx
+      .insert(scopes)
+      .values({ code: sourceScope(input.code), description, sensitive: true, createdBy: userId })
+      .onConflictDoUpdate({ target: scopes.code, set: { description } });
+  });
 }
 
 /**
@@ -243,13 +262,35 @@ export async function connectionFor(
  * @param   db    Own database
  * @param   code  Source code
  *
- * @return  Whether it existed
+ * @return  Deleted, missing, or still holding tools made over it
  */
-export async function deleteSource(db: Database, code: string): Promise<boolean> {
-  const removed = await db
-    .delete(sources)
-    .where(eq(sources.code, code))
-    .returning({ id: sources.id });
+export async function deleteSource(
+  db: Database,
+  code: string,
+): Promise<"deleted" | "missing" | "in_use"> {
+  const [tools] = await db
+    .select({ total: count() })
+    .from(toolDefinitions)
+    .where(eq(toolDefinitions.sourceCode, code));
+  if ((tools?.total ?? 0) > 0) {
+    return "in_use";
+  }
 
-  return removed.length > 0;
+  return db.transaction(async (tx) => {
+    const removed = await tx
+      .delete(sources)
+      .where(eq(sources.code, code))
+      .returning({ id: sources.id });
+    // Its permission goes too, with every grant of it, so no role keeps a scope that means nothing
+    const [scope] = await tx
+      .delete(scopes)
+      .where(eq(scopes.code, sourceScope(code)))
+      .returning({ id: scopes.id });
+    if (scope) {
+      await tx.delete(roleScopes).where(eq(roleScopes.scopeId, scope.id));
+      await tx.delete(userExtraScopes).where(eq(userExtraScopes.scopeId, scope.id));
+    }
+
+    return removed.length > 0 ? "deleted" : "missing";
+  });
 }

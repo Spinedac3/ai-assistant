@@ -6,6 +6,7 @@ import { createTokenSigner, readPrivateKey } from "./auth/tokens.js";
 import { chatMcpConfig } from "./chat/mcpConfig.js";
 import { readOrganizationContext } from "./chat/prompt.js";
 import { loadEnv } from "./config/env.js";
+import { CreatedTools } from "./creator/store.js";
 import { connectDatabase } from "./db/client.js";
 import { ExportStore } from "./exports/store.js";
 import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
@@ -89,6 +90,16 @@ const app = await buildApp({
 // Tool failures, broken contracts and audit errors must reach the server log
 registry.useLogger(app.log);
 registry.useExports(exports);
+
+// Tools made in the creator join the registry as stored, without waiting on their sources
+const createdTools = new CreatedTools(
+  registry,
+  { db: database.db, secrets, appTimeZone: env.APP_TIMEZONE },
+  app.log,
+);
+await createdTools
+  .load()
+  .catch((error) => app.log.error({ err: error }, "created tools could not load"));
 
 // Questions from external clients are kept only for the retention period
 const purge = () =>
