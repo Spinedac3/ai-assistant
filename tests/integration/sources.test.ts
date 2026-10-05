@@ -355,39 +355,121 @@ describe("sources", () => {
     }
   });
 
+  it("refuses SQL Server users that can join a writing role or act as another login", async () => {
+    // Performs the test.
+    if (!available.includes("mssql")) {
+      return;
+    }
+    const user = (name: string) => ({
+      ...DEMO.mssql.reader,
+      username: name,
+      password: "W-Pass-2026-x",
+    });
+    const reader = (name: string) => [
+      `if exists (select 1 from sys.database_principals where name = '${name}') drop user ${name}`,
+      `if exists (select 1 from sys.server_principals where name = '${name}') drop login ${name}`,
+      `create login ${name} with password = 'W-Pass-2026-x'`,
+      `create user ${name} for login ${name}`,
+      `alter role db_datareader add member ${name}`,
+    ];
+    await asDemoAdmin("mssql", [
+      ...reader("zz_role"),
+      ...reader("zz_imp"),
+      ...reader("zz_wide"),
+      "if exists (select 1 from sys.database_principals where name = 'zz_w') drop role zz_w",
+      "create role zz_w",
+      "grant insert on entregas to zz_w",
+      "grant alter on role::zz_w to zz_role",
+      "if exists (select 1 from sys.server_principals where name = 'zz_t') drop login zz_t",
+      "create login zz_t with password = 'W-Pass-2026-x'",
+      "use master; grant impersonate on login::zz_t to zz_imp",
+      "use master; grant connect any database to zz_wide",
+      "use master; grant select all user securables to zz_wide",
+    ]);
+    const found = {
+      role: await writeAbilities(user("zz_role")),
+      impersonate: await writeAbilities(user("zz_imp")),
+      wide: await writeAbilities(user("zz_wide")),
+    };
+    await asDemoAdmin("mssql", [
+      "drop user zz_role",
+      "drop user zz_imp",
+      "drop user zz_wide",
+      "drop role zz_w",
+      "drop login zz_role",
+      "drop login zz_imp",
+      "drop login zz_wide",
+      "drop login zz_t",
+    ]);
+
+    // Performs assertions.
+    expect(found.role).toContain("role zz_w ALTER");
+    expect(found.impersonate).toContain("login zz_t IMPERSONATE");
+    expect(found.wide).toEqual([]);
+  });
+
   it("runs one statement only, so no text can end the read-only transaction", async () => {
     // Performs the test.
-    const postgresEscape = runQuery(
-      DEMO.postgres.admin,
-      "commit; delete from entregas where id = 1",
-      [],
-      LIMITS,
+    // A table of its own: a failure here must never cost the demo data
+    for (const engine of ["postgres", "mysql"] as const) {
+      await asDemoAdmin(engine, [
+        "drop table if exists zz_guarda",
+        "create table zz_guarda (id int)",
+        "insert into zz_guarda values (1)",
+      ]);
+    }
+    const outcomes = await Promise.allSettled([
+      runQuery(DEMO.postgres.admin, "select 1; delete from zz_guarda", [], LIMITS),
+      runQuery(DEMO.mysql.admin, "select 1; delete from zz_guarda", [], LIMITS),
+    ]);
+    const left = await Promise.all(
+      (["postgres", "mysql"] as const).map((engine) =>
+        runQuery(DEMO[engine].admin, "select count(*) as n from zz_guarda", [], LIMITS),
+      ),
     );
-    const mysqlEscape = runQuery(
-      DEMO.mysql.admin,
-      "rollback; delete from entregas where id = 1",
-      [],
-      LIMITS,
-    );
-    const outcomes = await Promise.allSettled([postgresEscape, mysqlEscape]);
-    const left = await runQuery(
-      DEMO.postgres.reader,
-      "select count(*) as n from entregas where id = 1",
-      [],
-      LIMITS,
-    );
+    for (const engine of ["postgres", "mysql"] as const) {
+      await asDemoAdmin(engine, ["drop table zz_guarda"]);
+    }
 
     // Performs assertions.
     expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
-    expect(Number(left.rows[0]?.n)).toBe(1);
+    expect(left.map((result) => Number(result.rows[0]?.n))).toEqual([1, 1]);
   });
 
-  it("answers a statement without rows instead of crashing", async () => {
+  it("refuses anything that does not start as a read on Postgres and MySQL", async () => {
     // Performs the test.
-    const result = await runQuery(DEMO.mysql.reader, "set @nada = 1", [], LIMITS);
+    const attempts = await Promise.allSettled([
+      runQuery(
+        DEMO.mysql.reader,
+        "alter user current_user() identified by 'otra-clave'",
+        [],
+        LIMITS,
+      ),
+      runQuery(
+        DEMO.mysql.reader,
+        "/*!50000 alter user current_user() identified by 'x' */ select 1",
+        [],
+        LIMITS,
+      ),
+      runQuery(DEMO.mysql.reader, "do sleep(1)", [], LIMITS),
+      runQuery(DEMO.postgres.reader, "do $$ begin perform 1; end $$", [], LIMITS),
+    ]);
+    const stillWorks = await runQuery(DEMO.mysql.reader, "select 1 as uno", [], LIMITS);
 
     // Performs assertions.
-    expect(result).toEqual({ columns: [], rows: [] });
+    for (const attempt of attempts) {
+      expect(attempt.status === "rejected" && String(attempt.reason.message)).toContain("lectura");
+    }
+    expect(stillWorks.rows).toHaveLength(1);
+  });
+
+  it("refuses a statement without rows instead of crashing the server", async () => {
+    // Performs the test.
+    const attempt = runQuery(DEMO.mysql.reader, "set @nada = 1", [], LIMITS);
+
+    // Performs assertions.
+    await expect(attempt).rejects.toThrow("lectura");
+    expect((await runQuery(DEMO.mysql.reader, "select 1 as uno", [], LIMITS)).rows).toHaveLength(1);
   });
 
   it("refuses repeated columns and more than one result", async () => {

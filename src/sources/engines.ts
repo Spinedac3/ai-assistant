@@ -224,9 +224,9 @@ async function mysqlQuery(
 }
 
 /**
- * Runs a query on SQL Server; it has no read-only transaction, so the read-only user is the
- * barrier, checked when the source is registered, and the query also runs in a transaction that
- * is always rolled back
+ * Runs a query on SQL Server; it has no read-only transaction, so the read-only user, checked
+ * when the source is registered, is the barrier. The query also runs in a transaction rolled back
+ * at the end, a second line only: a batch can commit it
  *
  * @param   info    Connection
  * @param   sql     Query with @p1 placeholders
@@ -318,7 +318,30 @@ async function mssqlQuery(
 }
 
 /**
+ * Tells whether a statement is a read: SELECT or WITH, after any comments and parentheses
+ *
+ * @param   sql  Statement
+ *
+ * @return  Whether it starts as a read
+ */
+export function startsAsRead(sql: string): boolean {
+  // MySQL runs the inside of /*! … */ as code, so it never counts as a comment
+  if (sql.includes("/*!")) {
+    return false;
+  }
+
+  const start = sql.replace(/^(\s|\(|--[^\n]*(\n|$)|\/\*[\s\S]*?\*\/)*/, "");
+
+  return /^(select|with)\b/i.test(start);
+}
+
+/**
  * Runs a read-only query on a source
+ *
+ * Postgres and MySQL take one statement per query, so refusing anything that does not start as
+ * a read keeps out every statement that commits on its own: a password change, a GRANT, a DO
+ * that the server timeout would not stop. SQL Server takes batches, so there the read-only user,
+ * checked when the source is registered, is the barrier.
  *
  * @param   info    Connection
  * @param   sql     Query in the engine's own placeholder style
@@ -328,6 +351,29 @@ async function mssqlQuery(
  * @return  Columns and rows, dates as naive text
  */
 export function runQuery(
+  info: ConnectionInfo,
+  sql: string,
+  params: unknown[],
+  limits: QueryLimits,
+): Promise<QueryResult> {
+  if (info.engine !== "mssql" && !startsAsRead(sql)) {
+    return Promise.reject(new Error("Solo se ejecutan consultas de lectura (SELECT o WITH)"));
+  }
+
+  return execute(info, sql, params, limits);
+}
+
+/**
+ * Runs a statement on its engine, with no check of what it is
+ *
+ * @param   info    Connection
+ * @param   sql     Statement
+ * @param   params  Values
+ * @param   limits  Timeout and rows
+ *
+ * @return  Columns and rows
+ */
+function execute(
   info: ConnectionInfo,
   sql: string,
   params: unknown[],
@@ -354,10 +400,14 @@ const WRITE_CHECKS: Record<"postgres" | "mssql", string> = {
       ('create_databases', (select rolcreatedb from pg_roles where rolname = current_user)),
       ('replication', (select rolreplication from pg_roles where rolname = current_user)),
       ('create_schemas', has_database_privilege(current_database(), 'CREATE')),
-      ('run_server_programs', pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER')),
-      ('write_server_files', pg_has_role(current_user, 'pg_write_server_files', 'MEMBER')),
-      ('read_server_files', pg_has_role(current_user, 'pg_read_server_files', 'MEMBER')),
-      ('signal_backends', pg_has_role(current_user, 'pg_signal_backend', 'MEMBER')),
+      ('run_server_programs', coalesce(to_regrole('pg_execute_server_program') is not null
+        and pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER'), false)),
+      ('write_server_files', coalesce(to_regrole('pg_write_server_files') is not null
+        and pg_has_role(current_user, 'pg_write_server_files', 'MEMBER'), false)),
+      ('read_server_files', coalesce(to_regrole('pg_read_server_files') is not null
+        and pg_has_role(current_user, 'pg_read_server_files', 'MEMBER'), false)),
+      ('signal_backends', coalesce(to_regrole('pg_signal_backend') is not null
+        and pg_has_role(current_user, 'pg_signal_backend', 'MEMBER'), false)),
       ('create_tables', exists (
         select 1 from pg_namespace n
         where n.nspname not like 'pg_%' and n.nspname <> 'information_schema'
@@ -375,7 +425,8 @@ const WRITE_CHECKS: Record<"postgres" | "mssql", string> = {
   mssql: `
     select ('server ' + permission_name) collate database_default as ability
     from fn_my_permissions(null, 'SERVER')
-    where permission_name <> 'CONNECT SQL' and permission_name not like 'VIEW %'
+    where permission_name not in ('CONNECT SQL', 'CONNECT ANY DATABASE', 'SELECT ALL USER SECURABLES')
+      and permission_name not like 'VIEW %'
     union
     select ('database ' + permission_name) collate database_default
     from fn_my_permissions(null, 'DATABASE')
@@ -398,7 +449,18 @@ const WRITE_CHECKS: Record<"postgres" | "mssql", string> = {
     select ('impersonate ' + d.name + ' ' + p.permission_name) collate database_default
     from sys.database_principals d cross apply fn_my_permissions(quotename(d.name), 'USER') p
     where d.type in ('S', 'U', 'G', 'E', 'X') and d.name <> user_name()
-      and p.permission_name in ('IMPERSONATE', 'CONTROL', 'ALTER')`,
+      and p.permission_name in ('IMPERSONATE', 'CONTROL', 'ALTER', 'TAKE OWNERSHIP')
+    union
+    select ('role ' + d.name + ' ' + p.permission_name) collate database_default
+    from sys.database_principals d cross apply fn_my_permissions(quotename(d.name), 'ROLE') p
+    where d.type = 'R' and is_rolemember(d.name) = 0
+      and p.permission_name in ('ALTER', 'CONTROL', 'TAKE OWNERSHIP')
+    union
+    select ('login ' + l.name + ' ' + p.permission_name) collate database_default
+    from sys.server_principals l
+    cross apply fn_my_permissions(quotename(l.name), case when l.type = 'R' then 'SERVER ROLE' else 'LOGIN' end) p
+    where l.type in ('S', 'U', 'G', 'R') and l.name <> suser_name()
+      and p.permission_name in ('IMPERSONATE', 'CONTROL', 'ALTER', 'TAKE OWNERSHIP')`,
 };
 
 // The only MySQL privileges that read and nothing else
@@ -417,12 +479,17 @@ export function mysqlWrites(grant: string): string[] {
     return /^GRANT /i.test(grant) ? [`role ${grant.replace(/^GRANT (.+?) TO .*$/i, "$1")}`] : [];
   }
 
+  const passOn = /WITH GRANT OPTION/i.test(grant) ? ["GRANT OPTION"] : [];
+
   // Column grants carry their own commas, as in SELECT (a, b)
-  return privileges
-    .replace(/\([^)]*\)/g, "")
-    .split(",")
-    .map((privilege) => privilege.trim().toUpperCase())
-    .filter((privilege) => privilege !== "" && !MYSQL_READS.has(privilege));
+  return [
+    ...passOn,
+    ...privileges
+      .replace(/\([^)]*\)/g, "")
+      .split(",")
+      .map((privilege) => privilege.trim().toUpperCase())
+      .filter((privilege) => privilege !== "" && !MYSQL_READS.has(privilege)),
+  ];
 }
 
 /**
@@ -436,11 +503,11 @@ export async function writeAbilities(info: ConnectionInfo): Promise<string[]> {
   const limits = { timeoutMs: CHECK_TIMEOUT_MS, maxRows: 10_000 };
 
   if (info.engine === "mysql") {
-    const { rows } = await runQuery(info, "SHOW GRANTS FOR CURRENT_USER()", [], limits);
+    const { rows } = await execute(info, "SHOW GRANTS FOR CURRENT_USER()", [], limits);
     return rows.flatMap((row) => mysqlWrites(String(Object.values(row)[0] ?? "")));
   }
 
-  const { rows } = await runQuery(info, WRITE_CHECKS[info.engine], [], limits);
+  const { rows } = await execute(info, WRITE_CHECKS[info.engine], [], limits);
 
   return rows.map((row) => String(row.ability));
 }
