@@ -282,15 +282,18 @@ describe("sources", () => {
       "drop role if exists w_insert",
       "drop role if exists w_column",
       "drop role if exists w_program",
+      "drop role if exists w_export",
       "create role w_insert login password 'w-pass'",
       "create role w_column login password 'w-pass'",
       "create role w_program login password 'w-pass'",
-      "grant select on all tables in schema public to w_insert, w_column, w_program",
+      "create role w_export login password 'w-pass'",
+      "grant select on all tables in schema public to w_insert, w_column, w_program, w_export",
       "grant insert on entregas to w_insert",
       "grant update (piloto) on entregas to w_column",
       "grant pg_execute_server_program to w_program",
+      "grant execute on function lo_export(oid, text) to w_export",
     ]);
-    for (const user of ["w_insert", "w_column", "w_program"]) {
+    for (const user of ["w_insert", "w_column", "w_program", "w_export"]) {
       found[user] = await writeAbilities({
         ...DEMO.postgres.reader,
         username: user,
@@ -298,7 +301,9 @@ describe("sources", () => {
       });
     }
     await asDemoAdmin("postgres", [
-      "drop owned by w_insert, w_column, w_program",
+      "drop owned by w_insert, w_column, w_program, w_export",
+      "revoke execute on function lo_export(oid, text) from w_export",
+      "drop role w_export",
       "drop role w_insert",
       "drop role w_column",
       "drop role w_program",
@@ -348,6 +353,7 @@ describe("sources", () => {
     expect(found.w_insert).toContain("write_rows");
     expect(found.w_column).toContain("write_rows");
     expect(found.w_program).toContain("run_server_programs");
+    expect(found.w_export).toEqual(["export_large_objects"]);
     expect(found["mysql w_insert"]).toEqual(["INSERT"]);
     expect(found["mysql w_vars"]).toContain("SYSTEM_VARIABLES_ADMIN");
     if (available.includes("mssql")) {
@@ -376,6 +382,7 @@ describe("sources", () => {
       ...reader("zz_role"),
       ...reader("zz_imp"),
       ...reader("zz_wide"),
+      ...reader("zz_srv"),
       "if exists (select 1 from sys.database_principals where name = 'zz_w') drop role zz_w",
       "create role zz_w",
       "grant insert on entregas to zz_w",
@@ -385,27 +392,35 @@ describe("sources", () => {
       "use master; grant impersonate on login::zz_t to zz_imp",
       "use master; grant connect any database to zz_wide",
       "use master; grant select all user securables to zz_wide",
+      "if exists (select 1 from sys.server_principals where name = 'zz_sr') drop server role zz_sr",
+      "create server role zz_sr",
+      "use master; grant alter on server role::zz_sr to zz_srv",
     ]);
     const found = {
       role: await writeAbilities(user("zz_role")),
       impersonate: await writeAbilities(user("zz_imp")),
       wide: await writeAbilities(user("zz_wide")),
+      serverRole: await writeAbilities(user("zz_srv")),
     };
     await asDemoAdmin("mssql", [
       "drop user zz_role",
       "drop user zz_imp",
       "drop user zz_wide",
+      "drop user zz_srv",
       "drop role zz_w",
       "drop login zz_role",
       "drop login zz_imp",
       "drop login zz_wide",
       "drop login zz_t",
+      "drop login zz_srv",
+      "drop server role zz_sr",
     ]);
 
     // Performs assertions.
     expect(found.role).toContain("role zz_w ALTER");
     expect(found.impersonate).toContain("login zz_t IMPERSONATE");
     expect(found.wide).toEqual([]);
+    expect(found.serverRole).toContain("login zz_sr ALTER");
   });
 
   it("runs one statement only, so no text can end the read-only transaction", async () => {

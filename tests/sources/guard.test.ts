@@ -19,6 +19,8 @@ describe("read guard", () => {
       "set @x = 1",
       "/*!50000 alter user current_user() identified by 'x' */ select 1",
       "select 1 /*!50000 , sleep(10) */",
+      "/* /* */ select */ lock table t in row exclusive mode",
+      "-- x\rnotify canal, 'payload' /*\nselect */",
       "",
     ]) {
       expect(startsAsRead(sql)).toBe(false);

@@ -330,7 +330,9 @@ export function startsAsRead(sql: string): boolean {
     return false;
   }
 
-  const start = sql.replace(/^(\s|\(|--[^\n]*(\n|$)|\/\*[\s\S]*?\*\/)*/, "");
+  // Postgres ends a line comment at \r too and nests block comments, so a block comment holding
+  // another opening is not skipped: the statement then fails as not a read
+  const start = sql.replace(/^(\s|\(|--[^\r\n]*([\r\n]|$)|\/\*((?!\/\*)[\s\S])*?\*\/)*/, "");
 
   return /^(select|with)\b/i.test(start);
 }
@@ -392,6 +394,32 @@ function execute(
 // Each engine lists, one row per finding, what its user could do besides reading. The rule is
 // inverted on purpose: anything that is not plainly a read counts, so a privilege nobody thought
 // of still blocks the source. On SQL Server the VIEW permissions only show metadata
+/**
+ * Postgres check for membership in a built-in role that older servers may not have; CASE,
+ * unlike AND, is sure to skip the lookup of a missing role
+ *
+ * @param   role  Role name
+ *
+ * @return  SQL boolean expression
+ */
+function memberOf(role: string): string {
+  return `case when to_regrole('${role}') is not null
+    then pg_has_role(current_user, '${role}', 'MEMBER') else false end`;
+}
+
+/**
+ * Postgres check for the right to run a function that reaches the server's files, granted on
+ * its own without the file roles; the function may not exist on every server
+ *
+ * @param   signature  Function signature
+ *
+ * @return  SQL boolean expression
+ */
+function canRun(signature: string): string {
+  return `case when to_regprocedure('${signature}') is not null
+    then has_function_privilege('${signature}', 'EXECUTE') else false end`;
+}
+
 const WRITE_CHECKS: Record<"postgres" | "mssql", string> = {
   postgres: `
     select ability from (values
@@ -400,14 +428,15 @@ const WRITE_CHECKS: Record<"postgres" | "mssql", string> = {
       ('create_databases', (select rolcreatedb from pg_roles where rolname = current_user)),
       ('replication', (select rolreplication from pg_roles where rolname = current_user)),
       ('create_schemas', has_database_privilege(current_database(), 'CREATE')),
-      ('run_server_programs', coalesce(to_regrole('pg_execute_server_program') is not null
-        and pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER'), false)),
-      ('write_server_files', coalesce(to_regrole('pg_write_server_files') is not null
-        and pg_has_role(current_user, 'pg_write_server_files', 'MEMBER'), false)),
-      ('read_server_files', coalesce(to_regrole('pg_read_server_files') is not null
-        and pg_has_role(current_user, 'pg_read_server_files', 'MEMBER'), false)),
-      ('signal_backends', coalesce(to_regrole('pg_signal_backend') is not null
-        and pg_has_role(current_user, 'pg_signal_backend', 'MEMBER'), false)),
+      ('run_server_programs', ${memberOf("pg_execute_server_program")}),
+      ('write_server_files', ${memberOf("pg_write_server_files")}),
+      ('read_server_files', ${memberOf("pg_read_server_files")}),
+      ('signal_backends', ${memberOf("pg_signal_backend")}),
+      ('maintain_tables', ${memberOf("pg_maintain")}),
+      ('export_large_objects', ${canRun("lo_export(oid,text)")}),
+      ('write_files', ${canRun("pg_file_write(text,text,boolean)")}),
+      ('read_files', ${canRun("pg_read_file(text)")}),
+      ('read_binary_files', ${canRun("pg_read_binary_file(text)")}),
       ('create_tables', exists (
         select 1 from pg_namespace n
         where n.nspname not like 'pg_%' and n.nspname <> 'information_schema'
@@ -459,7 +488,7 @@ const WRITE_CHECKS: Record<"postgres" | "mssql", string> = {
     select ('login ' + l.name + ' ' + p.permission_name) collate database_default
     from sys.server_principals l
     cross apply fn_my_permissions(quotename(l.name), case when l.type = 'R' then 'SERVER ROLE' else 'LOGIN' end) p
-    where l.type in ('S', 'U', 'G', 'R') and l.name <> suser_name()
+    where l.type in ('S', 'U', 'G', 'R', 'E', 'X') and l.name <> suser_name()
       and p.permission_name in ('IMPERSONATE', 'CONTROL', 'ALTER', 'TAKE OWNERSHIP')`,
 };
 
