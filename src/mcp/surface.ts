@@ -1,4 +1,5 @@
 import type { ToolDefinition } from "../tools/contract.js";
+import { FETCH, SEARCH } from "../tools/native/documents.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { cliToolName, FIND_CAPABILITY, RUN_CAPABILITY } from "./names.js";
 
@@ -14,14 +15,21 @@ export interface Surface {
 
 export const META_TOOLS = [FIND_CAPABILITY, RUN_CAPABILITY] as const;
 
+// Offered directly, outside the capability search: ChatGPT connects a knowledge source only through
+// tools with exactly these names
+export const DOCUMENT_TOOLS: readonly string[] = [SEARCH, FETCH];
+
 // The chat CLI may call only what its catalog offers; both lists come from the same names
-export const CHAT_CLI_ALLOWED = ["ToolSearch", ...META_TOOLS.map(cliToolName)].join(" ");
+export const CHAT_CLI_ALLOWED = [
+  "ToolSearch",
+  ...[...META_TOOLS, ...DOCUMENT_TOOLS].map(cliToolName),
+].join(" ");
 
 /**
  * The single answer to what a caller sees and may run
  *
  * The chat and external clients get the two meta tools, a fixed catalog that scales past client
- * tool limits. An agent run gets only its own tools, direct, and an empty list means no tools at
+ * tool limits, plus the document search when they may use it. An agent run gets only its own tools, direct, and an empty list means no tools at
  * all, never the full catalog.
  *
  * @param   registry  Registered tools
@@ -45,5 +53,7 @@ export function surfaceFor(
     return { allowed, catalog: allowed.map((definition) => definition.name) };
   }
 
-  return { allowed: visible, catalog: [...META_TOOLS] };
+  const documents = DOCUMENT_TOOLS.filter((name) => visible.some((tool) => tool.name === name));
+
+  return { allowed: visible, catalog: [...META_TOOLS, ...documents] };
 }

@@ -7,6 +7,7 @@ import authPlugin from "./plugins/auth.js";
 import adminRoutes from "./routes/admin.js";
 import authRoutes from "./routes/auth.js";
 import chatRoutes, { type ChatRoutesOptions } from "./routes/chat.js";
+import docsRoutes, { type DocsRoutesOptions } from "./routes/docs.js";
 import mcpRoutes from "./routes/mcp.js";
 import oauthRoutes from "./routes/oauth.js";
 import type { ToolRegistry } from "./tools/registry.js";
@@ -19,6 +20,8 @@ export interface AppDependencies {
   chat?: Omit<ChatRoutesOptions, "db">;
   // Without it /mcp and the OAuth server that guards it are not mounted
   mcp?: { registry: ToolRegistry; settings: McpSettings; publicBaseUrl: string };
+  // Without it the document routes are not mounted
+  docs?: Omit<DocsRoutesOptions, "db">;
   logger?: boolean;
   // Addresses or CIDRs of the proxies whose X-Forwarded-For is believed; none by default
   trustProxy?: string;
@@ -42,6 +45,10 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   if (deps.chat) {
     await app.register(chatRoutes, { ...deps.chat, db: deps.db });
+  }
+
+  if (deps.docs) {
+    await app.register(docsRoutes, { ...deps.docs, db: deps.db });
   }
 
   if (deps.mcp) {
