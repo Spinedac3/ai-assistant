@@ -19,6 +19,22 @@ const ragSchema = z.object({
   DOCS_WORKER_POLL_MS: z.coerce.number().int().positive().default(5_000),
 });
 
+/**
+ * Tells whether an address can go in a mail: https, or http only to this machine
+ *
+ * @param   url  Public address of the server
+ *
+ * @return  Whether links to it may be mailed
+ */
+function mailableBase(url: string | undefined): boolean {
+  if (!url) {
+    return false;
+  }
+  const { protocol, hostname } = new URL(url);
+
+  return protocol === "https:" || ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+}
+
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -53,6 +69,18 @@ const envSchema = z
     RATE_LIMIT_MSGS_PER_HOUR: z.coerce.number().int().positive().default(60),
     RATE_LIMIT_MSGS_PER_DAY: z.coerce.number().int().positive().default(300),
     RATE_LIMIT_TOKENS_PER_DAY: z.coerce.number().int().positive().default(2_000_000),
+    // Mail for notices and password resets; without a host there are none
+    SMTP_HOST: z.string().min(1).optional(),
+    SMTP_PORT: z.coerce.number().int().positive().default(587),
+    SMTP_USER: z.string().min(1).optional(),
+    SMTP_PASSWORD_FILE: z.string().min(1).optional(),
+    SMTP_FROM: z.string().includes("@").optional(),
+    // Only for a local mail catcher; refused in production
+    SMTP_INSECURE: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    NOTICES_WORKER_POLL_MS: z.coerce.number().int().positive().default(10_000),
     ...ragSchema.shape,
   })
   // The storage defaults match docker-compose and are public; in production they would open every
@@ -66,6 +94,36 @@ const envSchema = z
         code: "custom",
         path: ["S3_SECRET_KEY"],
         message: "En producción las credenciales de S3 no pueden ser las de ejemplo",
+      });
+    }
+    if (env.SMTP_HOST && !env.SMTP_FROM) {
+      context.addIssue({
+        code: "custom",
+        path: ["SMTP_FROM"],
+        message: "Con SMTP_HOST hace falta la dirección que envía (SMTP_FROM)",
+      });
+    }
+    if (env.NODE_ENV === "production" && env.SMTP_INSECURE) {
+      context.addIssue({
+        code: "custom",
+        path: ["SMTP_INSECURE"],
+        message: "En producción el correo siempre va cifrado",
+      });
+    }
+    // Mailed reset links point here, whatever NODE_ENV says: without it they would lead to
+    // localhost, and over http the token would travel in clear text
+    if (env.SMTP_HOST && !mailableBase(env.PUBLIC_BASE_URL)) {
+      context.addIssue({
+        code: "custom",
+        path: ["PUBLIC_BASE_URL"],
+        message: "Con correo hace falta PUBLIC_BASE_URL con https (http solo en esta máquina)",
+      });
+    }
+    if (env.SMTP_USER && !env.SMTP_PASSWORD_FILE) {
+      context.addIssue({
+        code: "custom",
+        path: ["SMTP_PASSWORD_FILE"],
+        message: "Con SMTP_USER hace falta el archivo de su contraseña (SMTP_PASSWORD_FILE)",
       });
     }
   });

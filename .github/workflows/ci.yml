@@ -30,7 +30,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Solr needs the versioned configset from the checkout, so it starts here and not as a service
-      - run: docker compose --profile engines up -d solr minio demo-db demo-mysql demo-mssql
+      - run: docker compose --profile engines up -d solr minio mailpit demo-db demo-mysql demo-mssql
       # A Solr that never answers fails here with its log, not later as failing search tests
       - run: |
           for i in $(seq 1 60); do
@@ -38,6 +38,13 @@ jobs:
             sleep 2
           done
           docker compose logs solr
+          exit 1
+      - run: |
+          for i in $(seq 1 30); do
+            curl -sf "http://localhost:8025/api/v1/info" > /dev/null && exit 0
+            sleep 2
+          done
+          docker compose logs mailpit
           exit 1
       # The demo engines take a while to accept logins; the seed retries until each one answers
       - run: |

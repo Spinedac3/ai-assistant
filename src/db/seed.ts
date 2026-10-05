@@ -31,6 +31,11 @@ const SCOPES = [
     description: "Crear, probar y publicar herramientas sobre las fuentes que puede usar",
     sensitive: true,
   },
+  {
+    code: "notices.send",
+    description: "Enviar avisos por correo a las cuentas del asistente",
+    sensitive: true,
+  },
   // Each area of documents is one of these; the admin creates the rest as needed
   { code: "docs.general.read", description: "Leer los documentos generales", sensitive: false },
 ];

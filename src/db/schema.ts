@@ -375,3 +375,49 @@ export const toolDefinitions = pgTable(
   },
   (t) => [uniqueIndex("tool_definitions_name_unique").on(t.name)],
 );
+
+// Notices waiting for, or done with, delivery by mail; the worker sends and retries them
+export const notices = pgTable(
+  "notices",
+  {
+    id: idPk(),
+    senderUserId: integer("sender_user_id").notNull(),
+    // Chosen by whoever sends; the same key from the same sender is the same notice
+    key: varchar("key", { length: 100 }).notNull(),
+    recipientUserId: integer("recipient_user_id").notNull(),
+    recipientEmail: varchar("recipient_email", { length: 255 }).notNull(),
+    subject: varchar("subject", { length: 200 }).notNull(),
+    message: text("message").notNull(),
+    status: varchar("status", { length: 10, enum: ["pending", "sent", "failed"] })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamptz("next_attempt_at").notNull().defaultNow(),
+    lastError: text("last_error"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    sentAt: timestamptz("sent_at"),
+  },
+  (t) => [
+    uniqueIndex("notices_sender_key_unique").on(t.senderUserId, t.key),
+    index("notices_due_idx").on(t.status, t.nextAttemptAt),
+    index("notices_recipient_idx").on(t.recipientUserId, t.createdAt),
+  ],
+);
+
+// One-time links an administrator sends so a person sets a new password; only the hash is kept
+export const passwordResets = pgTable(
+  "password_resets",
+  {
+    id: idPk(),
+    userId: integer("user_id").notNull(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    expiresAt: timestamptz("expires_at").notNull(),
+    usedAt: timestamptz("used_at"),
+    createdBy: integer("created_by").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("password_resets_token_unique").on(t.tokenHash),
+    index("password_resets_user_idx").on(t.userId),
+  ],
+);

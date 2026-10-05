@@ -7,7 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
  *
  * @return  The token in clear, shown once and stored only hashed
  */
-export function generateToken(prefix: "ast" | "asr" | "asc"): string {
+export function generateToken(prefix: "ast" | "asr" | "asc" | "asp"): string {
   return `${prefix}_${randomBytes(32).toString("base64url")}`;
 }
 

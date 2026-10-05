@@ -46,4 +46,54 @@ describe("env", () => {
       "DATABASE_URL",
     );
   });
+
+  it("asks for the sender address and the password file a mail server needs", () => {
+    // Performs the test.
+    const smtp = {
+      ...required,
+      SMTP_HOST: "smtp.example.com",
+      PUBLIC_BASE_URL: "https://asistente.example.com",
+    };
+
+    // Performs assertions.
+    expect(() => loadEnv(smtp)).toThrow("SMTP_FROM");
+    expect(() => loadEnv({ ...smtp, SMTP_FROM: "a@example.com", SMTP_USER: "a" })).toThrow(
+      "SMTP_PASSWORD_FILE",
+    );
+    expect(loadEnv({ ...smtp, SMTP_FROM: "a@example.com" }).SMTP_PORT).toBe(587);
+  });
+
+  it("keeps production mail encrypted and its reset links on https", () => {
+    // Performs the test.
+    const production = {
+      ...required,
+      NODE_ENV: "production",
+      S3_ACCESS_KEY: "propia",
+      S3_SECRET_KEY: "una-clave-propia-larga",
+      SMTP_HOST: "smtp.example.com",
+      SMTP_FROM: "avisos@example.com",
+    };
+
+    // Performs assertions.
+    expect(() => loadEnv({ ...required, SMTP_HOST: "x", SMTP_FROM: "sin-arroba" })).toThrow(
+      "SMTP_FROM",
+    );
+    // Whatever NODE_ENV says, a mailed link needs an address that is not this machine over http
+    const development = { ...required, SMTP_HOST: "x", SMTP_FROM: "a@example.com" };
+    expect(() => loadEnv(development)).toThrow("PUBLIC_BASE_URL");
+    expect(() =>
+      loadEnv({ ...development, PUBLIC_BASE_URL: "http://asistente.example.com" }),
+    ).toThrow("PUBLIC_BASE_URL");
+    expect(loadEnv({ ...development, PUBLIC_BASE_URL: "http://localhost:3000" }).SMTP_HOST).toBe(
+      "x",
+    );
+    expect(() => loadEnv(production)).toThrow("PUBLIC_BASE_URL");
+    expect(() =>
+      loadEnv({ ...production, PUBLIC_BASE_URL: "http://asistente.example.com" }),
+    ).toThrow("PUBLIC_BASE_URL");
+    const https = { ...production, PUBLIC_BASE_URL: "https://asistente.example.com" };
+    expect(() => loadEnv({ ...https, SMTP_INSECURE: "true" })).toThrow("SMTP_INSECURE");
+    expect(loadEnv(https).SMTP_INSECURE).toBe(false);
+    expect(loadEnv({ ...required, SMTP_INSECURE: "true" }).SMTP_INSECURE).toBe(true);
+  });
 });
