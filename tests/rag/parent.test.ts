@@ -57,6 +57,20 @@ describe("parent block", () => {
     expect(block.cut).toBe(true);
   });
 
+  it("fits a section that lands exactly on the limit and cuts one character past it", () => {
+    // Performs the test.
+    const exact = parentBlock(siblings(40, 38), 0, 80);
+    const over = parentBlock(siblings(40, 39), 0, 80);
+    const anchorAtLimit = parentBlock(siblings(80), 0, 80);
+    const anchorBelow = parentBlock(siblings(79), 0, 80);
+
+    // Performs assertions.
+    expect(exact).toMatchObject({ cut: false, pieces: 2 });
+    expect(over).toMatchObject({ cut: true, pieces: 1 });
+    expect(anchorAtLimit.cut).toBe(true);
+    expect(anchorBelow).toEqual({ text: "0".repeat(79), cut: false, pieces: 1 });
+  });
+
   it("falls back to the first chunk when the requested one is not among the siblings", () => {
     // Performs the test.
     const block = parentBlock(siblings(10, 10), 7);

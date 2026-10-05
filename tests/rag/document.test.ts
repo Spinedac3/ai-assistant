@@ -58,15 +58,48 @@ describe("document", () => {
     expect(chunks[1]?.section).toBe("Recepción");
   });
 
-  it("drops pieces too short to mean anything and never exceeds the maximum", () => {
+  it("keeps a short section with content and drops lone headings", () => {
     // Performs the test.
-    const body = `## Corto\n\nok\n\n## Largo\n\n${"palabra ".repeat(400)}`;
+    const body = "# Manual\n\n## Emergencias\n\nLlamar al 2222-3333\n\n## Vacía\n\n## Otra\n\n";
     const chunks = chunkDocument({ ...parseDocument(HEADER), body });
 
     // Performs assertions.
-    expect(chunks.every((chunk) => chunk.text.length >= 50)).toBe(true);
-    expect(chunks.every((chunk) => chunk.text.length <= 1_600)).toBe(true);
-    expect(chunks.some((chunk) => chunk.text.includes("ok"))).toBe(false);
+    expect(chunks.map((chunk) => chunk.text)).toEqual(["## Emergencias\n\nLlamar al 2222-3333"]);
+  });
+
+  it("never exceeds the maximum, even with one long line or many lines near it", () => {
+    // Performs the test.
+    const oneLine = `## Largo\n\n${"palabra ".repeat(400)}`;
+    const manyLines = Array.from({ length: 6 }, () => "x".repeat(900)).join("\n");
+    const noSpaces = "y".repeat(4_000);
+    const chunks = [oneLine, manyLines, noSpaces].flatMap((body) =>
+      chunkDocument({ ...parseDocument(HEADER), body }),
+    );
+    const firstOfLine = chunkDocument({ ...parseDocument(HEADER), body: oneLine })[0];
+
+    // Performs assertions.
+    expect(chunks.every((chunk) => chunk.text.length <= 1_500)).toBe(true);
+    expect(firstOfLine?.text.endsWith("palabra")).toBe(true);
+    expect(chunks.filter((chunk) => chunk.text.startsWith("x"))).toHaveLength(6);
+  });
+
+  it("forgets the deeper headings when a shallower one starts", () => {
+    // Performs the test.
+    const body = [
+      "# Manual",
+      "## Recepción",
+      "### Rechazos",
+      "Texto de rechazos que queda dentro de recepción.",
+      "## Despacho",
+      "Texto de despacho que ya no está dentro de rechazos.",
+    ].join("\n");
+    const chunks = chunkDocument({ ...parseDocument(HEADER), body });
+
+    // Performs assertions.
+    expect(chunks.map((chunk) => chunk.section_path)).toEqual([
+      "Manual > Recepción > Rechazos",
+      "Manual > Despacho",
+    ]);
   });
 
   it("embeds the title and section with the text, but stores the text alone", () => {

@@ -305,6 +305,90 @@ describe("docs", () => {
     expect(JSON.parse(fetched.content[0].text).text).toContain("ocho kilómetros por hora");
   });
 
+  it("refuses an unexpected or repeated file and a markdown over 2 MB", async () => {
+    // Performs the test.
+    const unexpected = await upload(adminToken, { document: markdown("X-V001"), extra: "x" });
+    const valid = await upload(adminToken, {
+      document: markdown("X-V001"),
+      original: Buffer.from("%PDF-1.4"),
+    });
+    const form = new FormData();
+    form.append("document", new Blob([markdown("X-V001")]), "a.md");
+    form.append("document", new Blob([markdown("X-V001")]), "b.md");
+    const encoded = new Response(form);
+    const twice = await app.inject({
+      method: "POST",
+      url: "/docs",
+      headers: {
+        authorization: `Bearer ${adminToken}`,
+        "content-type": encoded.headers.get("content-type") ?? "",
+      },
+      payload: Buffer.from(await encoded.arrayBuffer()),
+    });
+    const large = await upload(adminToken, {
+      document: `${markdown("X-V001")}${"relleno ".repeat(300_000)}`,
+    });
+
+    // Performs assertions.
+    expect(unexpected.json().error).toBe("unexpected_file");
+    expect(valid.statusCode).toBe(202);
+    expect(twice.json().error).toBe("unexpected_file");
+    expect(large.statusCode).toBe(413);
+    await drainQueue();
+  });
+
+  it("refuses to roll a document back to an older version", async () => {
+    // Performs the test.
+    await upload(adminToken, { document: markdown("FAM-V002") });
+    await drainQueue();
+    const older = await upload(adminToken, { document: markdown("FAM-V001") });
+    const headers = { authorization: `Bearer ${adminToken}` };
+    await upload(adminToken, { document: markdown("FAM-V003") });
+    await drainQueue();
+    const superseded = await app.inject({ method: "POST", url: "/docs/FAM-V002/reindex", headers });
+    const deleteSuperseded = await app.inject({ method: "DELETE", url: "/docs/FAM-V002", headers });
+
+    // Performs assertions.
+    expect(older.statusCode).toBe(409);
+    expect(older.json().message).toContain("FAM-V002");
+    expect(superseded.statusCode).toBe(404);
+    expect(deleteSuperseded.statusCode).toBe(404);
+  });
+
+  it("serves an original only to whoever reads the area it was saved under", async () => {
+    // Performs the test.
+    const headers = { authorization: `Bearer ${userToken}` };
+    await upload(adminToken, {
+      document: markdown("MOVE-V001"),
+      original: Buffer.from("%PDF-1.4 general"),
+    });
+    await drainQueue();
+    const before = await app.inject({ url: "/docs/MOVE-V001/original", headers });
+    // Re-uploaded under a restricted area and not yet indexed: the index still says general
+    await upload(adminToken, { document: markdown("MOVE-V001", "rrhh") });
+    const pending = await app.inject({ url: "/docs/MOVE-V001/original", headers });
+    const oldPdf = await storage.exists("MOVE-V001", "pdf");
+    await drainQueue();
+
+    // Performs assertions.
+    expect(before.statusCode).toBe(200);
+    expect(pending.statusCode).toBe(404);
+    expect(oldPdf).toBe(false);
+  });
+
+  it("keeps the untrusted-data wrapper when search runs through run_capability", async () => {
+    // Performs the test.
+    const result = await mcp("tools/call", {
+      name: "run_capability",
+      arguments: { capability: "search", parameters: { query: "montacargas" } },
+    });
+
+    // Performs assertions.
+    expect(result.content[0].text.startsWith('<tool_result name="search" trusted="false">')).toBe(
+      true,
+    );
+  });
+
   it("reindexes from the stored markdown and deletes from search and storage", async () => {
     // Performs the test.
     const headers = { authorization: `Bearer ${adminToken}` };
@@ -318,9 +402,9 @@ describe("docs", () => {
     expect(reindex.statusCode).toBe(202);
     expect(unknown.statusCode).toBe(404);
     expect(deleted.statusCode).toBe(200);
-    expect(listed.json().data.map((doc: { doc_code: string }) => doc.doc_code)).toEqual([
-      "RH-V001",
-    ]);
+    const codes = listed.json().data.map((doc: { doc_code: string }) => doc.doc_code);
+    expect(codes).not.toContain("BOD-V001");
+    expect(codes).toContain("RH-V001");
     expect(await storage.exists("BOD-V001", "md")).toBe(false);
   });
 });
