@@ -13,6 +13,7 @@ import {
   withCapFields,
 } from "./cap.js";
 import type { Tool, ToolDefinition, ToolOrigin } from "./contract.js";
+import { applyFilter, filterable, filterHint, takeFilter } from "./filter.js";
 
 // A failure of one tool is not a lack of capability; one reasoned alternative, never a sweep
 export const FAILED_ROUTE_NOTE =
@@ -25,6 +26,28 @@ export const FAILED_ROUTE_NOTE =
 export const DENIAL_NOTE =
   "No tienes permiso para esta capacidad. Dile a la persona que existe y que puede pedir acceso, " +
   "y ahí TERMINA tu respuesta: no busques otra herramienta ni respondas de memoria.";
+
+// Arguments are audited to learn how tools are used; a long text, such as a whole document, only
+// grows the table, so its length stands in for it
+const AUDITED_TEXT_CHARS = 1_000;
+
+/**
+ * Prepares a call's arguments for the audit, keeping every key and the length of long texts
+ *
+ * @param   args  Arguments
+ *
+ * @return  What the audit stores
+ */
+export function auditedArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(args).map(([name, value]) => [
+      name,
+      typeof value === "string" && value.length > AUDITED_TEXT_CHARS
+        ? `[${value.length} caracteres]`
+        : value,
+    ]),
+  );
+}
 
 export interface Caller {
   userId: number;
@@ -165,7 +188,7 @@ export class ToolRegistry {
 
   /**
    * Runs a tool through the one door every path shares: scope gate, input and output contracts,
-   * hidden-text removal, the size cap of its channel and the metadata audit
+   * hidden-text removal, the row filter, the size cap of its channel and the metadata audit
    *
    * @param   name     Tool to run
    * @param   args     Arguments from the model
@@ -200,15 +223,21 @@ export class ToolRegistry {
       return this.fail(name, args, caller, context, started, "missing_scope", "Sin permiso");
     }
 
+    // The row filter belongs to the registry, so every tool with a list gets it without knowing
+    const request = takeFilter(args);
+    if ("error" in request) {
+      return this.fail(name, args, caller, context, started, "invalid_filter", request.error);
+    }
+
     const validators = this.validators.get(name);
-    if (validators && !validators.input(args)) {
+    if (validators && !validators.input(request.args)) {
       const detail = this.ajv.errorsText(validators.input.errors, { dataVar: "argumentos" });
       return this.fail(name, args, caller, context, started, "invalid_arguments", detail);
     }
 
     let result: Awaited<ReturnType<Tool["execute"]>>;
     try {
-      result = await tool.execute(args, {
+      result = await tool.execute(request.args, {
         userId: caller.userId,
         userEmail: caller.email,
         scopes: caller.scopes,
@@ -250,10 +279,19 @@ export class ToolRegistry {
 
     // Cleaned before the size cap, so the Excel carries the same clean data the model reads
     const clean = JSON.parse(hidden > 0 ? removeHidden(raw) : raw) as Record<string, unknown>;
+
+    // Filtered over every row before the cut, so what is counted is the whole list, not a sample
+    const filtered = request.filter ? applyFilter(clean, request.filter) : null;
+    if (filtered && !filtered.ok) {
+      return this.fail(name, args, caller, context, started, "invalid_filter", filtered.message);
+    }
+
+    const target = filtered ? null : filterable(clean);
     const capped = await capResult(
-      clean,
+      filtered ? filtered.data : clean,
       context.origin === "mcp" ? EXTERNAL_MAX_BYTES : CHAT_MAX_BYTES,
       this.archiveFor(name, caller),
+      target ? filterHint(target) : "",
     );
     if (!capped.ok) {
       return this.fail(name, args, caller, context, started, "result_too_large", capped.message);
@@ -343,7 +381,7 @@ export class ToolRegistry {
         userId: caller.userId,
         conversationId: context.conversationId ?? null,
         toolName: name,
-        argsJson: args,
+        argsJson: auditedArgs(args),
         success: outcome.success,
         errorCode: outcome.errorCode,
         durationMs: Date.now() - started,

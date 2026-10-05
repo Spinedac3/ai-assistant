@@ -65,6 +65,7 @@ export function sheetOf(name: string, list: unknown[]): Sheet {
  * @param   data      Tool result
  * @param   maxBytes  Size limit
  * @param   archive   Where the full lists can go, if anywhere
+ * @param   hint      Added to the note of a cut result, and measured with it
  *
  * @return  The result that fits, or why it cannot
  */
@@ -72,6 +73,7 @@ export async function capResult(
   data: Record<string, unknown>,
   maxBytes: number,
   archive: Archive | null,
+  hint = "",
 ): Promise<Capped> {
   if (size(data) <= maxBytes) {
     return { ok: true, data, truncated: false };
@@ -142,9 +144,11 @@ export async function capResult(
       nota: saved
         ? `Comparte PRIMERO este link de Excel con las filas de ${heavy.map((entry) => entry.name).join(", ")}${partial}, ` +
           `vence en ${saved.expiresInDays} días: ${saved.url}. Recortado aquí: ${cut}. Los ` +
-          "totales están completos. No vuelvas a llamar para reconstruir las filas que faltan."
+          "totales están completos. No vuelvas a llamar para reconstruir las filas que faltan." +
+          hint
         : `Resultado recortado: ${cut}. Los totales están completos. No completes lo que falta; ` +
-          "si hace falta el detalle, pide filtros más angostos.",
+          "si hace falta el detalle, pide filtros más angostos." +
+          hint,
     };
   };
   const fits = () => size(build()) <= maxBytes;
@@ -204,7 +208,8 @@ export async function capResult(
 }
 
 /**
- * Adds to a declared result shape the fields the cap may add, so a cut result still matches it
+ * Adds to a declared result shape the fields the cap and the row filter may add, so their result
+ * still matches it
  *
  * @param   schema  Declared output schema
  *
@@ -215,10 +220,13 @@ export function withCapFields(schema: JsonSchema): JsonSchema {
     ...schema,
     properties: {
       ...((schema.properties as Record<string, unknown>) ?? {}),
-      // These win over a tool field of the same name: the cap writes them over the data too
+      // These win over a tool field of the same name: the cap and the filter write them over the data
       archivo: { type: "object" },
       filas_omitidas: { type: "object" },
       nota: { type: "string" },
+      filtro_filas: { type: "object" },
+      resumen_filtro: { type: "array" },
+      nota_filtro: { type: "string" },
     },
   };
 }

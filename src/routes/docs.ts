@@ -1,15 +1,14 @@
 import multipart, { type MultipartFile } from "@fastify/multipart";
-import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
 import type { Database } from "../db/client.js";
-import { scopes } from "../db/schema.js";
-import { areaScope, DOC_CODE, parseDocument } from "../rag/document.js";
-import { type Index, isCurrent, newerCurrent, removeDocument } from "../rag/ingest.js";
+import { DOC_CODE } from "../rag/document.js";
+import { type Index, isCurrent, removeDocument } from "../rag/ingest.js";
 import { enqueue, findJob } from "../rag/jobs.js";
 import { scopeFilter } from "../rag/search.js";
 import { CONTENT_TYPES, type DocumentStorage } from "../rag/storage.js";
+import { MAX_MARKDOWN_BYTES, storeDocument } from "../rag/upload.js";
 
 export interface DocsRoutesOptions {
   db: Database;
@@ -17,8 +16,7 @@ export interface DocsRoutesOptions {
   storage: DocumentStorage;
 }
 
-// A long manual in markdown stays well under this; the PDF original can be much larger
-const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
+// The PDF original can be much larger than its markdown
 const MAX_ORIGINAL_BYTES = 50 * 1024 * 1024;
 // Every document has a first chunk, so listing those lists each document once
 const LIST_LIMIT = 5_000;
@@ -116,56 +114,27 @@ export default async function docsRoutes(
       });
     }
 
-    let parsed: ReturnType<typeof parseDocument>;
-    try {
-      parsed = parseDocument(markdown.toString("utf8"));
-    } catch (error) {
+    const stored = await storeDocument(
+      { db, index, storage },
+      markdown.toString("utf8"),
+      {
+        userId: request.authUser?.id ?? 0,
+        scopes: request.authUser?.scopes ?? new Set<string>(),
+        ip: request.ip,
+      },
+      original,
+    );
+    if (!stored.ok) {
       return reply
-        .code(400)
-        .send({ ok: false, error: "invalid_document", message: (error as Error).message });
+        .code(
+          stored.error === "older_version" ? 409 : stored.error === "area_not_readable" ? 403 : 400,
+        )
+        .send({ ok: false, error: stored.error, message: stored.message });
     }
 
-    // The area must already exist as a permission, or nobody could ever read the document
-    const scope = areaScope(parsed.frontmatter.area);
-    const [area] = await db.select({ id: scopes.id }).from(scopes).where(eq(scopes.code, scope));
-    if (!area) {
-      return reply.code(400).send({
-        ok: false,
-        error: "unknown_area",
-        message: `El área ${parsed.frontmatter.area} no existe; créala primero como permiso ${scope}`,
-      });
-    }
-
-    const code = parsed.frontmatter.doc_code;
-    const newer = await newerCurrent(index, code);
-    if (newer) {
-      return reply.code(409).send({
-        ok: false,
-        error: "older_version",
-        message: `Ya está vigente una versión más nueva (${newer}); sube una versión posterior`,
-      });
-    }
-
-    // Each save replaces the object in one step, so a failure never leaves the document without
-    // its markdown; an old PDF never stays next to a new markdown
-    await storage.save(code, "md", markdown, scope);
-    if (original) {
-      await storage.save(code, "pdf", original, scope);
-    } else {
-      await storage.remove(code, ["pdf"]);
-    }
-
-    const userId = request.authUser?.id ?? 0;
-    const job = await enqueue(db, code, "upload", userId);
-    await logAudit(db, {
-      userId,
-      level: "info",
-      eventCode: "docs.uploaded",
-      message: `${code} (${parsed.frontmatter.doc_title}), área ${parsed.frontmatter.area}`,
-      ip: request.ip,
-    });
-
-    return reply.code(202).send({ ok: true, data: { job_id: job, doc_code: code } });
+    return reply
+      .code(202)
+      .send({ ok: true, data: { job_id: stored.jobId, doc_code: stored.frontmatter.doc_code } });
   });
 
   app.get("/docs/jobs/:id", manage, async (request, reply) => {

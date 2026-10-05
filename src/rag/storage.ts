@@ -13,6 +13,9 @@ export const CONTENT_TYPES: Record<OriginalKind, string> = {
 // index that may still describe a previous upload
 const SCOPE_META = "required-scope";
 
+// Parts of documents sent in pieces wait here until the last one arrives
+const PARTS = "_parts";
+
 export interface Original {
   stream: Readable;
   requiredScope: string;
@@ -172,6 +175,151 @@ export class DocumentStorage {
       kinds.map((kind) => key(docCode, kind)),
     );
   }
+
+  /**
+   * Keeps one part of a document sent in pieces, replacing a part with the same number
+   *
+   * @param   upload  Who sends which document, in how many parts
+   * @param   part    Part number
+   * @param   text    Markdown of the part
+   */
+  async savePart(upload: PartUpload, part: number, text: string): Promise<void> {
+    const data = Buffer.from(text, "utf8");
+    await this.client.putObject(this.config.bucket, partKey(upload, part), data, data.length);
+  }
+
+  /**
+   * Lists the parts received of an upload, dropping those of an earlier attempt left unfinished
+   *
+   * @param   upload    Who sends which document, in how many parts
+   * @param   lifetime  Milliseconds a part counts, before the newest one; measured on the storage
+   *                    clock alone, so a server running ahead or behind cannot drop a fresh part
+   *
+   * @return  Each part number with its size in bytes
+   */
+  async partsReceived(
+    upload: PartUpload,
+    lifetime: number,
+  ): Promise<{ part: number; bytes: number }[]> {
+    const found = await this.list(partKey(upload));
+    const newest = Math.max(0, ...found.map((item) => item.lastModified.getTime()));
+    const stale = found.filter((item) => item.lastModified.getTime() < newest - lifetime);
+    await this.removeKeys(stale.map((item) => item.name));
+
+    return found
+      .filter((item) => !stale.includes(item))
+      .map((item) => ({
+        part: Number(item.name.split("/").pop()?.replace(".md", "")),
+        bytes: item.size,
+      }))
+      .sort((a, b) => a.part - b.part);
+  }
+
+  /**
+   * Reads one part of an upload
+   *
+   * @param   upload  Who sends which document, in how many parts
+   * @param   part    Part number
+   *
+   * @return  Its markdown
+   */
+  async readPart(upload: PartUpload, part: number): Promise<string> {
+    const stream = await this.client.getObject(this.config.bucket, partKey(upload, part));
+    const pieces: Buffer[] = [];
+    for await (const piece of stream) {
+      pieces.push(piece as Buffer);
+    }
+
+    return Buffer.concat(pieces).toString("utf8");
+  }
+
+  /**
+   * Drops every part a person sent of a document, whatever the number of parts it was split in
+   *
+   * @param   owner    Who sends it
+   * @param   docCode  Document code
+   */
+  async removeParts(owner: number, docCode: string): Promise<void> {
+    const found = await this.list(partKey({ owner, docCode }));
+    await this.removeKeys(found.map((item) => item.name));
+  }
+
+  /**
+   * Drops the parts of uploads left unfinished
+   *
+   * @param   olderThan  Parts saved before this moment go
+   */
+  async purgeParts(olderThan: Date): Promise<void> {
+    const found = await this.list(`${PARTS}/`);
+    await this.removeKeys(
+      found.filter((item) => item.lastModified < olderThan).map((item) => item.name),
+    );
+  }
+
+  /**
+   * Removes objects by key; an empty list makes no request
+   *
+   * @param   keys  Object keys
+   */
+  private async removeKeys(keys: string[]): Promise<void> {
+    if (keys.length > 0) {
+      await this.client.removeObjects(this.config.bucket, keys);
+    }
+  }
+
+  /**
+   * Lists the objects under a prefix
+   *
+   * @param   prefix  Key prefix
+   *
+   * @return  Their names, sizes and when they were saved
+   */
+  private async list(
+    prefix: string,
+  ): Promise<{ name: string; size: number; lastModified: Date }[]> {
+    const found: { name: string; size: number; lastModified: Date }[] = [];
+    for await (const item of this.client.listObjectsV2(this.config.bucket, prefix, true)) {
+      if (item.name) {
+        found.push({ name: item.name, size: item.size, lastModified: item.lastModified });
+      }
+    }
+
+    return found;
+  }
+}
+
+export interface PartUpload {
+  owner: number;
+  docCode: string;
+  parts: number;
+}
+
+/**
+ * Builds the key of a part, or the folder of an upload or of a person's document
+ *
+ * The folder holds a slash, which no document code can, so a part never overwrites or joins a real
+ * document; the number of parts is part of it, so an attempt split differently never mixes in.
+ *
+ * @param   upload  Who sends which document, and in how many parts when known
+ * @param   part    Part number, for the key of one part
+ *
+ * @return  The key or folder
+ */
+export function partKey(
+  upload: Omit<PartUpload, "parts"> & { parts?: number },
+  part?: number,
+): string {
+  const { owner, docCode, parts } = upload;
+  if (!DOC_CODE.test(docCode) || !Number.isInteger(owner)) {
+    throw new Error(`Código de documento inválido: ${docCode}`);
+  }
+
+  const folder = `${PARTS}/${owner}/${docCode}/`;
+  if (parts === undefined) {
+    return folder;
+  }
+
+  return `${folder}${parts}/${part === undefined ? "" : `${part}.md`}`;
 }
 
 /**
