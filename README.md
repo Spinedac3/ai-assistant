@@ -59,6 +59,25 @@ El modelo se elige en la administración (`PUT /admin/settings/chat.model`, perm
 `settings.manage`) y aplica desde el siguiente mensaje, sin reiniciar. Si nadie lo eligió se usa
 `CHAT_MODEL`, que por defecto es `claude-opus-5-5`.
 
+## Herramientas y MCP
+
+El asistente expone sus herramientas por **MCP** en `POST /mcp` (SDK oficial, sin sesiones). Lo
+que ve cada quien lo decide una sola función:
+
+| Quién llama | Qué ve |
+|---|---|
+| El chat del asistente | `find_capability` y `run_capability`: descubre la herramienta con su esquema y la ejecuta |
+| Un cliente externo (Claude, ChatGPT…) | Lo mismo, más un parámetro `original_question` que se guarda 90 días para mejorar el catálogo |
+| La corrida de un agente | Solo sus herramientas, directas, con su esquema de salida |
+
+Cada llamada pasa por la misma puerta: permisos, validación de entrada y de salida contra el
+esquema declarado, limpieza de caracteres invisibles y auditoría en `tool_calls`. La auditoría
+guarda quién, qué, cuándo, con qué argumentos y si funcionó, **nunca el resultado**. Los resultados
+viajan al proveedor del modelo como parte de la conversación.
+
+El chat obtiene en cada turno un token propio, atado a la persona y a la conversación, que se
+revoca al terminar.
+
 En Windows, `CLAUDE_BIN` tiene que apuntar al `claude.exe` real: Node no ejecuta el
 `claude.cmd` sin una shell.
 
