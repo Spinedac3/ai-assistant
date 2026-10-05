@@ -1,3 +1,4 @@
+import multipart from "@fastify/multipart";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { RateLimitExceededError } from "../chat/rateLimit.js";
@@ -9,8 +10,16 @@ import {
   renameConversation,
 } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, type ChatUser, chatTurn } from "../chat/turn.js";
+import type { Uploads } from "../chat/uploads.js";
+import { removeHidden } from "../lib/hiddenText.js";
 
-export type ChatRoutesOptions = Omit<ChatDependencies, "logger">;
+export type ChatRoutesOptions = Omit<ChatDependencies, "logger"> & {
+  // Without it the chat takes no attachments
+  uploads?: Uploads;
+};
+
+// A PDF the model reads whole; larger ones are better loaded as documents
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 const sendBody = z.object({
   content: z.string().trim().min(1).max(20_000),
@@ -63,6 +72,7 @@ export default async function chatRoutes(
   options: ChatRoutesOptions,
 ): Promise<void> {
   const chatScope = { preHandler: [app.requireAuth, app.requireScope("chat.use")] };
+  await app.register(multipart, { limits: { files: 1, fileSize: MAX_UPLOAD_BYTES, fields: 0 } });
 
   const userOf = (request: { authUser: ChatUser | null }): ChatUser => {
     const user = request.authUser;
@@ -178,6 +188,56 @@ export default async function chatRoutes(
     const { type: _type, ...data } = done;
 
     return { ok: true, data: { ...data, userMessageId } };
+  });
+
+  // The file stays in memory for its owner; the model reads it with read_pdf
+  app.post("/chat/upload", chatScope, async (request, reply) => {
+    const uploads = options.uploads;
+    if (!uploads) {
+      return reply.code(503).send({ ok: false, error: "uploads_off" });
+    }
+    const part = await request.file().catch(() => undefined);
+    if (!part) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "no_file", message: "No llegó ningún archivo" });
+    }
+    const pieces: Buffer[] = [];
+    for await (const piece of part.file) {
+      pieces.push(piece as Buffer);
+    }
+    if (part.file.truncated) {
+      return reply.code(413).send({
+        ok: false,
+        error: "file_too_large",
+        message: "El PDF pasa de 10 MB; cárgalo como documento",
+      });
+    }
+    const bytes = Buffer.concat(pieces);
+    // What the file is, not what it claims to be
+    if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-") {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "not_pdf", message: "Solo se pueden adjuntar PDF" });
+    }
+
+    // The name is shown back to the person and read by the model, so nothing hidden stays in it
+    const name =
+      removeHidden(part.filename ?? "")
+        .replace(/\p{Cc}/gu, "")
+        .split(/[/\\]/)
+        .pop()
+        ?.slice(0, 120) || "documento.pdf";
+    const id = uploads.put(userOf(request).id, { name, bytes });
+    if (!id) {
+      return reply.code(503).send({
+        ok: false,
+        error: "uploads_full",
+        message: "Hay demasiados archivos abiertos ahora; vuelve a intentarlo en unos minutos",
+      });
+    }
+
+    return { ok: true, data: { fileId: id, name, bytes: bytes.length } };
   });
 
   app.get("/chat/conversations", chatScope, async (request) => {

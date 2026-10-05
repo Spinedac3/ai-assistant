@@ -8,6 +8,7 @@ import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
 import { NO_ANSWER, NO_DATA, RETRY_DIRECTIVE } from "../../src/chat/guards.js";
 import { refundMessage, reserveMessage } from "../../src/chat/rateLimit.js";
+import { Uploads } from "../../src/chat/uploads.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { messages, rateLimits, roles, users } from "../../src/db/schema.js";
 import { testSigner } from "../support/keys.js";
@@ -15,6 +16,7 @@ import { freshDatabase } from "./support/database.js";
 
 const PASSWORD = "nube-cactus-farol-29";
 const fakeCli = join(import.meta.dirname, "..", "support", "fakeCli.mjs");
+const uploads = new Uploads();
 const scratch = mkdtempSync(join(tmpdir(), "chat-it-"));
 const scenario = join(scratch, "scenario.json");
 
@@ -97,6 +99,7 @@ describe("chat", () => {
         workspacesDir: join(scratch, "workspaces"),
         prompt: { assistantName: "Lumen", timeZone: "UTC", organizationContext: null },
         limits: { msgsPerHour: 100, msgsPerDay: 100, tokensPerDay: 1_000_000 },
+        uploads,
       },
     });
 
@@ -496,5 +499,44 @@ describe("chat", () => {
       "user",
       "assistant",
     ]);
+  });
+
+  it("keeps an attached PDF for its owner only, and refuses what is not a PDF or is too big", async () => {
+    // Performs the test.
+    const send = (name: string, contents: Buffer, bearer = token) => {
+      const form = new FormData();
+      form.append("file", new Blob([contents]), name);
+      const encoded = new Response(form);
+      return encoded.arrayBuffer().then((body) =>
+        app.inject({
+          method: "POST",
+          url: "/chat/upload",
+          headers: {
+            authorization: `Bearer ${bearer}`,
+            "content-type": encoded.headers.get("content-type") ?? "",
+          },
+          payload: Buffer.from(body),
+        }),
+      );
+    };
+    const pdf = Buffer.from("%PDF-1.7 factura");
+    const sent = await send("..carpeta/Factura‮ marzo.pdf", pdf);
+    const fake = await send("factura.pdf", Buffer.from("MZ ejecutable"));
+    const huge = await send("grande.pdf", Buffer.concat([pdf, Buffer.alloc(10 * 1024 * 1024)]));
+    const anonymous = await app.inject({ method: "POST", url: "/chat/upload" });
+    const data = sent.json().data;
+    const [ana] = await database.db.select().from(users).where(eq(users.email, "ana@example.com"));
+    const [beto] = await database.db
+      .select()
+      .from(users)
+      .where(eq(users.email, "beto@example.com"));
+
+    // Performs assertions.
+    expect(data).toMatchObject({ name: "Factura marzo.pdf", bytes: pdf.length });
+    expect(uploads.get(ana?.id ?? 0, data.fileId)?.bytes).toEqual(pdf);
+    expect(uploads.get(beto?.id ?? 0, data.fileId)).toBeNull();
+    expect(fake.json()).toMatchObject({ error: "not_pdf" });
+    expect(huge.json()).toMatchObject({ error: "file_too_large" });
+    expect(anonymous.statusCode).toBe(401);
   });
 });

@@ -11,7 +11,7 @@ import {
 } from "@chakra-ui/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { FiCheck, FiPlus, FiSend, FiSquare, FiStar, FiX } from "react-icons/fi";
+import { FiCheck, FiPaperclip, FiPlus, FiSend, FiSquare, FiStar, FiX } from "react-icons/fi";
 import Markdown from "react-markdown";
 import { NavLink, useNavigate, useParams } from "react-router";
 import remarkGfm from "remark-gfm";
@@ -46,6 +46,31 @@ export function ChatPage() {
   const [input, setInput] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attached, setAttached] = useState<{ fileId: string; name: string } | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const picker = useRef<HTMLInputElement>(null);
+
+  const attach = async (file: File | undefined) => {
+    if (!file) {
+      return;
+    }
+    setUploading(true);
+    setError(null);
+    const form = new FormData();
+    form.append("file", file, file.name);
+    try {
+      setAttached(
+        await api<{ fileId: string; name: string }>("/chat/upload", { method: "POST", body: form }),
+      );
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : "No se pudo adjuntar el PDF");
+    } finally {
+      setUploading(false);
+      if (picker.current) {
+        picker.current.value = "";
+      }
+    }
+  };
   const stop = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
@@ -74,11 +99,18 @@ export function ChatPage() {
     setDraft((current) => (current ? change(current) : current));
 
   const send = async () => {
-    const question = input.trim();
+    const typed = input.trim();
+    // The model learns the file from the message itself, and reads it with read_pdf
+    const question = attached
+      ? `${typed || "¿Qué dice este documento?"}
+
+[PDF adjunto «${attached.name}», file_id: ${attached.fileId}. Léelo con read_pdf.]`
+      : typed;
     if (!question || draft) {
       return;
     }
     setInput("");
+    setAttached(null);
     setError(null);
     setDraft({ question, text: "", tools: [] });
     const controller = new AbortController();
@@ -232,7 +264,37 @@ export function ChatPage() {
           )}
           <div ref={bottom} />
         </Stack>
+        {attached && (
+          <HStack px={3} pt={3} gap={2} fontSize="sm">
+            <FiPaperclip />
+            <Text lineClamp={1}>{attached.name}</Text>
+            <IconButton
+              aria-label="Quitar el PDF"
+              size="2xs"
+              variant="ghost"
+              onClick={() => setAttached(null)}
+            >
+              <FiX />
+            </IconButton>
+          </HStack>
+        )}
         <HStack p={3} borderTopWidth="1px" align="end">
+          <input
+            ref={picker}
+            type="file"
+            accept="application/pdf,.pdf"
+            hidden
+            onChange={(event) => void attach(event.target.files?.[0])}
+          />
+          <IconButton
+            aria-label="Adjuntar un PDF"
+            variant="ghost"
+            loading={uploading}
+            disabled={draft !== null}
+            onClick={() => picker.current?.click()}
+          >
+            <FiPaperclip />
+          </IconButton>
           <Textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -256,7 +318,7 @@ export function ChatPage() {
               aria-label="Enviar"
               colorPalette="brand"
               onClick={() => void send()}
-              disabled={!input.trim()}
+              disabled={!input.trim() && !attached}
             >
               <FiSend />
             </IconButton>
