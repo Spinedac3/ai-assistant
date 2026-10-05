@@ -54,7 +54,8 @@ export const definitionSchema = z
     base: z.discriminatedUnion("kind", [
       // A table or a view: both are read the same way
       z.object({ kind: z.literal("table"), name: relationName }).strict(),
-      z.object({ kind: z.literal("query"), sql: z.string().trim().min(1) }).strict(),
+      // A query a person pastes is a few thousand characters; it travels to the source on every call
+      z.object({ kind: z.literal("query"), sql: z.string().trim().min(1).max(100_000) }).strict(),
     ]),
     columns: z
       .array(z.object({ name: columnName, label: z.string().trim().min(1).optional() }).strict())

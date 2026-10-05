@@ -6,6 +6,14 @@ interface Token {
   kind: "word" | "symbol";
   text: string;
   depth: number;
+  start: number;
+  end: number;
+}
+
+interface Lexed {
+  tokens: Token[];
+  // Spans the engine ignores; they are blanked before the query runs
+  comments: Array<[number, number]>;
 }
 
 // Table hints of SQL Server: they take locks or change isolation, which a read-only tool must not
@@ -31,17 +39,21 @@ const MSSQL_HINTS = new Set([
   "SNAPSHOT",
 ]);
 
+const WORD_START = /[A-Za-z_@#$]/;
+const WORD_PART = /[A-Za-z0-9_@#$]/;
+
 /**
- * Splits a query into words and symbols, skipping strings, quoted names and comments as the engine
- * reads them, and marks how deep in parentheses each one is
+ * Splits a query into words and symbols the way its engine reads it: strings, quoted names and
+ * comments with each engine's own rules, and how deep in parentheses each token is
  *
  * @param   sql     Query
  * @param   engine  Engine whose syntax applies
  *
- * @return  The tokens, or why the query cannot be read safely
+ * @return  The tokens and the comments, or why the query cannot be read safely
  */
-function tokenize(sql: string, engine: EngineName): Token[] | string {
+function lex(sql: string, engine: EngineName): Lexed | string {
   const tokens: Token[] = [];
+  const comments: Array<[number, number]> = [];
   let depth = 0;
   let index = 0;
   const closing: Record<string, string> = { "'": "'", '"': '"', "`": "`", "[": "]" };
@@ -49,26 +61,38 @@ function tokenize(sql: string, engine: EngineName): Token[] | string {
     engine === "mysql" ? ["'", '"', "`"] : engine === "mssql" ? ["'", '"', "["] : ["'", '"'];
 
   while (index < sql.length) {
+    const start = index;
     const char = sql[index] as string;
-    const next = sql[index + 1];
+    const next = sql[index + 1] ?? "";
 
     if (/\s/.test(char)) {
       index += 1;
-    } else if ((char === "-" && next === "-") || (char === "#" && engine === "mysql")) {
-      // Postgres also ends a line comment at a carriage return
-      while (index < sql.length && sql[index] !== "\n" && sql[index] !== "\r") {
+      continue;
+    }
+
+    // MySQL takes -- as a comment only when a space or a control character follows
+    const lineComment =
+      (char === "-" && next === "-" && (engine !== "mysql" || (sql[index + 2] ?? " ") <= " ")) ||
+      (char === "#" && engine === "mysql");
+    if (lineComment) {
+      while (index < sql.length && sql[index] !== "\n") {
         index += 1;
       }
-    } else if (char === "/" && next === "*") {
+      comments.push([start, index]);
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
       // MySQL runs the inside of /*! … */ as code
-      if (sql[index + 2] === "!") {
+      if (engine === "mysql" && sql[index + 2] === "!") {
         return "La consulta tiene un comentario /*! */, que MySQL ejecuta como código.";
       }
-      // Postgres nests block comments; the others end at the first */
+      // Postgres and SQL Server nest block comments; MySQL ends at the first */
+      const nests = engine !== "mysql";
       let level = 0;
       while (index < sql.length) {
         if (sql[index] === "/" && sql[index + 1] === "*") {
-          level += engine === "postgres" || level === 0 ? 1 : 0;
+          level += nests || level === 0 ? 1 : 0;
           index += 2;
         } else if (sql[index] === "*" && sql[index + 1] === "/") {
           level -= 1;
@@ -83,11 +107,41 @@ function tokenize(sql: string, engine: EngineName): Token[] | string {
       if (level !== 0) {
         return "La consulta tiene un comentario sin cerrar.";
       }
-    } else if (quotes.includes(char)) {
+      comments.push([start, index]);
+      continue;
+    }
+
+    // Postgres dollar quoting: $tag$ … $tag$, with no escapes inside
+    if (engine === "postgres" && char === "$") {
+      const tag = sql.slice(index).match(/^\$([A-Za-z_][A-Za-z0-9_]*)?\$/)?.[0];
+      if (tag) {
+        const end = sql.indexOf(tag, index + tag.length);
+        if (end < 0) {
+          return "La consulta tiene un texto entre $ sin cerrar.";
+        }
+        index = end + tag.length;
+        tokens.push({ kind: "word", text: "'…'", depth, start, end: index });
+        continue;
+      }
+    }
+
+    if (quotes.includes(char)) {
       const end = closing[char] as string;
+      // A backslash escapes the next character in MySQL strings and in Postgres E'' strings
+      const before = sql[index - 1] ?? "";
+      const escapes =
+        (engine === "mysql" && char !== "`") ||
+        (engine === "postgres" &&
+          char === "'" &&
+          /[Ee]/.test(before) &&
+          !WORD_PART.test(sql[index - 2] ?? ""));
       index += 1;
       let closed = false;
       while (index < sql.length) {
+        if (escapes && sql[index] === "\\") {
+          index += 2;
+          continue;
+        }
         if (sql[index] === end) {
           // A doubled closing mark is the mark itself, inside the string or name
           if (sql[index + 1] === end) {
@@ -98,68 +152,89 @@ function tokenize(sql: string, engine: EngineName): Token[] | string {
           closed = true;
           break;
         }
-        // MySQL also escapes with a backslash inside strings
-        index += engine === "mysql" && sql[index] === "\\" && char !== "`" ? 2 : 1;
+        index += 1;
       }
       if (!closed) {
         return "La consulta tiene un texto o un nombre sin cerrar.";
       }
-      tokens.push({ kind: "word", text: char === "'" ? "'…'" : '"…"', depth });
-    } else if (/[A-Za-z_@#$]/.test(char)) {
-      const start = index;
-      while (index < sql.length && /[A-Za-z0-9_@#$]/.test(sql[index] as string)) {
+      tokens.push({ kind: "word", text: char === "'" ? "'…'" : '"…"', depth, start, end: index });
+      continue;
+    }
+
+    if (WORD_START.test(char)) {
+      while (index < sql.length && WORD_PART.test(sql[index] as string)) {
         index += 1;
       }
-      tokens.push({ kind: "word", text: sql.slice(start, index).toUpperCase(), depth });
-    } else {
-      if (char === ")") {
-        depth -= 1;
-        if (depth < 0) {
-          return "La consulta cierra un paréntesis que no abrió.";
-        }
-      }
-      tokens.push({ kind: "symbol", text: char, depth });
-      if (char === "(") {
-        depth += 1;
-      }
-      index += 1;
+      tokens.push({
+        kind: "word",
+        text: sql.slice(start, index).toUpperCase(),
+        depth,
+        start,
+        end: index,
+      });
+      continue;
     }
+
+    if (char === ")") {
+      depth -= 1;
+      if (depth < 0) {
+        return "La consulta cierra un paréntesis que no abrió.";
+      }
+    }
+    tokens.push({ kind: "symbol", text: char, depth, start, end: index + 1 });
+    if (char === "(") {
+      depth += 1;
+    }
+    index += 1;
   }
 
-  return depth === 0 ? tokens : "La consulta deja un paréntesis sin cerrar.";
+  return depth === 0 ? { tokens, comments } : "La consulta deja un paréntesis sin cerrar.";
 }
 
 /**
  * Checks a query pasted by a person before it becomes the base of a tool: one read statement that
  * the creator can wrap, filter and order
  *
+ * The query that runs is the one read here with its comments blanked out, so an engine that reads
+ * a comment differently from this check still sees exactly what was checked.
+ *
  * @param   sql     Pasted query
  * @param   engine  Engine of the source
  *
- * @return  The query without a closing semicolon, or why it is refused
+ * @return  The query to run, or why it is refused
  */
 export function checkPasted(sql: string, engine: EngineName): PastedCheck {
   const refuse = (message: string): PastedCheck => ({ ok: false, message });
-  const tokens = tokenize(sql, engine);
-  if (typeof tokens === "string") {
-    return refuse(tokens);
+  const lexed = lex(sql, engine);
+  if (typeof lexed === "string") {
+    return refuse(lexed);
   }
 
-  // A closing semicolon is dropped; anything after one is a second statement
-  const semicolon = tokens.findIndex((token) => token.text === ";");
-  if (semicolon >= 0 && semicolon < tokens.length - 1) {
+  // Semicolons before the query, as in ;WITH, and one closing it are dropped; any other is a
+  // second statement
+  let tokens = lexed.tokens;
+  while (tokens[0]?.text === ";") {
+    tokens = tokens.slice(1);
+  }
+  if (tokens.at(-1)?.text === ";") {
+    tokens = tokens.slice(0, -1);
+  }
+  if (tokens.some((token) => token.text === ";")) {
     return refuse("Pega una sola consulta: después del ; hay otra sentencia.");
   }
-  const body = semicolon >= 0 ? tokens.slice(0, -1) : tokens;
 
-  const first = body.find((token) => token.text !== "(");
+  const first = tokens.find((token) => token.text !== "(");
   if (!first || (first.text !== "SELECT" && first.text !== "WITH")) {
     return refuse("La consulta tiene que empezar con SELECT o WITH.");
   }
+  // SQL Server cannot read a common table expression inside a derived table
+  if (engine === "mssql" && first.text === "WITH") {
+    return refuse("En SQL Server reescribe el WITH como subconsulta: el creador la envuelve.");
+  }
 
-  for (const [position, token] of body.entries()) {
-    const after = body[position + 1];
-    const before = body[position - 1];
+  for (const [position, token] of tokens.entries()) {
+    const after = tokens[position + 1];
+    const before = tokens[position - 1];
 
     // The creator orders the result itself; an order inside a wrapped query is lost or refused
     if (token.depth === 0 && token.text === "ORDER" && after?.text === "BY") {
@@ -168,16 +243,16 @@ export function checkPasted(sql: string, engine: EngineName): PastedCheck {
     if (token.depth === 0 && token.text === "INTO") {
       return refuse("La consulta no puede usar INTO: crearía o escribiría datos.");
     }
-    if (token.text === "FOR" && (after?.text === "UPDATE" || after?.text === "SHARE")) {
+    if (token.text === "FOR" && ["UPDATE", "SHARE", "NO", "KEY"].includes(after?.text ?? "")) {
       return refuse("La consulta no puede bloquear filas (FOR UPDATE / FOR SHARE).");
     }
     if (token.text === "LOCK" && after?.text === "IN") {
       return refuse("La consulta no puede bloquear filas (LOCK IN SHARE MODE).");
     }
     if (engine === "mssql") {
-      // WITH ( after a table is a hint; a common table expression names itself first
+      // WITH ( after a table is a hint
       const hint =
-        (token.text === "WITH" && after?.text === "(" && position > 0) ||
+        (token.text === "WITH" && after?.text === "(") ||
         (token.text === "(" && before?.kind === "word" && MSSQL_HINTS.has(after?.text ?? ""));
       if (hint) {
         return refuse("Quita los hints de tabla (WITH (NOLOCK) y similares): toman bloqueos.");
@@ -188,10 +263,15 @@ export function checkPasted(sql: string, engine: EngineName): PastedCheck {
     }
   }
 
-  const text = sql.trim();
+  // What runs: the checked tokens and the space between them, every comment blanked
+  const from = tokens[0]?.start ?? 0;
+  const to = tokens.at(-1)?.end ?? 0;
+  let text = sql.slice(from, to);
+  for (const [start, end] of lexed.comments) {
+    if (start >= from && end <= to) {
+      text = `${text.slice(0, start - from)}${" ".repeat(end - start)}${text.slice(end - from)}`;
+    }
+  }
 
-  return {
-    ok: true,
-    sql: semicolon >= 0 ? text.replace(/;\s*(--[^\r\n]*|\/\*[\s\S]*?\*\/|\s)*$/, "") : text,
-  };
+  return { ok: true, sql: text };
 }
