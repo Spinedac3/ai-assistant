@@ -198,6 +198,11 @@ describe("password reset by mail", () => {
     const second = await lastLinkToken(ana);
     const replaced = await reset(first);
     const failedSend = await sendLink(anaId, adminToken, failing);
+    // The link that never went out is not left behind
+    const alive = await database.db
+      .select({ id: passwordResets.id })
+      .from(passwordResets)
+      .where(and(eq(passwordResets.userId, anaId), isNull(passwordResets.usedAt)));
     // The link the person already had still works
     const kept = await reset(second);
     await sendLink(anaId);
@@ -212,6 +217,7 @@ describe("password reset by mail", () => {
     expect(first).not.toBe(second);
     expect(replaced.json()).toMatchObject({ error: "invalid_link" });
     expect(failedSend.json()).toMatchObject({ error: "mail_failed" });
+    expect(alive).toHaveLength(1);
     expect(kept.json()).toEqual({ ok: true });
     expect(expired.json()).toMatchObject({ error: "invalid_link" });
   });
