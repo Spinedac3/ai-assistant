@@ -179,7 +179,8 @@ describe("usage", () => {
     await call(ids.carla ?? 0, "search", "run", ago(4));
     // A system with an account: one question and one call
     const systemAnswer = await converse(ids.app ?? 0, [{ at: ago(1), cost: 7_000, tokens: 700 }]);
-    await call(ids.app ?? 0, "search", "mcp", ago(1));
+    // On a day of its own, which a system alone never puts in the days of people
+    await call(ids.app ?? 0, "search", "mcp", ago(24 * 5));
     await database.db.insert(messageRatings).values([
       { messageId: answer, userId: ids.ana ?? 0, stars: 4, createdAt: ago(9) },
       { messageId: answer + 2, userId: ids.ana ?? 0, stars: 2, createdAt: ago(8) },
