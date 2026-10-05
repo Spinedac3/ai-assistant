@@ -4,6 +4,7 @@ import { ChatRoute } from "./chat/ChatPage";
 import { DocsPage } from "./docs/DocsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { Layout } from "./shell/Layout";
+import { SourcesPage } from "./sources/SourcesPage";
 
 /**
  * Shows the panel to a person with a session, and the entrance to anyone else
@@ -24,6 +25,7 @@ export const router = createBrowserRouter(
         { path: "chat", handle: { title: "Chat" }, element: <ChatRoute /> },
         { path: "chat/:id", handle: { title: "Chat" }, element: <ChatRoute /> },
         { path: "documentos", handle: { title: "Documentos" }, element: <DocsPage /> },
+        { path: "fuentes", handle: { title: "Fuentes" }, element: <SourcesPage /> },
       ],
     },
   ],
