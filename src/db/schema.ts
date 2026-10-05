@@ -305,3 +305,43 @@ export const documentJobs = pgTable(
   },
   (t) => [index("document_jobs_status_idx").on(t.status, t.createdAt)],
 );
+
+// External databases the tools read; the password is sealed with the master key, never stored plain
+export const sources = pgTable(
+  "sources",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    code: varchar("code", { length: 50 }).notNull(),
+    name: varchar("name", { length: 200 }).notNull(),
+    engine: varchar("engine", { length: 10, enum: ["postgres", "mysql", "mssql"] }).notNull(),
+    host: varchar("host", { length: 255 }).notNull(),
+    port: integer("port").notNull(),
+    database: varchar("database", { length: 128 }).notNull(),
+    username: varchar("username", { length: 128 }).notNull(),
+    sealedPassword: text("sealed_password").notNull(),
+    // Zone of the dates the source stores without one; null inherits the app's
+    timeZone: varchar("time_zone", { length: 64 }),
+    tls: boolean("tls").notNull().default(true),
+    active: boolean("active").notNull().default(true),
+    createdBy: integer("created_by").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("sources_code_unique").on(t.code)],
+);
+
+// Excel files with the detail a tool result could not carry; deleted when they expire
+export const exportFiles = pgTable(
+  "export_files",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    userId: integer("user_id").notNull(),
+    toolName: varchar("tool_name", { length: 100 }).notNull(),
+    fileName: varchar("file_name", { length: 150 }).notNull(),
+    rows: integer("rows").notNull(),
+    bytes: integer("bytes").notNull(),
+    expiresAt: timestamptz("expires_at").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("export_files_expires_idx").on(t.expiresAt)],
+);
