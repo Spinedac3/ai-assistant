@@ -1,12 +1,23 @@
-// No scripts, no frames, forms only back to this server
-export const CONSENT_HEADERS = {
-  "Content-Type": "text/html; charset=utf-8",
-  "Content-Security-Policy":
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-  "X-Frame-Options": "DENY",
-  "Referrer-Policy": "no-referrer",
-  "Cache-Control": "no-store",
-};
+/**
+ * Builds the headers of the consent page: no scripts, no frames, no caching
+ *
+ * @param   redirectUri  Validated client redirect
+ *
+ * @return  The headers
+ */
+export function consentHeaders(redirectUri: string): Record<string, string> {
+  // Browsers apply form-action to the redirect that follows the post, so the client origin is
+  // allowed too; it comes from a registered redirect, never from free input
+  const clientOrigin = new URL(redirectUri).origin;
+
+  return {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${clientOrigin}; frame-ancestors 'none'; base-uri 'none'`,
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+  };
+}
 
 export interface ConsentRequest {
   clientId: string;
@@ -15,6 +26,8 @@ export interface ConsentRequest {
   codeChallenge: string;
   state?: string;
   resource?: string;
+  // Echo of the cookie set with the page; a cross-site post carries the field but not the cookie
+  csrf: string;
 }
 
 /**
@@ -24,7 +37,7 @@ export interface ConsentRequest {
  *
  * @return  The escaped text
  */
-export function escapeHtml(value: string): string {
+function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -53,6 +66,7 @@ export function consentPage(
     code_challenge: request.codeChallenge,
     state: request.state,
     resource: request.resource,
+    csrf: request.csrf,
   })
     .filter(([, value]) => value !== undefined)
     .map(
@@ -61,13 +75,7 @@ export function consentPage(
     )
     .join("\n      ");
 
-  const host = (() => {
-    try {
-      return new URL(request.redirectUri).host;
-    } catch {
-      return request.redirectUri;
-    }
-  })();
+  const host = new URL(request.redirectUri).host;
 
   return `<!doctype html>
 <html lang="es">
@@ -81,7 +89,7 @@ export function consentPage(
     h1 { font-size: 1.25rem; margin-top: 0; }
     label { display: block; margin-top: 1rem; font-size: 0.9rem; }
     input[type=email], input[type=password] { width: 100%; padding: 0.6rem; margin-top: 0.3rem; box-sizing: border-box; }
-    .actions { display: flex; gap: 0.75rem; margin-top: 1.5rem; }
+    .actions { display: flex; flex-direction: row-reverse; gap: 0.75rem; margin-top: 1.5rem; }
     button { flex: 1; padding: 0.7rem; border-radius: 0.5rem; border: 1px solid #a8a29e; cursor: pointer; }
     button[value=approve] { background: #1c1917; color: #fff; }
     .error { color: #b91c1c; }
@@ -98,8 +106,8 @@ export function consentPage(
       <label>Correo <input type="email" name="email" autocomplete="username"></label>
       <label>Contraseña <input type="password" name="password" autocomplete="current-password"></label>
       <div class="actions">
-        <button type="submit" name="decision" value="deny">Rechazar</button>
         <button type="submit" name="decision" value="approve">Permitir</button>
+        <button type="submit" name="decision" value="deny">Rechazar</button>
       </div>
     </form>
   </main>

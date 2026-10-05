@@ -1,9 +1,10 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
 import { loginWithPassword } from "../auth/accounts.js";
-import { CONSENT_HEADERS, type ConsentRequest, consentPage } from "../auth/consentPage.js";
+import { type ConsentRequest, consentHeaders, consentPage } from "../auth/consentPage.js";
 import { consumeCode, createCode, verifyPkce } from "../auth/oauthCodes.js";
 import { generateToken, hashToken } from "../auth/opaqueTokens.js";
 import type { Database } from "../db/client.js";
@@ -15,6 +16,10 @@ export interface OAuthRoutesOptions {
   assistantName: string;
 }
 
+// Ties the consent post to the browser that loaded the page
+const CSRF_COOKIE = "oauth_consent";
+const CSRF_TTL_SECONDS = 10 * 60;
+
 const ACCESS_TTL_SECONDS = 3_600;
 const REFRESH_TTL_SECONDS = 90 * 86_400;
 
@@ -24,9 +29,19 @@ const REFRESH_TTL_SECONDS = 90 * 86_400;
 const REGISTER_WINDOW_MS = 10 * 60_000;
 const REGISTER_MAX = 10;
 
+const LOOPBACK = ["localhost", "127.0.0.1", "[::1]"];
+
+// How long after a rotation the previous refresh is taken as the client racing itself
+const REUSE_GRACE_SECONDS = 10;
+
 const registerBody = z.object({
-  redirect_uris: z.array(z.string().url()).min(1).max(10),
-  client_name: z.string().trim().max(200).optional(),
+  redirect_uris: z.array(z.string().url().max(2048)).min(1).max(10),
+  client_name: z
+    .string()
+    .trim()
+    .max(200)
+    .optional()
+    .transform((name) => name || undefined),
 });
 
 const authorizeFields = {
@@ -36,6 +51,8 @@ const authorizeFields = {
   state: z.string().max(512).optional(),
   resource: z.string().max(512).optional(),
 };
+
+type AuthorizeFields = z.infer<z.ZodObject<typeof authorizeFields>>;
 
 const authorizeQuery = z.object({
   ...authorizeFields,
@@ -47,6 +64,7 @@ const authorizeQuery = z.object({
 const consentBody = z.object({
   ...authorizeFields,
   decision: z.enum(["approve", "deny"]),
+  csrf: z.string().min(1).max(64),
   email: z.string().max(255).optional(),
   password: z.string().max(1024).optional(),
 });
@@ -90,12 +108,99 @@ export function allowedRedirect(uri: string): boolean {
     const url = new URL(uri);
 
     return (
-      url.protocol === "https:" ||
-      (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
+      url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK.includes(url.hostname))
     );
   } catch {
     return false;
   }
+}
+
+/**
+ * Creates an access and refresh token pair, with the columns that store it and the response
+ *
+ * @return  The columns and the token response
+ */
+function newTokenPair() {
+  const access = generateToken("ast");
+  const refresh = generateToken("asr");
+
+  return {
+    columns: {
+      accessTokenHash: hashToken(access),
+      refreshTokenHash: hashToken(refresh),
+      accessExpiresAt: sql`now() + make_interval(secs => ${ACCESS_TTL_SECONDS})`,
+      refreshExpiresAt: sql`now() + make_interval(secs => ${REFRESH_TTL_SECONDS})`,
+    },
+    response: {
+      access_token: access,
+      token_type: "Bearer",
+      expires_in: ACCESS_TTL_SECONDS,
+      refresh_token: refresh,
+    },
+  };
+}
+
+/**
+ * Tells whether a redirect URI is one the client registered. For loopback the port may change,
+ * since native clients listen on whatever port is free
+ *
+ * @param   registered  Registered redirect URIs
+ * @param   uri         Presented redirect URI
+ *
+ * @return  Whether it matches
+ */
+export function registeredRedirect(registered: string[], uri: string): boolean {
+  if (registered.includes(uri)) {
+    return true;
+  }
+
+  const portless = (value: string) => {
+    const url = new URL(value);
+    if (url.protocol !== "http:" || !LOOPBACK.includes(url.hostname)) {
+      return null;
+    }
+
+    url.port = "";
+    return url.toString();
+  };
+
+  const presented = portless(uri);
+
+  return presented !== null && registered.some((entry) => portless(entry) === presented);
+}
+
+/**
+ * Reads one cookie from the request header
+ *
+ * @param   header  Cookie header, if any
+ * @param   name    Cookie name
+ *
+ * @return  Its value, or an empty string
+ */
+function cookieValue(header: string | undefined, name: string): string {
+  for (const pair of (header ?? "").split(";")) {
+    const [key, ...rest] = pair.trim().split("=");
+    if (key === name) {
+      return rest.join("=");
+    }
+  }
+
+  return "";
+}
+
+/**
+ * Compares two secrets in constant time
+ *
+ * @param   left   First value
+ * @param   right  Second value
+ *
+ * @return  Whether both are non-empty and equal
+ */
+function sameValue(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+
+  return a.length > 0 && a.length === b.length && timingSafeEqual(a, b);
 }
 
 /**
@@ -133,15 +238,7 @@ export default async function oauthRoutes(
     return row ?? null;
   };
 
-  /**
-   * Sends the person back to the client with the result, naming the issuer against mix-up attacks
-   *
-   * @param   reply        Reply
-   * @param   redirectUri  Validated client redirect
-   * @param   params       Result parameters
-   *
-   * @return  The redirect reply
-   */
+  // Sends the person back to the client, naming the issuer against mix-up attacks
   const backToClient = (
     reply: FastifyReply,
     redirectUri: string,
@@ -158,24 +255,10 @@ export default async function oauthRoutes(
   };
 
   const issueTokens = async (userId: number, clientId: string) => {
-    const access = generateToken("ast");
-    const refresh = generateToken("asr");
-    await db.insert(accessTokens).values({
-      userId,
-      clientId,
-      accessTokenHash: hashToken(access),
-      refreshTokenHash: hashToken(refresh),
-      kind: "oauth",
-      accessExpiresAt: sql`now() + make_interval(secs => ${ACCESS_TTL_SECONDS})`,
-      refreshExpiresAt: sql`now() + make_interval(secs => ${REFRESH_TTL_SECONDS})`,
-    });
+    const pair = newTokenPair();
+    await db.insert(accessTokens).values({ ...pair.columns, userId, clientId, kind: "oauth" });
 
-    return {
-      access_token: access,
-      token_type: "Bearer",
-      expires_in: ACCESS_TTL_SECONDS,
-      refresh_token: refresh,
-    };
+    return pair.response;
   };
 
   app.get("/.well-known/oauth-protected-resource", async () => ({
@@ -200,7 +283,13 @@ export default async function oauthRoutes(
 
   app.post("/oauth/register", async (request, reply) => {
     if (tooManyRegistrations(request.ip)) {
-      return reply.code(429).send({ error: "rate_limited" });
+      return reply
+        .code(429)
+        .header("Retry-After", String(REGISTER_WINDOW_MS / 1000))
+        .send({
+          error: "rate_limited",
+          error_description: "Demasiados registros, intenta más tarde",
+        });
     }
 
     const body = registerBody.safeParse(request.body);
@@ -215,7 +304,7 @@ export default async function oauthRoutes(
       });
     }
 
-    const clientId = `mcp_${generateToken("asc").slice(4, 28)}`;
+    const clientId = `mcp_${randomBytes(18).toString("base64url")}`;
     await db.insert(oauthClients).values({
       clientId,
       clientName: body.data.client_name ?? null,
@@ -240,47 +329,95 @@ export default async function oauthRoutes(
     });
   });
 
+  // Renders the consent page; the csrf value is the one bound to this browser cookie
+  const showConsent = (
+    reply: FastifyReply,
+    fields: AuthorizeFields,
+    client: { name: string | null },
+    csrf: string,
+    error?: string,
+  ) => {
+    const consent: ConsentRequest = {
+      clientId: fields.client_id,
+      clientName: client.name ?? "Una aplicación",
+      redirectUri: fields.redirect_uri,
+      codeChallenge: fields.code_challenge,
+      state: fields.state,
+      resource: fields.resource,
+      csrf,
+    };
+
+    return reply
+      .code(error ? 401 : 200)
+      .headers(consentHeaders(fields.redirect_uri))
+      .send(consentPage(assistantName, consent, error));
+  };
+
   app.get("/oauth/authorize", async (request, reply) => {
     const query = authorizeQuery.safeParse(request.query);
-    // Without a validated redirect the error cannot go back to the client, so it goes to the browser
+    // Errors before consent stay in the browser: redirecting them would turn this server into a
+    // redirector to any URI an anonymous client registered
     if (!query.success) {
-      return reply.code(400).send({ error: "invalid_request" });
-    }
-
-    const client = await findClient(query.data.client_id);
-    if (!client?.redirectUris.includes(query.data.redirect_uri)) {
-      return reply.code(400).send({ error: "invalid_client" });
-    }
-
-    if (!resourceOk(query.data.resource)) {
-      return backToClient(reply, query.data.redirect_uri, {
-        error: "invalid_target",
-        state: query.data.state,
+      return reply.code(400).send({
+        error: "invalid_request",
+        error_description: "Solicitud de autorización inválida",
       });
     }
 
-    const consent: ConsentRequest = {
-      clientId: query.data.client_id,
-      clientName: client.name ?? "Una aplicación",
-      redirectUri: query.data.redirect_uri,
-      codeChallenge: query.data.code_challenge,
-      state: query.data.state,
-      resource: query.data.resource,
-    };
+    const client = await findClient(query.data.client_id);
+    if (!client || !registeredRedirect(client.redirectUris, query.data.redirect_uri)) {
+      return reply.code(400).send({
+        error: "invalid_client",
+        error_description: "Aplicación o redirect no registrados",
+      });
+    }
 
-    return reply.code(200).headers(CONSENT_HEADERS).send(consentPage(assistantName, consent));
+    if (!resourceOk(query.data.resource)) {
+      return reply.code(400).send({
+        error: "invalid_target",
+        error_description: "El recurso pedido no es este servidor",
+      });
+    }
+
+    const csrf = randomBytes(24).toString("base64url");
+    const secure = publicBaseUrl.startsWith("https:") ? "; Secure" : "";
+    reply.header(
+      "Set-Cookie",
+      `${CSRF_COOKIE}=${csrf}; Path=/oauth/authorize; Max-Age=${CSRF_TTL_SECONDS}; HttpOnly; SameSite=Strict${secure}`,
+    );
+
+    return showConsent(reply, query.data, client, csrf);
   });
 
   app.post("/oauth/authorize", async (request, reply) => {
     const body = consentBody.safeParse(request.body);
     if (!body.success) {
-      return reply.code(400).send({ error: "invalid_request" });
+      return reply.code(400).send({
+        error: "invalid_request",
+        error_description: "Solicitud de autorización inválida",
+      });
+    }
+
+    // Only a post from the page this browser loaded gets through; a forged one cannot redirect
+    if (!sameValue(cookieValue(request.headers.cookie, CSRF_COOKIE), body.data.csrf)) {
+      return reply.code(403).send({
+        error: "invalid_request",
+        error_description:
+          "La página de autorización venció; vuelve a intentarlo desde la aplicación",
+      });
     }
 
     // The hidden fields came back from the browser, so they are validated again, never trusted
     const client = await findClient(body.data.client_id);
-    if (!client?.redirectUris.includes(body.data.redirect_uri) || !resourceOk(body.data.resource)) {
-      return reply.code(400).send({ error: "invalid_client" });
+    if (
+      !client ||
+      !registeredRedirect(client.redirectUris, body.data.redirect_uri) ||
+      !resourceOk(body.data.resource)
+    ) {
+      return reply.code(400).send({
+        error: "invalid_client",
+        error_description: "Aplicación o redirect no registrados",
+      });
     }
 
     if (body.data.decision === "deny") {
@@ -308,19 +445,13 @@ export default async function oauthRoutes(
         ip: request.ip,
       });
 
-      const consent: ConsentRequest = {
-        clientId: body.data.client_id,
-        clientName: client.name ?? "Una aplicación",
-        redirectUri: body.data.redirect_uri,
-        codeChallenge: body.data.code_challenge,
-        state: body.data.state,
-        resource: body.data.resource,
-      };
-
-      return reply
-        .code(401)
-        .headers(CONSENT_HEADERS)
-        .send(consentPage(assistantName, consent, "Correo o contraseña incorrectos"));
+      return showConsent(
+        reply,
+        body.data,
+        client,
+        body.data.csrf,
+        "Correo o contraseña incorrectos",
+      );
     }
 
     const code = createCode({
@@ -397,38 +528,37 @@ export default async function oauthRoutes(
         )
         .limit(1);
 
-      if (current && text("client_id") === current.clientId) {
-        const access = generateToken("ast");
-        const refresh = generateToken("asr");
+      if (current) {
+        if (text("client_id") !== current.clientId) {
+          return reply.code(400).send({ error: "invalid_grant" });
+        }
+
+        const pair = newTokenPair();
         // Rotated in place: the session keeps its birth time, so revoking sessions still reaches it.
-        // Conditioned on the presented hash, so of two concurrent refreshes only one wins
+        // Conditioned on the presented hash: of two concurrent refreshes, the loser just fails
         const rotated = await db
           .update(accessTokens)
-          .set({
-            previousRefreshHash: presented,
-            accessTokenHash: hashToken(access),
-            refreshTokenHash: hashToken(refresh),
-            accessExpiresAt: sql`now() + make_interval(secs => ${ACCESS_TTL_SECONDS})`,
-            refreshExpiresAt: sql`now() + make_interval(secs => ${REFRESH_TTL_SECONDS})`,
-          })
+          .set({ ...pair.columns, previousRefreshHash: presented, rotatedAt: sql`now()` })
           .where(and(eq(accessTokens.id, current.id), eq(accessTokens.refreshTokenHash, presented)))
           .returning({ id: accessTokens.id });
 
-        if (rotated.length === 1) {
-          return {
-            access_token: access,
-            token_type: "Bearer",
-            expires_in: ACCESS_TTL_SECONDS,
-            refresh_token: refresh,
-          };
-        }
+        return rotated.length === 1
+          ? pair.response
+          : reply.code(400).send({ error: "invalid_grant" });
       }
 
-      // A refresh token that was already rotated came back: someone holds a stolen copy
+      // The refresh before the last rotation came back. Seconds after rotating it is a client that
+      // raced itself; later, someone holds a stolen copy
       const [reused] = await db
         .select({ id: accessTokens.id, userId: accessTokens.userId })
         .from(accessTokens)
-        .where(and(eq(accessTokens.previousRefreshHash, presented), isNull(accessTokens.revokedAt)))
+        .where(
+          and(
+            eq(accessTokens.previousRefreshHash, presented),
+            isNull(accessTokens.revokedAt),
+            sql`${accessTokens.rotatedAt} < now() - make_interval(secs => ${REUSE_GRACE_SECONDS})`,
+          ),
+        )
         .limit(1);
 
       if (reused) {
@@ -448,7 +578,9 @@ export default async function oauthRoutes(
       return reply.code(400).send({ error: "invalid_grant" });
     }
 
-    return reply.code(400).send({ error: "unsupported_grant_type" });
+    return reply.code(400).send({
+      error: body.grant_type === undefined ? "invalid_request" : "unsupported_grant_type",
+    });
   });
 
   app.post("/oauth/revoke", async (request, reply) => {
