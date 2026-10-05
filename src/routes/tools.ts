@@ -124,12 +124,9 @@ export default async function toolsRoutes(
       reply.code(404).send({ ok: false, error: "tool_not_found" });
       return null;
     }
+    // A tool over a source the caller may not use does not exist for them, so its name is not told
     if (!request.authUser?.scopes.has(sourceScope(found.tool.sourceCode))) {
-      reply.code(403).send({
-        ok: false,
-        error: "source_not_allowed",
-        message: "No tienes el permiso de la fuente de esta herramienta",
-      });
+      reply.code(404).send({ ok: false, error: "tool_not_found" });
       return null;
     }
 

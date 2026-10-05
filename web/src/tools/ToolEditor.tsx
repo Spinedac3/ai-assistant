@@ -52,7 +52,14 @@ export const NEW_TOOL = "_nueva";
 export function ToolEditorRoute() {
   const { name } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const carried = (location.state as { checks?: CheckResult[] } | null)?.checks ?? null;
+  // The checks travel once: a reload or a step back must not show those of another version
+  useEffect(() => {
+    if (location.state) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+  }, [location, navigate]);
   // A tool name starts with a letter, so this path never names one
   return (
     <ToolEditor
@@ -140,13 +147,18 @@ function ToolEditor({
       setBaseColumns(data.columns);
       // A first read takes every column; later ones keep the choices that still exist
       const names = new Set(data.columns.map((column) => column.name));
-      setDefinition((current) => ({
-        ...current,
-        columns:
-          current.columns.length === 0
-            ? data.columns.map((column) => ({ name: column.name }))
-            : current.columns.filter((column) => names.has(column.name)),
-      }));
+      setDefinition((current) =>
+        prune(
+          {
+            ...current,
+            columns:
+              current.columns.length === 0
+                ? data.columns.map((column) => ({ name: column.name }))
+                : current.columns.filter((column) => names.has(column.name)),
+          },
+          data.columns,
+        ),
+      );
     });
 
   const save = () =>
@@ -202,6 +214,15 @@ function ToolEditor({
 
   if (initialName && saved.isLoading) {
     return <Spinner color="brand.solid" />;
+  }
+  if (initialName && saved.isError) {
+    return (
+      <Text role="alert" color="fg.error">
+        {saved.error instanceof ApiError && saved.error.code === "tool_not_found"
+          ? "Esa herramienta no existe, o es de una fuente que no puedes usar."
+          : "No se pudo abrir la herramienta; vuelve a intentarlo."}
+      </Text>
+    );
   }
   const isNew = initialName === null;
   const chosen = definition.columns.map((column) => column.name);

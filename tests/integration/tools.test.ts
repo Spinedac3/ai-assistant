@@ -299,7 +299,8 @@ describe("tool creator", () => {
     await api("DELETE", url);
 
     // Performs assertions.
-    expect(calls.map((call) => call.status)).toEqual([403, 403, 403, 403, 403]);
+    // Over a source they may not use, the tool does not exist for them
+    expect(calls.map((call) => call.status)).toEqual([404, 404, 404, 404, 404]);
     expect(listed.body.data).toEqual([]);
   });
 
@@ -434,6 +435,6 @@ describe("tool creator", () => {
     expect(prompt).toContain("¿Qué más le pongo?");
     expect(saved.status).toBe(200);
     expect(failed).toMatchObject({ status: 502, body: { error: "guide_failed" } });
-    expect(notAllowed.status).toBe(403);
+    expect(notAllowed.status).toBe(404);
   });
 });

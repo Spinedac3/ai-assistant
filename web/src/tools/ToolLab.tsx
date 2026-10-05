@@ -367,7 +367,7 @@ function TrialChat({ name }: { name: string }) {
                   {entry.tool.replace(/^mcp__[^_]+__/, "")}
                 </Text>
                 {entry.bytes !== null && <Badge size="xs">{entry.bytes} bytes</Badge>}
-                {entry.excel && sameOrigin(entry.excel) && (
+                {entry.excel && exportLink(entry.excel) && (
                   <a href={entry.excel} target="_blank" rel="noopener noreferrer">
                     Excel
                   </a>
@@ -477,13 +477,17 @@ function ModelView({ name }: { name: string }) {
 }
 
 /**
- * Tells whether a link from a tool result points to this server, the only place an Excel of the
- * assistant comes from
+ * Tells whether a link from a tool result is an Excel of the assistant: a web address to its
+ * exports, whatever address the server is reached by
  *
  * @param   url  Link
  *
  * @return  Whether it is safe to show
  */
-function sameOrigin(url: string): boolean {
-  return URL.canParse(url) && new URL(url).origin === window.location.origin;
+function exportLink(url: string): boolean {
+  if (!URL.canParse(url)) {
+    return false;
+  }
+  const link = new URL(url);
+  return ["https:", "http:"].includes(link.protocol) && link.pathname.startsWith("/exports/");
 }

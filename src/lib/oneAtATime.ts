@@ -8,6 +8,9 @@ const running = new Map<string, Promise<unknown>>();
  *
  * @return  Whether there is any
  */
+export function isRunning(key: string): boolean {
+  return running.has(key);
+}
 
 /**
  * Runs some work after the work already running for the same key, so two calls for one thing
@@ -18,10 +21,6 @@ const running = new Map<string, Promise<unknown>>();
  *
  * @return  What the work returns
  */
-export function isRunning(key: string): boolean {
-  return running.has(key);
-}
-
 export async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
   const previous = running.get(key) ?? Promise.resolve();
   const current = previous.catch(() => {}).then(work);
