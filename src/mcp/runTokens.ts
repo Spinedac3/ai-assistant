@@ -1,0 +1,74 @@
+import { eq, sql } from "drizzle-orm";
+import { generateToken, hashToken } from "../auth/opaqueTokens.js";
+import type { Database } from "../db/client.js";
+import { accessTokens } from "../db/schema.js";
+
+export const RUN_CLIENT_ID = "internal-run";
+
+export interface RunInfo {
+  // Tools of an agent run, or null for a chat turn, which keeps the meta catalog
+  tools: string[] | null;
+  conversationId?: number;
+}
+
+// In memory and keyed by the token, never by the person: deducing the run from the user once handed
+// a person's chat the catalog of an agent they owned
+const runs = new Map<string, RunInfo>();
+
+/**
+ * Issues a short-lived token for one CLI process, with no OAuth flow behind it
+ *
+ * @param   db          Own database
+ * @param   userId      Person the process acts for
+ * @param   ttlMinutes  Lifetime
+ * @param   info        Tools and conversation the token is bound to
+ *
+ * @return  The token in clear
+ */
+export async function mintRunToken(
+  db: Database,
+  userId: number,
+  ttlMinutes: number,
+  info: RunInfo,
+): Promise<string> {
+  const token = generateToken("ast");
+
+  await db.insert(accessTokens).values({
+    userId,
+    clientId: RUN_CLIENT_ID,
+    accessTokenHash: hashToken(token),
+    kind: "run",
+    accessExpiresAt: sql`now() + make_interval(mins => ${ttlMinutes})`,
+  });
+  runs.set(token, {
+    tools: info.tools === null ? null : [...info.tools],
+    conversationId: info.conversationId,
+  });
+
+  return token;
+}
+
+/**
+ * Finds what a run token is bound to
+ *
+ * @param   token  Token in clear
+ *
+ * @return  The run info, or null when the token is not a run token of this process
+ */
+export function runInfo(token: string): RunInfo | null {
+  return runs.get(token) ?? null;
+}
+
+/**
+ * Ends a run token; its short lifetime is the safety net if this never runs
+ *
+ * @param   db     Own database
+ * @param   token  Token in clear
+ */
+export async function revokeRunToken(db: Database, token: string): Promise<void> {
+  runs.delete(token);
+  await db
+    .update(accessTokens)
+    .set({ revokedAt: sql`now()` })
+    .where(eq(accessTokens.accessTokenHash, hashToken(token)));
+}
