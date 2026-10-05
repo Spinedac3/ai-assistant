@@ -1,13 +1,23 @@
-import { describe, expect, it } from "vitest";
+import { randomBytes } from "node:crypto";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
 import { describeBase, normalizeRows } from "../../src/creator/columns.js";
 import { definitionSchema } from "../../src/creator/definition.js";
 import { checkPasted } from "../../src/creator/pasted.js";
 import { buildQuery } from "../../src/creator/sql.js";
+import { sourceScope, toolFrom } from "../../src/creator/tool.js";
+import type { DatabaseHandle } from "../../src/db/client.js";
 import { type EngineName, runQuery } from "../../src/sources/engines.js";
+import { saveSource } from "../../src/sources/registry.js";
+import { ToolRegistry } from "../../src/tools/registry.js";
+import { Secrets } from "../../src/vault/envelope.js";
+import { freshDatabase } from "./support/database.js";
 
 const LIMITS = { timeoutMs: 10_000, maxRows: 10_000 };
 const meaning = { definition: "Pedidos de la distribuidora", grain: "pedido", additive: true };
+const secrets = Secrets.fromKey(randomBytes(32));
+
+let database: DatabaseHandle;
 
 /**
  * Tells whether a demo engine is running and seeded; SQL Server is optional on a laptop
@@ -62,6 +72,28 @@ async function onEveryEngine(
 }
 
 describe("creator on the demo engines", () => {
+  beforeAll(async () => {
+    database = await freshDatabase();
+    for (const engine of available) {
+      const reader = DEMO_ENGINES[engine].reader;
+      await saveSource(
+        database.db,
+        secrets,
+        {
+          code: `demo-${engine}`,
+          name: `Demo ${engine}`,
+          ...reader,
+          timeZone: "America/Guatemala",
+        },
+        1,
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await database.close();
+  });
+
   it("has the engines to test against", () => {
     // Performs assertions.
     expect(available).toEqual(expect.arrayContaining(["postgres", "mysql"]));
@@ -134,5 +166,56 @@ describe("creator on the demo engines", () => {
     expect(typeof totals[first as string]?.[0]?.monto).toBe("number");
     expect(typeof totals[first as string]?.[0]?.pedidos).toBe("number");
     expect(products[first as string]?.every((row) => row.refrigerado === true)).toBe(true);
+  });
+
+  it("runs a created tool through the registry, on its source's permission and zone", async () => {
+    // Performs the test.
+    const spec = definitionSchema.parse({
+      base: { kind: "table", name: "entregas" },
+      columns: [{ name: "ruta" }, { name: "entregado_en" }, { name: "a_tiempo" }],
+      filters: [
+        { column: "ruta", op: "in", required: true, description: "Rutas de reparto." },
+        { column: "entregado_en", op: "between" },
+      ],
+      summary: { group_by: ["ruta"], aggregates: [{ fn: "count", as: "entregas" }] },
+      order_by: [{ column: "ruta", direction: "asc" }],
+      meaning: { ...meaning, synonyms: ["despachos"], caveats: ["Una entrega por pedido."] },
+    });
+    const outcomes: Record<string, unknown> = {};
+    let described = "";
+    for (const engine of available) {
+      const code = `demo-${engine}`;
+      const columns = await describeBase(DEMO_ENGINES[engine].reader, spec.base, null, LIMITS);
+      const tool = toolFrom(
+        { name: `entregas_${engine}`, sourceCode: code, spec, columns },
+        { db: database.db, secrets, appTimeZone: "UTC" },
+        "America/Guatemala",
+      );
+      described = tool.definition.description;
+      const registry = new ToolRegistry(database.db);
+      registry.register(tool);
+      const caller = { userId: 1, email: "ana@example.com", scopes: new Set([sourceScope(code)]) };
+      const run = (args: Record<string, unknown>, who = caller) =>
+        registry.execute(tool.definition.name, args, who, { origin: "chat", timeZone: "UTC" });
+      outcomes[engine] = JSON.parse((await run({ ruta: ["R-Norte-1", "R-Sur-1"] })).text);
+      outcomes[`${engine} sin ruta`] = JSON.parse((await run({})).text).error;
+      outcomes[`${engine} sin permiso`] = JSON.parse(
+        (await run({ ruta: ["R-Norte-1"] }, { ...caller, scopes: new Set(["chat.use"]) })).text,
+      ).error;
+    }
+
+    // Performs assertions.
+    const [first, ...others] = available;
+    expect(outcomes[first as string]).toMatchObject({ total_filas: 2 });
+    for (const engine of others) {
+      expect(outcomes[engine]).toEqual(outcomes[first as string]);
+    }
+    for (const engine of available) {
+      expect(outcomes[`${engine} sin ruta`]).toBe("invalid_arguments");
+      expect(outcomes[`${engine} sin permiso`]).toBe("missing_scope");
+    }
+    expect(described).toContain("hora de America/Guatemala");
+    expect(described).toContain("despachos");
+    expect(described).toContain("Ojo: Una entrega por pedido.");
   });
 });
