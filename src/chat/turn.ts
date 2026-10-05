@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
 import { type CliCommand, cliArgs, launchCli } from "../llm/cli.js";
 import { MCP_SERVER } from "../mcp/names.js";
 import { readSetting } from "../settings.js";
+import { holdTurn } from "./conversationLock.js";
 import {
   claimsUnsourcedFigures,
   cutOffAnswer,
@@ -22,7 +23,7 @@ import {
   turnBlocks,
 } from "./guards.js";
 import { chatInstructions, type PromptSettings } from "./prompt.js";
-import { assertCanSend, type RateLimits, recordUsage } from "./rateLimit.js";
+import { type RateLimits, recordTokens, reserveMessage } from "./rateLimit.js";
 import { redactSecrets } from "./redact.js";
 import { addMessage, createConversation, findConversation, latestMessages } from "./repository.js";
 import { installSourceGate } from "./sourceGate.js";
@@ -136,13 +137,13 @@ async function* runCli(
   const cli = launchCli(
     deps.cli,
     cliArgs({
-      prompt,
       model,
       maxTurns: MAX_TURNS,
       continueSession,
       mcpConfigPath: join(workspace, ".mcp.json"),
       disallowedTools: DISALLOWED_CLI_TOOLS,
     }),
+    prompt,
     workspace,
     abortSignal,
   );
@@ -263,58 +264,68 @@ export async function* chatTurn(
   abortSignal?: AbortSignal,
 ): AsyncGenerator<ChatEvent, void> {
   const { db, logger } = deps;
-  await assertCanSend(db, user.id, deps.limits, deps.prompt.timeZone);
+  const timeZone = deps.prompt.timeZone;
+  await reserveMessage(db, user.id, deps.limits, timeZone);
 
   const content = redactSecrets(rawContent);
   const owned = conversationId ? await findConversation(db, conversationId, user.id) : null;
   const conversation = owned?.id ?? (await createConversation(db, user.id));
-  const userMessageId = await addMessage(db, {
-    conversationId: conversation,
-    role: "user",
-    content,
-  });
-
-  // Figures already in the thread are known, so a greeting after a figure is not an invention
-  const earlier = (await latestMessages(db, conversation, user.id, 12)).filter(
-    (message) => message.id !== userMessageId,
-  );
-  const known = [content, ...earlier.map((message) => message.content)].join("\n");
-
-  yield { type: "start", conversationId: conversation, userMessageId };
-
-  const workspace = join(deps.workspacesDir, String(conversation));
-  const firstTurn = !existsSync(workspace);
-  mkdirSync(workspace, { recursive: true });
-  // Rewritten every turn: it carries today's date
-  writeFileSync(join(workspace, "CLAUDE.md"), chatInstructions(user, deps.prompt, new Date()));
-  installSourceGate(workspace);
-
-  const contextPath = join(workspace, "context.json");
-  const resetByContext = !firstTurn && previousContext(contextPath) > CONTEXT_CAP_TOKENS;
-  let prompt = content;
-
-  if (resetByContext) {
-    const summary = threadSummary(earlier);
-    prompt = summary ? `${summary}\n\n${content}` : content;
-    logger.info({ conversationId: conversation }, "chat: context over the cap, seeded new session");
-  }
-
-  let release = async () => {};
-  if (deps.mcpConfig) {
-    release = await deps.mcpConfig(workspace, user.id, conversation);
-  } else {
-    writeFileSync(join(workspace, ".mcp.json"), JSON.stringify({ mcpServers: {} }));
-  }
-
-  // Read every turn, so a change in administration applies to the next message
-  const model = (await readSetting(db, "chat.model")) ?? deps.model;
+  const releaseTurn = await holdTurn(String(conversation));
+  const spent = { tokensIn: 0, tokensOut: 0, cachedIn: 0, costMillionths: 0, measured: false };
+  let releaseMcp = async () => {};
 
   try {
-    let retryingSilence = false;
+    // Read before anything else is acquired, so a failure here leaves nothing behind
+    const model = (await readSetting(db, "chat.model")) ?? deps.model;
+    const userMessageId = await addMessage(db, {
+      conversationId: conversation,
+      role: "user",
+      content,
+    });
+    const earlier = (await latestMessages(db, conversation, user.id, 12)).filter(
+      (message) => message.id !== userMessageId,
+    );
+
+    const workspace = join(deps.workspacesDir, String(conversation));
+    // Ids restart when the database is reset; a new conversation must never resume an old session
+    if (!owned) {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+    const freshSession = !owned || !existsSync(workspace);
+    mkdirSync(workspace, { recursive: true });
+    // Rewritten every turn: it carries today's date
+    const instructions = chatInstructions(user, deps.prompt, new Date());
+    writeFileSync(join(workspace, "CLAUDE.md"), instructions);
+    installSourceGate(workspace);
+
+    // Figures already in the thread or in the instructions are known, so repeating one is no invention
+    const known = [content, instructions, ...earlier.map((message) => message.content)].join("\n");
+
+    yield { type: "start", conversationId: conversation, userMessageId };
+
+    const contextPath = join(workspace, "context.json");
+    const resetByContext = !freshSession && previousContext(contextPath) > CONTEXT_CAP_TOKENS;
+    const summary = threadSummary(earlier);
+    // Any new session on an existing conversation starts from the thread, not from nothing
+    const seeded = summary ? `${summary}\n\n${content}` : content;
+    let prompt = resetByContext || freshSession ? seeded : content;
+
+    if (resetByContext) {
+      logger.info(
+        { conversationId: conversation },
+        "chat: context over the cap, seeded new session",
+      );
+    }
+
+    if (deps.mcpConfig) {
+      releaseMcp = await deps.mcpConfig(workspace, user.id, conversation);
+    } else {
+      writeFileSync(join(workspace, ".mcp.json"), JSON.stringify({ mcpServers: {} }));
+    }
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      // A silent turn is a rotten session: its retry starts fresh, never with --continue
-      const resume = !retryingSilence && attempt === 0 && !firstTurn && !resetByContext;
+      // Both retries start a new session: a silent turn means the resumed one went bad
+      const resume = attempt === 0 && !freshSession && !resetByContext;
       const names = new Map<string, string>();
       const executed: string[] = [];
       const seen: TurnEvent[] = [];
@@ -345,6 +356,13 @@ export async function* chatTurn(
       }
 
       const outcome = step.value;
+      // Every attempt consumed tokens, the discarded ones too
+      spent.tokensIn += outcome.tokensIn ?? 0;
+      spent.tokensOut += outcome.tokensOut ?? 0;
+      spent.cachedIn += outcome.cachedIn ?? 0;
+      spent.costMillionths += outcome.costMillionths ?? 0;
+      spent.measured ||= outcome.costMillionths !== null;
+
       const blocks = turnBlocks(seen);
       text = joinWithoutRepeats(blocks.all) || text;
       const afterTools = joinWithoutRepeats(blocks.afterTools);
@@ -369,9 +387,7 @@ export async function* chatTurn(
           { conversationId: conversation, theater, unsourced },
           "chat: silent turn, retrying",
         );
-        retryingSilence = true;
-        const summary = threadSummary(earlier);
-        prompt = [RETRY_DIRECTIVE, ...(summary ? [summary] : []), content].join("\n\n");
+        prompt = `${RETRY_DIRECTIVE}\n\n${seeded}`;
         continue;
       }
 
@@ -387,19 +403,12 @@ export async function* chatTurn(
           conversationId: conversation,
           role: "assistant",
           content: stored,
-          tokensIn: outcome.tokensIn,
-          tokensOut: outcome.tokensOut,
-          costMillionths: outcome.costMillionths,
+          tokensIn: spent.tokensIn,
+          tokensOut: spent.tokensOut,
+          costMillionths: spent.measured ? spent.costMillionths : null,
           model: outcome.model,
           finishReason: outcome.ok ? "stop" : "error",
         });
-        await recordUsage(
-          db,
-          user.id,
-          (outcome.tokensIn ?? 0) + (outcome.tokensOut ?? 0),
-          outcome.costMillionths ?? 0,
-          deps.prompt.timeZone,
-        ).catch(() => undefined);
 
         yield {
           type: "done",
@@ -407,10 +416,10 @@ export async function* chatTurn(
           assistantMessageId,
           text: stored,
           usage: {
-            inputTokens: outcome.tokensIn ?? 0,
-            outputTokens: outcome.tokensOut ?? 0,
-            cachedInputTokens: outcome.cachedIn ?? 0,
-            costUsd: outcome.costMillionths === null ? null : outcome.costMillionths / 1_000_000,
+            inputTokens: spent.tokensIn,
+            outputTokens: spent.tokensOut,
+            cachedInputTokens: spent.cachedIn,
+            costUsd: spent.measured ? spent.costMillionths / 1_000_000 : null,
           },
           toolCallsExecuted: executed,
         };
@@ -424,12 +433,22 @@ export async function* chatTurn(
           { conversationId: conversation },
           "chat: --continue failed, retrying with a new session",
         );
+        prompt = seeded;
         continue;
       }
 
       throw new Error("El motor de chat no devolvió respuesta");
     }
   } finally {
-    await release().catch(() => undefined);
+    // Failed and abandoned turns spent tokens too
+    await recordTokens(
+      db,
+      user.id,
+      spent.tokensIn + spent.tokensOut,
+      spent.costMillionths,
+      timeZone,
+    ).catch(() => undefined);
+    await releaseMcp().catch(() => undefined);
+    releaseTurn();
   }
 }

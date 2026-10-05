@@ -90,7 +90,8 @@ export default async function chatRoutes(
 
     const controller = new AbortController();
     const onClose = () => controller.abort();
-    request.raw.on("close", onClose);
+    // The request emits close once its body is read; the response closes when the client leaves
+    reply.raw.on("close", onClose);
     // Proxies drop idle connections while the model works between visible events
     const heartbeat = setInterval(() => reply.raw.write(": keepalive\n\n"), 15_000);
 
@@ -119,7 +120,7 @@ export default async function chatRoutes(
       writeEvent(reply, "error", failure(error));
     } finally {
       clearInterval(heartbeat);
-      request.raw.off("close", onClose);
+      reply.raw.off("close", onClose);
       reply.raw.end();
     }
 
