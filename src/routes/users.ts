@@ -5,6 +5,7 @@ import { logAudit } from "../audit.js";
 import { hashPassword, passwordProblem } from "../auth/password.js";
 import type { Database } from "../db/client.js";
 import { roleScopes, roles, scopes, userExtraScopes, userIdentities, users } from "../db/schema.js";
+import { resolveUser } from "../permissions/resolve.js";
 
 export interface UsersRoutesOptions {
   db: Database;
@@ -64,6 +65,32 @@ const areaBody = z
 // Thrown inside a change that would leave the person acting without the right to manage users
 class LockedOut extends Error {}
 
+// zod speaks English; the person reads which field to fix in Spanish
+const FIELDS: Record<string, string> = {
+  email: "el correo",
+  displayName: "el nombre",
+  role: "el rol",
+  password: "la contraseña",
+  code: "el código (minúsculas, números, guion y guion bajo)",
+  description: "la descripción",
+  scopes: "los permisos",
+};
+
+/**
+ * Names in Spanish the fields a body got wrong
+ *
+ * @param   error  The failed parse
+ *
+ * @return  The message
+ */
+function invalidFields(error: z.ZodError): string {
+  const fields = new Set(error.issues.map((issue) => FIELDS[String(issue.path[0])] ?? "un campo"));
+
+  return `Revisa ${[...fields].join(", ")}`;
+}
+
+const USER_NOT_FOUND = { ok: false, error: "user_not_found", message: "Esa cuenta ya no existe" };
+
 /**
  * Lists who may manage users right now: active people whose active role holds the scope, or who
  * have it as an extra still in force
@@ -118,6 +145,8 @@ export default async function usersRoutes(
   ): Promise<boolean> => {
     try {
       await db.transaction(async (tx) => {
+        // Changes that can take the right away run one at a time, so two at once cannot both pass
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${MANAGE}))`);
         await change(tx);
         if (!(await managers(tx)).includes(request.authUser?.id ?? 0)) {
           throw new LockedOut();
@@ -137,6 +166,16 @@ export default async function usersRoutes(
     }
   };
 
+  /**
+   * Records a change made by the person acting
+   *
+   * @param   request    Request of the person acting
+   * @param   eventCode  Event
+   * @param   message    What changed, in Spanish
+   * @param   metadata   Details of the change
+   *
+   * @return  Once recorded
+   */
   const audit = (request: FastifyRequest, eventCode: string, message: string, metadata: object) =>
     logAudit(db, {
       userId: request.authUser?.id ?? null,
@@ -147,6 +186,53 @@ export default async function usersRoutes(
       metadata: metadata as Record<string, unknown>,
     });
 
+  /**
+   * Refuses a change that gives or touches scopes the person acting does not hold, so managing
+   * users is never a way up nor a way to strip someone who holds more
+   *
+   * @param   request  Request of the person acting
+   * @param   reply    Reply, for the refusal
+   * @param   codes    Scopes the change gives or touches
+   *
+   * @return  Whether the change may go on
+   */
+  const within = (request: FastifyRequest, reply: FastifyReply, codes: Iterable<string>) => {
+    const missing = [...new Set(codes)].filter((code) => !request.authUser?.scopes.has(code));
+    if (missing.length === 0) {
+      return true;
+    }
+    reply.code(403).send({
+      ok: false,
+      error: "beyond_own_scopes",
+      message: `No puedes dar ni quitar permisos que no tienes: ${missing.sort().join(", ")}`,
+    });
+
+    return false;
+  };
+
+  /**
+   * Lists the scopes a role gives
+   *
+   * @param   id  Role
+   *
+   * @return  Their codes
+   */
+  const roleCodes = async (id: number) =>
+    (
+      await db
+        .select({ code: scopes.code })
+        .from(roleScopes)
+        .innerJoin(scopes, and(eq(scopes.id, roleScopes.scopeId), isNull(scopes.deletedAt)))
+        .where(eq(roleScopes.roleId, id))
+    ).map((row) => row.code);
+
+  /**
+   * Finds an active role by its code
+   *
+   * @param   code  Role code
+   *
+   * @return  Its id, or undefined when it does not exist or is switched off
+   */
   const roleId = async (code: string) =>
     (
       await db
@@ -168,7 +254,8 @@ export default async function usersRoutes(
         createdAt: users.createdAt,
       })
       .from(users)
-      .leftJoin(roles, eq(roles.id, users.primaryRoleId))
+      // A switched-off role gives nothing, so the person shows as having none
+      .leftJoin(roles, and(eq(roles.id, users.primaryRoleId), eq(roles.active, true)))
       .where(isNull(users.deletedAt))
       .orderBy(asc(users.displayName), asc(users.id));
     const extras = await db
@@ -177,9 +264,10 @@ export default async function usersRoutes(
         code: scopes.code,
         expiresAt: userExtraScopes.expiresAt,
         reason: userExtraScopes.reason,
+        expired: sql<boolean>`coalesce(${userExtraScopes.expiresAt} <= now(), false)`,
       })
       .from(userExtraScopes)
-      .innerJoin(scopes, eq(scopes.id, userExtraScopes.scopeId));
+      .innerJoin(scopes, and(eq(scopes.id, userExtraScopes.scopeId), isNull(scopes.deletedAt)));
     const identities = await db
       .select({ userId: userIdentities.userId, system: userIdentities.systemCode })
       .from(userIdentities)
@@ -191,7 +279,7 @@ export default async function usersRoutes(
         ...person,
         extraScopes: extras
           .filter((extra) => extra.userId === person.id)
-          .map(({ code, expiresAt, reason }) => ({ code, expiresAt, reason })),
+          .map(({ code, expiresAt, reason, expired }) => ({ code, expiresAt, reason, expired })),
         systems: identities
           .filter((identity) => identity.userId === person.id)
           .map((identity) => identity.system),
@@ -205,9 +293,7 @@ export default async function usersRoutes(
       return reply.code(400).send({
         ok: false,
         error: "invalid_body",
-        message: body.error.issues
-          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-          .join("; "),
+        message: invalidFields(body.error),
       });
     }
     const role = await roleId(body.data.role);
@@ -215,6 +301,9 @@ export default async function usersRoutes(
       return reply
         .code(400)
         .send({ ok: false, error: "unknown_role", message: "Ese rol no existe" });
+    }
+    if (!within(request, reply, await roleCodes(role))) {
+      return reply;
     }
     const { password } = body.data;
     if (password) {
@@ -257,7 +346,9 @@ export default async function usersRoutes(
     const params = idParams.safeParse(request.params);
     const body = userChange.safeParse(request.body);
     if (!params.success || !body.success) {
-      return reply.code(400).send({ ok: false, error: "invalid_body" });
+      return reply
+        .code(400)
+        .send({ ok: false, error: "invalid_body", message: "El nombre o el rol no son válidos" });
     }
     const id = params.data.id;
     const [before] = await db
@@ -269,13 +360,18 @@ export default async function usersRoutes(
       .from(users)
       .where(and(eq(users.id, id), isNull(users.deletedAt)));
     if (!before) {
-      return reply.code(404).send({ ok: false, error: "user_not_found" });
+      return reply.code(404).send(USER_NOT_FOUND);
     }
     const role = body.data.role === undefined ? before.roleId : await roleId(body.data.role);
     if (!role) {
       return reply
         .code(400)
         .send({ ok: false, error: "unknown_role", message: "Ese rol no existe" });
+    }
+    const target = await resolveUser(db, id);
+    const given = body.data.role === undefined ? [] : await roleCodes(role);
+    if (!within(request, reply, [...(target?.scopes ?? []), ...given])) {
+      return reply;
     }
 
     const kept = await keepingAccess(request, reply, async (tx) => {
@@ -311,6 +407,9 @@ export default async function usersRoutes(
       return reply.code(400).send({ ok: false, error: "invalid_id" });
     }
     const id = params.data.id;
+    if (!within(request, reply, (await resolveUser(db, id))?.scopes ?? [])) {
+      return reply;
+    }
     const kept = await keepingAccess(request, reply, async (tx) => {
       const deleted = await tx
         .update(users)
@@ -327,7 +426,7 @@ export default async function usersRoutes(
       }
     }).catch((error) => {
       if (error instanceof NotFound) {
-        reply.code(404).send({ ok: false, error: "user_not_found" });
+        reply.code(404).send(USER_NOT_FOUND);
         return false;
       }
       throw error;
@@ -359,22 +458,40 @@ export default async function usersRoutes(
       .from(users)
       .where(and(eq(users.id, params.data.id), isNull(users.deletedAt)));
     if (!scope || !user) {
-      return reply.code(404).send({ ok: false, error: "not_found" });
+      return reply
+        .code(404)
+        .send({ ok: false, error: "not_found", message: "Esa cuenta o ese permiso ya no existen" });
     }
     const expiresAt = body.data.expiresAt ? new Date(body.data.expiresAt) : null;
-    await db
-      .insert(userExtraScopes)
-      .values({
-        userId: user.id,
-        scopeId: scope.id,
-        expiresAt,
-        reason: body.data.reason,
-        grantedBy: request.authUser?.id ?? null,
-      })
-      .onConflictDoUpdate({
-        target: [userExtraScopes.userId, userExtraScopes.scopeId],
-        set: { expiresAt, reason: body.data.reason, grantedBy: request.authUser?.id ?? null },
+    if (expiresAt && expiresAt.getTime() <= Date.now()) {
+      return reply.code(400).send({
+        ok: false,
+        error: "invalid_body",
+        message: "La fecha de vencimiento ya pasó",
       });
+    }
+    if (!within(request, reply, [params.data.code])) {
+      return reply;
+    }
+    // Renewing an extra replaces its expiry, which can take the right away like a removal
+    const kept = await keepingAccess(request, reply, async (tx) => {
+      await tx
+        .insert(userExtraScopes)
+        .values({
+          userId: user.id,
+          scopeId: scope.id,
+          expiresAt,
+          reason: body.data.reason,
+          grantedBy: request.authUser?.id ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [userExtraScopes.userId, userExtraScopes.scopeId],
+          set: { expiresAt, reason: body.data.reason, grantedBy: request.authUser?.id ?? null },
+        });
+    });
+    if (!kept) {
+      return reply;
+    }
     await audit(request, "users.scope_granted", `${params.data.code} para la cuenta ${user.id}`, {
       target: user.id,
       scope: params.data.code,
@@ -388,21 +505,38 @@ export default async function usersRoutes(
   app.delete("/admin/users/:id/scopes/:code", guard, async (request, reply) => {
     const params = grantParams.safeParse(request.params);
     if (!params.success) {
-      return reply.code(400).send({ ok: false, error: "invalid_body" });
+      return reply
+        .code(400)
+        .send({ ok: false, error: "invalid_body", message: "Pedido no válido" });
     }
     const [scope] = await db
       .select({ id: scopes.id })
       .from(scopes)
       .where(eq(scopes.code, params.data.code));
+    if (!within(request, reply, [params.data.code])) {
+      return reply;
+    }
     const kept = await keepingAccess(request, reply, async (tx) => {
-      await tx
+      const removed = await tx
         .delete(userExtraScopes)
         .where(
           and(
             eq(userExtraScopes.userId, params.data.id),
             eq(userExtraScopes.scopeId, scope?.id ?? 0),
           ),
-        );
+        )
+        .returning({ id: userExtraScopes.userId });
+      if (removed.length === 0) {
+        throw new NotFound();
+      }
+    }).catch((error) => {
+      if (error instanceof NotFound) {
+        reply
+          .code(404)
+          .send({ ok: false, error: "not_found", message: "Esa persona no tenía ese permiso" });
+        return false;
+      }
+      throw error;
     });
     if (!kept) {
       return reply;
@@ -484,9 +618,7 @@ export default async function usersRoutes(
       return reply.code(400).send({
         ok: false,
         error: "invalid_body",
-        message: body.error.issues
-          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-          .join("; "),
+        message: invalidFields(body.error),
       });
     }
     const found = await scopeIds(body.data.scopes);
@@ -496,6 +628,9 @@ export default async function usersRoutes(
         error: "unknown_scope",
         message: `No existen: ${found.unknown.join(", ")}`,
       });
+    }
+    if (!within(request, reply, body.data.scopes)) {
+      return reply;
     }
     const [taken] = await db
       .select({ id: roles.id })
@@ -534,14 +669,20 @@ export default async function usersRoutes(
     const params = roleParams.safeParse(request.params);
     const body = roleChange.safeParse(request.body);
     if (!params.success || !body.success) {
-      return reply.code(400).send({ ok: false, error: "invalid_body" });
+      return reply.code(400).send({
+        ok: false,
+        error: "invalid_body",
+        message: "La descripción o los permisos no son válidos",
+      });
     }
     const [role] = await db
       .select({ id: roles.id, description: roles.description, active: roles.active })
       .from(roles)
       .where(and(eq(roles.code, params.data.code), isNull(roles.deletedAt)));
     if (!role) {
-      return reply.code(404).send({ ok: false, error: "role_not_found" });
+      return reply
+        .code(404)
+        .send({ ok: false, error: "role_not_found", message: "Ese rol ya no existe" });
     }
     // Its scopes grow by themselves with every new source and area; editing them would break that
     if (
@@ -567,6 +708,9 @@ export default async function usersRoutes(
       .from(roleScopes)
       .innerJoin(scopes, eq(scopes.id, roleScopes.scopeId))
       .where(eq(roleScopes.roleId, role.id));
+    if (!within(request, reply, [...before.map((row) => row.code), ...(body.data.scopes ?? [])])) {
+      return reply;
+    }
 
     const kept = await keepingAccess(request, reply, async (tx) => {
       await tx

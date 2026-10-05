@@ -30,7 +30,12 @@ interface Person {
   isService: boolean;
   hasPassword: boolean;
   systems: string[];
-  extraScopes: { code: string; expiresAt: string | null; reason: string | null }[];
+  extraScopes: {
+    code: string;
+    expiresAt: string | null;
+    reason: string | null;
+    expired: boolean;
+  }[];
 }
 
 interface Role {
@@ -124,7 +129,10 @@ export function UsersPage() {
                   <Table.Cell fontSize="xs">
                     {person.extraScopes.length === 0
                       ? "—"
-                      : person.extraScopes.map((extra) => extra.code).join(", ")}
+                      : person.extraScopes
+                          .filter((extra) => !extra.expired)
+                          .map((extra) => extra.code)
+                          .join(", ") || "—"}
                   </Table.Cell>
                   <Table.Cell fontSize="xs" color="fg.muted">
                     {[person.hasPassword ? "contraseña" : null, ...person.systems]
@@ -233,7 +241,12 @@ function PersonForm({
       if (existing) {
         await api(`/admin/users/${existing.id}`, {
           method: "PATCH",
-          body: { displayName: form.displayName, role: form.role, active: form.active },
+          body: {
+            displayName: form.displayName,
+            // Only when it changed: a person whose role was switched off keeps their name editable
+            ...(form.role !== existing.role ? { role: form.role } : {}),
+            active: form.active,
+          },
         });
         if (form.isService !== existing.isService) {
           await api(`/admin/users/${existing.id}/service`, {
@@ -425,7 +438,16 @@ function ExtraScopes({ person, onChanged }: { person: Person; onChanged: () => v
   };
 
   return (
-    <Dialog.Root>
+    <Dialog.Root
+      onOpenChange={(details) => {
+        if (details.open) {
+          setCode("");
+          setReason("");
+          setUntil("");
+          setError(null);
+        }
+      }}
+    >
       <Dialog.Trigger asChild>
         <IconButton aria-label="Permisos extra" size="xs" variant="ghost">
           <FiKey />
@@ -451,9 +473,11 @@ function ExtraScopes({ person, onChanged }: { person: Person; onChanged: () => v
                       <Text fontFamily="mono">{extra.code}</Text>
                       <Text fontSize="xs" color="fg.muted">
                         {extra.reason}
-                        {extra.expiresAt
-                          ? ` · hasta ${new Date(extra.expiresAt).toLocaleDateString()}`
-                          : " · sin vencimiento"}
+                        {extra.expired
+                          ? ` · venció el ${new Date(extra.expiresAt ?? "").toLocaleDateString()}`
+                          : extra.expiresAt
+                            ? ` · hasta ${new Date(extra.expiresAt).toLocaleDateString()}`
+                            : " · sin vencimiento"}
                       </Text>
                     </Stack>
                     <IconButton

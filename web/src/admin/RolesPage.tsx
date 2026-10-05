@@ -320,7 +320,17 @@ function AreaForm({ onSaved }: { onSaved: () => void }) {
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={(details) => setOpen(details.open)}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(details) => {
+        setOpen(details.open);
+        if (details.open) {
+          setArea("");
+          setDescription("");
+          setError(null);
+        }
+      }}
+    >
       <Dialog.Trigger asChild>
         <Button variant="outline" size="sm">
           <FiFolderPlus /> Nueva área

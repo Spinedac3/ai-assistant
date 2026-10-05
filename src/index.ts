@@ -114,7 +114,9 @@ const probes: Record<string, Probe> = {
     return undefined;
   },
   "Búsqueda (Solr)": async () => {
-    const response = await fetch(`${env.SOLR_URL}/solr/admin/info/system?wt=json`);
+    const response = await fetch(`${env.SOLR_URL}/solr/admin/info/system?wt=json`, {
+      signal: AbortSignal.timeout(8_000),
+    });
     if (!response.ok) {
       throw new Error(`respondió ${response.status}`);
     }

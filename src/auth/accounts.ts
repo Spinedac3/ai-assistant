@@ -146,10 +146,24 @@ export async function userForIdentity(
   }
 
   // Two first logins at once race here; the unique index keeps a single identity
-  await db
+  const linked = await db
     .insert(userIdentities)
     .values({ userId, systemCode: identity.systemCode, externalId: identity.externalId })
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({ userId: userIdentities.userId });
+
+  // The system vouched the email is this person's; a password someone else may have set on the
+  // account before must not stay as a second way in. The previous second keeps the session about
+  // to be issued alive
+  if (linked.length > 0 && !created) {
+    await db
+      .update(users)
+      .set({
+        passwordHash: null,
+        tokensRevokedAt: sql`date_trunc('second', now()) - interval '1 second'`,
+      })
+      .where(and(eq(users.id, userId), sql`${users.passwordHash} is not null`));
+  }
 
   return { userId, created };
 }

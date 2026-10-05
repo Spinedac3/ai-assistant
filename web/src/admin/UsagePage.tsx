@@ -92,7 +92,11 @@ export function UsagePage() {
           </NativeSelect.Field>
         </NativeSelect.Root>
       </HStack>
-      {!data ? (
+      {report.isError ? (
+        <Text role="alert" color="fg.error">
+          {report.error.message}
+        </Text>
+      ) : !data ? (
         <Spinner color="brand.solid" />
       ) : (
         <>

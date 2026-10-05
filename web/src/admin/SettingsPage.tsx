@@ -49,7 +49,11 @@ export function SettingsPage() {
 
   return (
     <Stack gap={4} maxW="2xl">
-      {settings.isLoading ? (
+      {settings.isError ? (
+        <Text role="alert" color="fg.error">
+          {settings.error.message}
+        </Text>
+      ) : settings.isLoading ? (
         <Spinner color="brand.solid" />
       ) : (
         FIELDS.map((field) => (
@@ -144,7 +148,11 @@ export function DiagnosticsPage() {
           <FiRefreshCw /> Volver a revisar
         </Button>
       </HStack>
-      {!data ? (
+      {report.isError ? (
+        <Text role="alert" color="fg.error">
+          {report.error.message}
+        </Text>
+      ) : !data ? (
         <Spinner color="brand.solid" />
       ) : (
         <>
