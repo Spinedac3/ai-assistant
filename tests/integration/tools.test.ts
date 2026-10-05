@@ -62,6 +62,9 @@ let registry: ToolRegistry;
 let adminToken: string;
 let userToken: string;
 let managerToken: string;
+// What the fake model was asked, and what it answers next
+const asked: string[] = [];
+let answer: () => string = () => "{}";
 
 /**
  * Calls the creator as a person would
@@ -135,7 +138,15 @@ describe("tool creator", () => {
       db: database.db,
       signer: testSigner(),
       systems: new Map(),
-      tools: { secrets, appTimeZone: "UTC", created },
+      tools: {
+        secrets,
+        appTimeZone: "UTC",
+        created,
+        ask: async (prompt) => {
+          asked.push(prompt);
+          return answer();
+        },
+      },
     });
     const login = async (email: string) =>
       (
@@ -310,5 +321,47 @@ describe("tool creator", () => {
     // Performs assertions.
     expect(stale).toBeNull();
     expect(fresh?.status).toBe("published");
+  });
+
+  it("guides with real samples from the source and returns only chips that can be saved", async () => {
+    // Performs the test.
+    const url = "/admin/tools/entregas_guiadas";
+    await api("PUT", url, { source: `demo-${available[0]}`, definition: deliveries });
+    const proposed = { ...deliveries, filters: [{ column: "ruta", op: "=" }] };
+    answer = () =>
+      JSON.stringify({
+        explanation: "Cuenta entregas por ruta.",
+        chips: [
+          { label: "Filtrar por una ruta", why: "Se pregunta por una ruta.", definition: proposed },
+          {
+            label: "Leer pedidos",
+            why: "x",
+            definition: { ...deliveries, base: { kind: "table", name: "pedidos" } },
+          },
+        ],
+      });
+    const guided = await api("POST", `${url}/guide`, { question: "¿Qué más le pongo?" });
+    const prompt = asked.at(-1) ?? "";
+    const saved = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: guided.body.data.chips[0].definition,
+    });
+    answer = () => {
+      throw new Error("sin conexión con el modelo");
+    };
+    const failed = await api("POST", `${url}/guide`, {});
+    const notAllowed = await api("POST", `${url}/guide`, {}, managerToken);
+    await api("DELETE", url);
+
+    // Performs assertions.
+    expect(guided.status).toBe(200);
+    expect(guided.body.data.chips.map((chip: { label: string }) => chip.label)).toEqual([
+      "Filtrar por una ruta",
+    ]);
+    expect(prompt).toMatch(/<<<SAMPLES\n.*R-[A-Za-z]+-\d.*\nSAMPLES>>>/);
+    expect(prompt).toContain("¿Qué más le pongo?");
+    expect(saved.status).toBe(200);
+    expect(failed).toMatchObject({ status: 502, body: { error: "guide_failed" } });
+    expect(notAllowed.status).toBe(403);
   });
 });

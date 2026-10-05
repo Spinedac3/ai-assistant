@@ -9,6 +9,7 @@ import { loadEnv } from "./config/env.js";
 import { CreatedTools } from "./creator/store.js";
 import { connectDatabase } from "./db/client.js";
 import { ExportStore } from "./exports/store.js";
+import { askOnce } from "./llm/oneShot.js";
 import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
@@ -87,7 +88,21 @@ const app = await buildApp({
   },
   docs: { index, storage },
   sources: { secrets, onSaved: (code, retargeted) => createdTools.sourceChanged(code, retargeted) },
-  tools: { secrets, appTimeZone: env.APP_TIMEZONE, created: createdTools },
+  tools: {
+    secrets,
+    appTimeZone: env.APP_TIMEZONE,
+    created: createdTools,
+    // The guide answers with the chat's model, read on each call as the chat reads it
+    ask: async (prompt) =>
+      askOnce(
+        {
+          cli: { bin: env.CLAUDE_BIN },
+          model: (await readSetting(database.db, "chat.model")) ?? env.CHAT_MODEL,
+          workspacesDir: env.CHAT_WORKSPACES_DIR ?? join(tmpdir(), "ai-assistant-chat"),
+        },
+        prompt,
+      ),
+  },
   exports: { exports },
   logger: true,
   trustProxy: env.TRUST_PROXY,

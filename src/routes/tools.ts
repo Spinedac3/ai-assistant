@@ -2,9 +2,10 @@ import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
-import { type CheckResult, runChecks, runnerFor } from "../creator/checks.js";
+import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
 import { type BaseColumn, describeBase } from "../creator/columns.js";
-import { definitionSchema, TOOL_NAME, type ToolDefinitionSpec } from "../creator/definition.js";
+import { definitionSchema, TOOL_NAME } from "../creator/definition.js";
+import { guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
 import { checkPasted } from "../creator/pasted.js";
 import {
   type CreatedTools,
@@ -30,7 +31,12 @@ import { ToolRegistry } from "../tools/registry.js";
 export interface ToolsRoutesOptions extends CreatedToolDependencies {
   db: Database;
   created: CreatedTools;
+  // Asks the model one question with no tools; without it the guide is off
+  ask?: (prompt: string) => Promise<string>;
 }
+
+// Values per column the guide sees, enough to tell what a column holds
+const GUIDE_SAMPLES = 5;
 
 // Checks read the base several times; each read gets the time a slow report would
 const CHECK_LIMITS = { timeoutMs: 60_000, maxRows: 200_000 };
@@ -40,28 +46,7 @@ const saveBody = z
   .object({ source: z.string().regex(SOURCE_CODE), definition: z.unknown() })
   .strict();
 const runBody = z.object({ args: z.record(z.string(), z.unknown()).default({}) }).strict();
-
-/**
- * Lists the columns a definition names that its base does not have
- *
- * @param   spec     Definition
- * @param   columns  Columns of the base
- *
- * @return  The missing names
- */
-function unknownColumns(spec: ToolDefinitionSpec, columns: BaseColumn[]): string[] {
-  const names = new Set(columns.map((column) => column.name));
-  const used = [
-    ...spec.columns.map((column) => column.name),
-    ...spec.filters.map((filter) => filter.column),
-    ...(spec.summary?.group_by ?? []),
-    ...(spec.summary?.aggregates ?? []).flatMap((aggregate) =>
-      aggregate.column ? [aggregate.column] : [],
-    ),
-  ];
-
-  return [...new Set(used.filter((name) => !names.has(name)))];
-}
+const guideBody = z.object({ question: z.string().trim().min(1).max(2_000).optional() }).strict();
 
 /**
  * Registers the creator: tools defined over a registered source, saved as drafts, checked, tried
@@ -114,15 +99,22 @@ export default async function toolsRoutes(
    *
    * @return  The results, or why the source could not be reached
    */
-  const check = async (tool: StoredTool): Promise<CheckResult[]> => {
+  /**
+   * Builds the runner that reads a stored tool's source as the tool would
+   *
+   * @param   tool  Stored definition
+   *
+   * @return  The runner, or why the source cannot be read
+   */
+  const runnerOf = async (tool: StoredTool): Promise<Runner | string> => {
     const source = await connectionFor(db, options.secrets, tool.sourceCode);
     if (!source) {
-      return [{ name: "runs", ok: false, detail: "La fuente ya no existe" }];
+      return "La fuente ya no existe";
     }
     const pasted =
       tool.spec.base.kind === "query" ? checkPasted(tool.spec.base.sql, source.info.engine) : null;
     if (pasted && !pasted.ok) {
-      return [{ name: "runs", ok: false, detail: pasted.message }];
+      return pasted.message;
     }
 
     const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
@@ -130,13 +122,25 @@ export default async function toolsRoutes(
       ...CHECK_LIMITS,
       timeZone: tool.spec.time_zone ?? source.timeZone ?? options.appTimeZone,
     };
+
+    return runnerFor(source.info, tool.spec.base, pasted?.sql ?? null, limits, kinds);
+  };
+
+  /**
+   * Runs the checks of a stored definition against its source
+   *
+   * @param   tool  Stored definition
+   *
+   * @return  The results, or why the source could not be reached
+   */
+  const check = async (tool: StoredTool): Promise<CheckResult[]> => {
+    const runner = await runnerOf(tool);
+    if (typeof runner === "string") {
+      return [{ name: "runs", ok: false, detail: runner }];
+    }
+
     // Checks read the source several times; one set at a time per source keeps it answering
-    return oneAtATime(`checks:${tool.sourceCode}`, () =>
-      runChecks(
-        shapeOf(tool),
-        runnerFor(source.info, tool.spec.base, pasted?.sql ?? null, limits, kinds),
-      ),
-    );
+    return oneAtATime(`checks:${tool.sourceCode}`, () => runChecks(shapeOf(tool), runner));
   };
 
   app.get("/admin/tools", guard, async (request) => {
@@ -277,6 +281,58 @@ export default async function toolsRoutes(
       ok: true,
       data: { name, status: stored.status, columns, checks: await check(stored) },
     };
+  });
+
+  // The guide only suggests: each chip is a whole definition the person saves with the usual PUT
+  app.post("/admin/tools/:name/guide", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+    const ask = options.ask;
+    if (!ask) {
+      return reply
+        .code(503)
+        .send({ ok: false, error: "guide_off", message: "La guía no está disponible" });
+    }
+    const body = guideBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: "invalid_body" });
+    }
+    const runner = await runnerOf(found.tool);
+    if (typeof runner === "string") {
+      return reply.code(400).send({ ok: false, error: "source_unreadable", message: runner });
+    }
+
+    const tool = found.tool;
+    try {
+      const samples = await oneAtATime(`checks:${tool.sourceCode}`, async () => {
+        const found: Record<string, unknown[]> = {};
+        for (const column of tool.columns) {
+          const rows = await runner.sample([column.name]);
+          found[column.name] = [...new Set(rows.map((row) => row[column.name]))].slice(
+            0,
+            GUIDE_SAMPLES,
+          );
+        }
+        return found;
+      });
+      const input = {
+        spec: tool.spec,
+        columns: tool.columns,
+        samples,
+        question: body.data.question,
+      };
+
+      return { ok: true, data: readGuide(await ask(guidePrompt(input)), input) };
+    } catch (error) {
+      request.log.warn({ err: error, tool: tool.name }, "tool guide failed");
+      return reply.code(502).send({
+        ok: false,
+        error: "guide_failed",
+        message: "La guía no pudo responder ahora; vuelve a intentarlo",
+      });
+    }
   });
 
   app.post("/admin/tools/:name/check", guard, async (request, reply) => {
