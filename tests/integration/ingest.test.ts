@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { scopes } from "../../src/db/schema.js";
+import { auditLogs, scopes } from "../../src/db/schema.js";
 import { parseDocument } from "../../src/rag/document.js";
 import { Embedder } from "../../src/rag/embeddings.js";
 import type { Index } from "../../src/rag/ingest.js";
@@ -27,6 +27,12 @@ const reader = {
   userId: 2,
   email: "ana@example.com",
   scopes: new Set(["chat.use", "docs.general.read"]),
+};
+// Manages documents but reads only the general area
+const outsider = {
+  userId: 3,
+  email: "luis@example.com",
+  scopes: new Set(["chat.use", "docs.manage", "docs.general.read"]),
 };
 const fields = { doc_title: "Guía de bodega", doc_version: "V001", area: "general" };
 const body =
@@ -142,21 +148,66 @@ describe("ingest_document", () => {
   it("gathers a document sent in parts, in any order, and leaves no part behind", async () => {
     // Performs the test.
     const code = "MANUAL-RUTAS-V001";
-    const send = (part: number, text: string) =>
-      call({ mode: "ingest", doc_code: code, ...fields, markdown: text, part, parts: 3 });
+    const send = (part: number, text: string, caller = manager) =>
+      call({ mode: "ingest", doc_code: code, ...fields, markdown: text, part, parts: 3 }, caller);
+    const second = await send(2, "# Dos\n\nborrador");
     const first = await send(1, "# Uno\n\nPrimera parte.");
+    const resent = await send(2, "# Dos\n\nSegunda parte.");
+    // Someone else's part of the same code never joins this upload
+    await send(3, "# Ajeno\n\nde otra persona.", outsider);
     const third = await send(3, "# Tres\n\nTercera parte.");
-    const second = await send(2, "# Dos\n\nSegunda parte.");
     const stored = parseDocument(await storage.readMarkdown(code));
 
     // Performs assertions.
-    expect(first).toMatchObject({ result: "part_received", pending_parts: [2, 3] });
-    expect(third).toMatchObject({ result: "part_received", pending_parts: [2] });
-    expect(second).toMatchObject({ result: "queued", parts: 3 });
+    expect(second).toMatchObject({ result: "part_received", pending_parts: [1, 3] });
+    expect(first).toMatchObject({ result: "part_received", pending_parts: [3] });
+    expect(resent).toMatchObject({ result: "part_received", pending_parts: [3] });
+    expect(third).toMatchObject({ result: "queued", parts: 3 });
     expect(stored.body).toBe(
       "# Uno\n\nPrimera parte.\n\n# Dos\n\nSegunda parte.\n\n# Tres\n\nTercera parte.",
     );
-    expect(await storage.exists(`${code}.part-1`, "md")).toBe(false);
+    expect(await storage.partsReceived(manager.userId, code)).toEqual([]);
+    expect(await storage.partsReceived(outsider.userId, code)).toEqual([3]);
+  });
+
+  it("drops the parts of a refused upload and refuses one past the size of an upload", async () => {
+    // Performs the test.
+    const code = "ENORME-V001";
+    // Each part within the limit of a call, all six past the limit of a document
+    const piece = "x".repeat(390_000);
+    const send = (part: number) =>
+      call({ mode: "ingest", doc_code: code, ...fields, markdown: piece, part, parts: 6 });
+    for (const part of [1, 2, 3, 4, 5]) {
+      await send(part);
+    }
+    const tooLarge = await send(6);
+
+    // Performs assertions.
+    expect(tooLarge.error).toBe("too_large");
+    expect(await storage.partsReceived(manager.userId, code)).toEqual([]);
+  });
+
+  it("lets nobody publish to, move from or describe an area they do not read", async () => {
+    // Performs the test.
+    const salaries = { ...fields, area: "rrhh", markdown: body };
+    await call({ mode: "ingest", doc_code: "SALARIOS-V001", ...salaries });
+    await drainQueue();
+    const publish = await call(
+      { mode: "ingest", doc_code: "SALARIOS-V002", ...salaries },
+      outsider,
+    );
+    const move = await call(
+      { mode: "reclassify", doc_code: "SALARIOS-V001", area: "general" },
+      outsider,
+    );
+    const described = await call({ mode: "validate", doc_code: "SALARIOS-V002" }, outsider);
+    const seen = await call({ mode: "validate", doc_code: "SALARIOS-V002" });
+
+    // Performs assertions.
+    expect(publish.error).toBe("area_not_readable");
+    expect(move.error).toBe("area_not_readable");
+    expect(described.current_version).toBeNull();
+    expect(seen.current_version).toMatchObject({ doc_code: "SALARIOS-V001" });
   });
 
   it("refuses an unknown area, missing fields, a bad part and an older version", async () => {
@@ -226,5 +277,7 @@ describe("ingest_document", () => {
     expect(pdf?.requiredScope).toBe("docs.rrhh.read");
     expect(unknown.error).toBe("document_not_found");
     expect(nothing.error).toBe("missing_fields");
+    const events = await database.db.select().from(auditLogs);
+    expect(events.some((event) => event.eventCode === "docs.reclassified")).toBe(true);
   });
 });

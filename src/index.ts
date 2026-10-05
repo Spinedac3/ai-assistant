@@ -99,9 +99,15 @@ void purge();
 const purgeTimer = setInterval(purge, 6 * 3_600_000);
 purgeTimer.unref();
 
-// Exported files live seven days; an hourly sweep keeps them from outliving that by much
+// Exported files live seven days; an hourly sweep keeps them from outliving that by much. The same
+// sweep drops the parts of documents whose upload was left unfinished a day ago
 const purgeExports = () =>
-  exports.purge().catch((error) => app.log.error({ err: error }, "export purge failed"));
+  Promise.all([
+    exports.purge().catch((error) => app.log.error({ err: error }, "export purge failed")),
+    storage
+      .purgeParts(new Date(Date.now() - 86_400_000))
+      .catch((error) => app.log.error({ err: error }, "document part purge failed")),
+  ]);
 void purgeExports();
 const exportsTimer = setInterval(purgeExports, 3_600_000);
 exportsTimer.unref();

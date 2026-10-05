@@ -8,7 +8,7 @@ import { type Index, isCurrent, removeDocument } from "../rag/ingest.js";
 import { enqueue, findJob } from "../rag/jobs.js";
 import { scopeFilter } from "../rag/search.js";
 import { CONTENT_TYPES, type DocumentStorage } from "../rag/storage.js";
-import { storeDocument } from "../rag/upload.js";
+import { MAX_MARKDOWN_BYTES, storeDocument } from "../rag/upload.js";
 
 export interface DocsRoutesOptions {
   db: Database;
@@ -16,8 +16,7 @@ export interface DocsRoutesOptions {
   storage: DocumentStorage;
 }
 
-// A long manual in markdown stays well under this; the PDF original can be much larger
-const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
+// The PDF original can be much larger than its markdown
 const MAX_ORIGINAL_BYTES = 50 * 1024 * 1024;
 // Every document has a first chunk, so listing those lists each document once
 const LIST_LIMIT = 5_000;

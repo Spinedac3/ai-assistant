@@ -57,6 +57,7 @@ export interface CurrentDocument {
   doc_code: string;
   doc_title: string;
   doc_version: string;
+  required_scope: string;
   updated_at: string;
 }
 
@@ -72,7 +73,7 @@ export async function currentOfFamily(index: Index, docCode: string): Promise<Cu
   const found = await index.solr.query<CurrentDocument>(index.cores.current, {
     query: `doc_family:${escapeTerm(docFamily(docCode))}`,
     filter: ["chunk_index:0"],
-    fields: ["doc_code", "doc_title", "doc_version", "updated_at"],
+    fields: ["doc_code", "doc_title", "doc_version", "required_scope", "updated_at"],
     limit: 1_000,
   });
 

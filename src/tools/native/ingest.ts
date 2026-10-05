@@ -1,9 +1,11 @@
+import { logAudit } from "../../audit.js";
 import { areaScope, DOC_CODE, parseDocument } from "../../rag/document.js";
 import { currentOfFamily, isCurrent } from "../../rag/ingest.js";
 import { enqueue, findJob } from "../../rag/jobs.js";
 import {
   areaExists,
   listAreas,
+  MAX_MARKDOWN_BYTES,
   storeDocument,
   type UploadDependencies,
   writeDocument,
@@ -61,8 +63,6 @@ type Args = {
   job_id?: number;
 };
 
-const partCode = (docCode: string, part: number) => `${docCode}.part-${part}`;
-
 /**
  * Builds a refusal the model reads
  *
@@ -79,12 +79,17 @@ function refuse(error: string, message: string): ToolResult {
  * Checks the fields of a document before it is converted: what is missing, what is wrong and
  * whether a version of it is already current
  *
- * @param   deps  Database, index and storage
- * @param   args  Fields the model could infer
+ * @param   deps     Database, index and storage
+ * @param   args     Fields the model could infer
+ * @param   context  Who calls
  *
  * @return  What to ask the person and how to convert the document
  */
-async function validate(deps: UploadDependencies, args: Args): Promise<ToolResult> {
+async function validate(
+  deps: UploadDependencies,
+  args: Args,
+  context: ToolContext,
+): Promise<ToolResult> {
   const areas = await listAreas(deps.db);
   const missing = REQUIRED.filter(({ field }) => !args[field]);
   // The code's shape is already checked by the input schema; the areas live in the database
@@ -96,8 +101,19 @@ async function validate(deps: UploadDependencies, args: Args): Promise<ToolResul
   let current: Record<string, unknown> | null = null;
   if (args.doc_code) {
     try {
-      const [newest] = await currentOfFamily(deps.index, args.doc_code);
-      current = newest ? { ...newest, same_code: newest.doc_code === args.doc_code } : null;
+      // A version in an area the person does not read is not described to them
+      const [newest] = (await currentOfFamily(deps.index, args.doc_code)).filter((document) =>
+        context.scopes.has(document.required_scope),
+      );
+      current = newest
+        ? {
+            doc_code: newest.doc_code,
+            doc_title: newest.doc_title,
+            doc_version: newest.doc_version,
+            updated_at: newest.updated_at,
+            same_code: newest.doc_code === args.doc_code,
+          }
+        : null;
     } catch {
       current = { warning: "No se pudo revisar si ya hay una versión cargada; puedes continuar." };
     }
@@ -119,6 +135,43 @@ async function validate(deps: UploadDependencies, args: Args): Promise<ToolResul
         "Después llama con mode 'ingest' y el markdown, y confirma con mode 'status'.",
     },
   };
+}
+
+/**
+ * Gathers the parts of a document sent in pieces; each person's parts are kept apart, and a part
+ * sent again replaces the earlier one
+ *
+ * @param   deps   Database, index and storage
+ * @param   owner  Who sends it
+ * @param   code   Document code
+ * @param   part   This part's number
+ * @param   parts  How many parts there are
+ * @param   text   This part's markdown
+ *
+ * @return  The whole body, or the parts still missing
+ */
+async function gather(
+  deps: UploadDependencies,
+  owner: number,
+  code: string,
+  part: number,
+  parts: number,
+  text: string,
+): Promise<{ body: string } | { pending: number[] }> {
+  await deps.storage.savePart(owner, code, part, text);
+  const received = new Set(await deps.storage.partsReceived(owner, code));
+  const pending = Array.from({ length: parts }, (_, index) => index + 1).filter(
+    (number) => !received.has(number),
+  );
+  if (pending.length > 0) {
+    return { pending };
+  }
+
+  const texts = await Promise.all(
+    Array.from({ length: parts }, (_, index) => deps.storage.readPart(owner, code, index + 1)),
+  );
+
+  return { body: texts.join("\n\n") };
 }
 
 /**
@@ -146,38 +199,30 @@ async function ingest(
   }
 
   const code = String(args.doc_code);
+  const area = String(args.area);
   const part = args.part ?? 1;
   const parts = args.parts ?? 1;
   if (part > parts) {
     return refuse("invalid_part", `part (${part}) no puede pasar de parts (${parts}).`);
   }
-  if (!(await areaExists(deps.db, String(args.area)))) {
+  if (!(await areaExists(deps.db, area))) {
     return refuse(
       "unknown_area",
-      `El área ${args.area} no existe. Usa mode 'validate' para ver las áreas.`,
+      `El área ${area} no existe. Usa mode 'validate' para ver las áreas.`,
+    );
+  }
+  // Whoever publishes to an area must read it, or anyone managing documents could reach any area
+  if (!context.scopes.has(areaScope(area))) {
+    return refuse(
+      "area_not_readable",
+      `No lees el área ${area}, así que no puedes publicar en ella.`,
     );
   }
 
   let body = String(args.markdown);
   if (parts > 1) {
-    const scope = areaScope(String(args.area));
-    // A first part starts over, so leftovers of an abandoned upload never join this one
-    if (part === 1) {
-      await Promise.allSettled(
-        Array.from({ length: MAX_PARTS }, (_, index) =>
-          deps.storage.remove(partCode(code, index + 1), ["md"]),
-        ),
-      );
-    }
-    await deps.storage.save(partCode(code, part), "md", Buffer.from(body, "utf8"), scope);
-
-    const present = await Promise.all(
-      Array.from({ length: parts }, (_, index) =>
-        deps.storage.exists(partCode(code, index + 1), "md"),
-      ),
-    );
-    const pending = present.flatMap((found, index) => (found ? [] : [index + 1]));
-    if (pending.length > 0) {
+    const gathered = await gather(deps, context.userId, code, part, parts, body);
+    if ("pending" in gathered) {
       return {
         ok: true,
         data: {
@@ -185,60 +230,60 @@ async function ingest(
           doc_code: code,
           part,
           parts,
-          pending_parts: pending,
-          note: `Parte ${part} de ${parts} recibida. Envía las partes ${pending.join(", ")} con el mismo doc_code y parts; con la última se arma y se encola sola.`,
+          pending_parts: gathered.pending,
+          note: `Parte ${part} de ${parts} recibida. Envía las partes ${gathered.pending.join(", ")} con el mismo doc_code y parts; con la última se arma y se encola sola.`,
         },
       };
     }
-
-    const texts = await Promise.all(
-      Array.from({ length: parts }, (_, index) =>
-        deps.storage.readMarkdown(partCode(code, index + 1)),
-      ),
-    );
-    body = texts.join("\n\n");
+    body = gathered.body;
   }
 
-  const frontmatter = {
-    doc_code: code,
-    doc_title: args.doc_title,
-    doc_version: args.doc_version,
-    area: args.area,
-    doc_revision: args.doc_revision,
-    doc_type: args.doc_type,
-    status: args.status,
-    effective_date: args.effective_date,
-    tags: args.tags ?? [],
-  };
-  const stored = await storeDocument(deps, writeDocument(frontmatter, body), {
-    userId: context.userId,
-    ip: null,
-  });
-  if (!stored.ok) {
-    return refuse(stored.error, stored.message);
-  }
+  try {
+    if (Buffer.byteLength(body, "utf8") > MAX_MARKDOWN_BYTES) {
+      return refuse(
+        "too_large",
+        `El documento pasa de ${MAX_MARKDOWN_BYTES / 1024 / 1024} MB; divídelo en documentos más chicos.`,
+      );
+    }
 
-  if (parts > 1) {
-    await Promise.allSettled(
-      Array.from({ length: parts }, (_, index) =>
-        deps.storage.remove(partCode(code, index + 1), ["md"]),
-      ),
-    );
-  }
-
-  return {
-    ok: true,
-    data: {
-      result: "queued",
-      job_id: stored.jobId,
+    const frontmatter = {
       doc_code: code,
-      parts,
-      frontmatter: stored.frontmatter,
-      note:
-        "El documento quedó GUARDADO y en cola para indexarse; todavía no está indexado. Da el " +
-        "job_id y el doc_code tal cual y confirma con mode 'status' antes de decir que terminó.",
-    },
-  };
+      doc_title: args.doc_title,
+      doc_version: args.doc_version,
+      area,
+      doc_revision: args.doc_revision,
+      doc_type: args.doc_type,
+      status: args.status,
+      effective_date: args.effective_date,
+      tags: args.tags ?? [],
+    };
+    const stored = await storeDocument(deps, writeDocument(frontmatter, body), {
+      userId: context.userId,
+      ip: null,
+    });
+    if (!stored.ok) {
+      return refuse(stored.error, stored.message);
+    }
+
+    return {
+      ok: true,
+      data: {
+        result: "queued",
+        job_id: stored.jobId,
+        doc_code: code,
+        parts,
+        frontmatter: stored.frontmatter,
+        note:
+          "El documento quedó GUARDADO y en cola para indexarse; todavía no está indexado. Da el " +
+          "job_id y el doc_code tal cual y confirma con mode 'status' antes de decir que terminó.",
+      },
+    };
+  } finally {
+    // Gathered or refused, its parts are done; sent again, it starts from scratch
+    if (parts > 1) {
+      await deps.storage.removeParts(context.userId, code).catch(() => {});
+    }
+  }
 }
 
 /**
@@ -287,14 +332,29 @@ async function reclassify(
   }
 
   const document = parseDocument(await deps.storage.readMarkdown(code));
-  const frontmatter = { ...document.frontmatter, ...changes };
-  const scope = areaScope(frontmatter.area);
-  await deps.storage.save(
-    code,
-    "md",
-    Buffer.from(writeDocument(frontmatter, document.body), "utf8"),
-    scope,
+  const before = document.frontmatter.area;
+  // Moving a document needs both areas: the one it leaves and the one it reaches
+  const unreadable = [...new Set([before, args.area ?? before])].filter(
+    (area) => !context.scopes.has(areaScope(area)),
   );
+  if (unreadable.length > 0) {
+    return refuse(
+      "area_not_readable",
+      `No lees el área ${unreadable.join(" ni ")}, así que no puedes cambiar este documento.`,
+    );
+  }
+
+  // Checked as the worker will read it, before anything is saved
+  let rewritten: string;
+  try {
+    rewritten = writeDocument({ ...document.frontmatter, ...changes }, document.body);
+    parseDocument(rewritten);
+  } catch (error) {
+    return refuse("invalid_document", (error as Error).message);
+  }
+
+  const scope = areaScope(args.area ?? before);
+  await deps.storage.save(code, "md", Buffer.from(rewritten, "utf8"), scope);
 
   // The PDF carries its own area; left behind, it would still open to the old readers
   if (args.area) {
@@ -308,7 +368,19 @@ async function reclassify(
     }
   }
 
+  // Deleted while this ran: what was just saved must not bring it back on the reindex
+  if (!(await isCurrent(deps.index, code))) {
+    await deps.storage.remove(code);
+    return refuse("document_not_found", `${code} se borró mientras se cambiaba.`);
+  }
+
   const jobId = await enqueue(deps.db, code, "reindex", context.userId);
+  await logAudit(deps.db, {
+    userId: context.userId,
+    level: "info",
+    eventCode: "docs.reclassified",
+    message: `${code}: ${JSON.stringify(changes)}${args.area ? `, área ${before} → ${args.area}` : ""}`,
+  });
 
   return {
     ok: true,
@@ -395,11 +467,19 @@ export function ingestTool(deps: UploadDependencies): Tool {
           doc_title: { type: "string", minLength: 1, maxLength: 300 },
           doc_version: { type: "string", minLength: 1, maxLength: 30, description: "e.g. 'V002'." },
           doc_revision: { type: "string", maxLength: 30 },
-          area: { type: "string", description: "Who can read it; 'validate' lists the areas." },
+          area: {
+            type: "string",
+            pattern: "^[a-z0-9_-]{1,40}$",
+            description: "Who can read it; 'validate' lists the areas.",
+          },
           doc_type: { type: "string", maxLength: 60, description: "procedure, policy, manual..." },
           status: { type: "string", maxLength: 30 },
           effective_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
-          tags: { type: "array", items: { type: "string", minLength: 1, maxLength: 60 } },
+          tags: {
+            type: "array",
+            maxItems: 30,
+            items: { type: "string", minLength: 1, maxLength: 60 },
+          },
           markdown: {
             type: "string",
             minLength: 1,
@@ -419,7 +499,7 @@ export function ingestTool(deps: UploadDependencies): Tool {
     execute: async (raw, context) => {
       const args = raw as Args;
       if (args.mode === "validate") {
-        return validate(deps, args);
+        return validate(deps, args, context);
       }
       if (args.mode === "ingest") {
         return ingest(deps, args, context);

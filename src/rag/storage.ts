@@ -13,6 +13,9 @@ export const CONTENT_TYPES: Record<OriginalKind, string> = {
 // index that may still describe a previous upload
 const SCOPE_META = "required-scope";
 
+// Parts of documents sent in pieces wait here until the last one arrives
+const PARTS = "_parts";
+
 export interface Original {
   stream: Readable;
   requiredScope: string;
@@ -172,6 +175,124 @@ export class DocumentStorage {
       kinds.map((kind) => key(docCode, kind)),
     );
   }
+
+  /**
+   * Keeps one part of a document sent in pieces, replacing a part with the same number
+   *
+   * @param   owner    Who sends it
+   * @param   docCode  Document code
+   * @param   part     Part number
+   * @param   text     Markdown of the part
+   */
+  async savePart(owner: number, docCode: string, part: number, text: string): Promise<void> {
+    const data = Buffer.from(text, "utf8");
+    await this.client.putObject(
+      this.config.bucket,
+      partKey(owner, docCode, part),
+      data,
+      data.length,
+    );
+  }
+
+  /**
+   * Lists the part numbers already received of a document
+   *
+   * @param   owner    Who sends it
+   * @param   docCode  Document code
+   *
+   * @return  The numbers
+   */
+  async partsReceived(owner: number, docCode: string): Promise<number[]> {
+    const names = await this.list(partKey(owner, docCode));
+
+    return names
+      .map(({ name }) => Number(name.split("/").pop()?.replace(".md", "")))
+      .sort((a, b) => a - b);
+  }
+
+  /**
+   * Reads one part of a document
+   *
+   * @param   owner    Who sends it
+   * @param   docCode  Document code
+   * @param   part     Part number
+   *
+   * @return  Its markdown
+   */
+  async readPart(owner: number, docCode: string, part: number): Promise<string> {
+    const stream = await this.client.getObject(this.config.bucket, partKey(owner, docCode, part));
+    const pieces: Buffer[] = [];
+    for await (const piece of stream) {
+      pieces.push(piece as Buffer);
+    }
+
+    return Buffer.concat(pieces).toString("utf8");
+  }
+
+  /**
+   * Drops every part of a document, once it is gathered or refused
+   *
+   * @param   owner    Who sends it
+   * @param   docCode  Document code
+   */
+  async removeParts(owner: number, docCode: string): Promise<void> {
+    const names = await this.list(partKey(owner, docCode));
+    await this.client.removeObjects(
+      this.config.bucket,
+      names.map(({ name }) => name),
+    );
+  }
+
+  /**
+   * Drops the parts of uploads left unfinished
+   *
+   * @param   olderThan  Parts saved before this moment go
+   */
+  async purgeParts(olderThan: Date): Promise<void> {
+    const stale = (await this.list(`${PARTS}/`)).filter((item) => item.lastModified < olderThan);
+    if (stale.length > 0) {
+      await this.client.removeObjects(
+        this.config.bucket,
+        stale.map(({ name }) => name),
+      );
+    }
+  }
+
+  /**
+   * Lists the objects under a prefix
+   *
+   * @param   prefix  Key prefix
+   *
+   * @return  Their names and when they were saved
+   */
+  private async list(prefix: string): Promise<{ name: string; lastModified: Date }[]> {
+    const found: { name: string; lastModified: Date }[] = [];
+    for await (const item of this.client.listObjectsV2(this.config.bucket, prefix, true)) {
+      if (item.name) {
+        found.push({ name: item.name, lastModified: item.lastModified });
+      }
+    }
+
+    return found;
+  }
+}
+
+/**
+ * Builds the key of a part of a document still being sent; the folder holds a slash, which no
+ * document code can, so a part never overwrites or joins a real document
+ *
+ * @param   owner    Who sends it
+ * @param   docCode  Document code
+ * @param   part     Part number
+ *
+ * @return  The key
+ */
+export function partKey(owner: number, docCode: string, part?: number): string {
+  if (!DOC_CODE.test(docCode) || !Number.isInteger(owner)) {
+    throw new Error(`Código de documento inválido: ${docCode}`);
+  }
+
+  return `${PARTS}/${owner}/${docCode}/${part === undefined ? "" : `${part}.md`}`;
 }
 
 /**

@@ -7,6 +7,9 @@ import { type Index, newerCurrent } from "./ingest.js";
 import { enqueue } from "./jobs.js";
 import type { DocumentStorage } from "./storage.js";
 
+// A long manual in markdown stays well under this, however it arrives
+export const MAX_MARKDOWN_BYTES = 2 * 1024 * 1024;
+
 export interface UploadDependencies {
   db: Database;
   index: Index;
@@ -26,13 +29,18 @@ export type Stored =
  * @return  The whole document
  */
 export function writeDocument(frontmatter: Record<string, unknown>, body: string): string {
-  // Double quotes and line breaks would end a value early in the flat reader
+  // Double quotes and line breaks would end a value early in the flat reader, and a comma would
+  // split a tag; a tag left blank is dropped
   const quote = (value: unknown) => `"${String(value).replace(/["\r\n]/g, " ")}"`;
   const lines = Object.entries(frontmatter)
     .filter(([, value]) => value !== undefined)
     .map(([name, value]) =>
       Array.isArray(value)
-        ? `${name}: [${value.map((item) => quote(String(item).replace(/,/g, " "))).join(", ")}]`
+        ? `${name}: [${value
+            .map((item) => String(item).replace(/,/g, " ").trim())
+            .filter(Boolean)
+            .map(quote)
+            .join(", ")}]`
         : `${name}: ${quote(value)}`,
     );
 

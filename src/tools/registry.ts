@@ -27,6 +27,28 @@ export const DENIAL_NOTE =
   "No tienes permiso para esta capacidad. Dile a la persona que existe y que puede pedir acceso, " +
   "y ahí TERMINA tu respuesta: no busques otra herramienta ni respondas de memoria.";
 
+// Arguments are audited to learn how tools are used; a long text, such as a whole document, only
+// grows the table, so its length stands in for it
+const AUDITED_TEXT_CHARS = 1_000;
+
+/**
+ * Prepares a call's arguments for the audit, keeping every key and the length of long texts
+ *
+ * @param   args  Arguments
+ *
+ * @return  What the audit stores
+ */
+export function auditedArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(args).map(([name, value]) => [
+      name,
+      typeof value === "string" && value.length > AUDITED_TEXT_CHARS
+        ? `[${value.length} caracteres]`
+        : value,
+    ]),
+  );
+}
+
 export interface Caller {
   userId: number;
   email: string;
@@ -359,7 +381,7 @@ export class ToolRegistry {
         userId: caller.userId,
         conversationId: context.conversationId ?? null,
         toolName: name,
-        argsJson: args,
+        argsJson: auditedArgs(args),
         success: outcome.success,
         errorCode: outcome.errorCode,
         durationMs: Date.now() - started,
