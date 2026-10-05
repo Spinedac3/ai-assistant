@@ -27,6 +27,7 @@ interface Run {
   context?: number;
   subtype?: string;
   error?: boolean;
+  noResult?: boolean;
 }
 
 /**
@@ -387,13 +388,48 @@ describe("chat", () => {
     script({ error: true });
     const response = await send("hola");
     const [hour] = await database.db
-      .select({ tokensUsed: rateLimits.tokensUsed })
+      .select({ tokensUsed: rateLimits.tokensUsed, msgCount: rateLimits.msgCount })
       .from(rateLimits)
       .where(eq(rateLimits.windowType, "hour"));
 
     // Performs assertions.
     expect(response.statusCode).toBe(500);
     expect(hour?.tokensUsed).toBe(120);
+    expect(hour?.msgCount).toBe(0);
+  });
+
+  it("charges the running estimate when the CLI dies before reporting its usage", async () => {
+    // Performs the test.
+    script({ steps: [{ text: "Hola." }], noResult: true, context: 1000 });
+    await send("hola");
+    const [hour] = await database.db
+      .select({ tokensUsed: rateLimits.tokensUsed })
+      .from(rateLimits)
+      .where(eq(rateLimits.windowType, "hour"));
+
+    // Performs assertions.
+    expect(hour?.tokensUsed).toBe(1000);
+  });
+
+  it("does not spend hourly quota on a message the daily quota rejects", async () => {
+    // Performs the test.
+    const day = new Date();
+    day.setUTCHours(0, 0, 0, 0);
+    await database.db.insert(rateLimits).values({
+      userId: 1,
+      windowType: "day",
+      windowStart: day,
+      msgCount: 100,
+    });
+    const response = await send("hola");
+    const hour = await database.db
+      .select()
+      .from(rateLimits)
+      .where(eq(rateLimits.windowType, "hour"));
+
+    // Performs assertions.
+    expect(response.statusCode).toBe(429);
+    expect(hour).toEqual([]);
   });
 
   it("runs two messages of the same conversation one after the other", async () => {

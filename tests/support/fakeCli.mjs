@@ -48,7 +48,7 @@ for (const step of run.steps ?? []) {
   }
 }
 
-emit({
+if (!run.noResult) emit({
   type: "result",
   is_error: run.error === true,
   subtype: run.subtype ?? "success",

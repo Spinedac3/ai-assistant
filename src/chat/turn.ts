@@ -9,6 +9,7 @@ import { holdTurn } from "./conversationLock.js";
 import {
   claimsUnsourcedFigures,
   cutOffAnswer,
+  dateSpellings,
   finalAnswer,
   isHookRejection,
   isOnlyAnnouncement,
@@ -22,8 +23,8 @@ import {
   trimLeadingNarration,
   turnBlocks,
 } from "./guards.js";
-import { chatInstructions, type PromptSettings } from "./prompt.js";
-import { type RateLimits, recordTokens, reserveMessage } from "./rateLimit.js";
+import { calendar, chatInstructions, type PromptSettings } from "./prompt.js";
+import { type RateLimits, recordTokens, refundMessage, reserveMessage } from "./rateLimit.js";
 import { redactSecrets } from "./redact.js";
 import { addMessage, createConversation, findConversation, latestMessages } from "./repository.js";
 import { installSourceGate } from "./sourceGate.js";
@@ -33,6 +34,9 @@ const MAX_TURNS = 12;
 
 // Past this context size a resumed thread stops answering, so the next turn starts a seeded session
 const CONTEXT_CAP_TOKENS = 150_000;
+
+// Every attempt ends by itself, which is what lets the conversation lock wait without a limit
+const ATTEMPT_TIMEOUT_MS = 300_000;
 
 // Built-in CLI tools a data assistant never needs; each attempt would only burn a step
 export const DISALLOWED_CLI_TOOLS = [
@@ -182,6 +186,14 @@ async function* runCli(
             count(usage, "cache_read_input_tokens") +
             count(usage, "cache_creation_input_tokens"),
         );
+
+        // A running estimate, so a turn cut before its result event is still charged
+        yield {
+          spentTokens:
+            count(usage, "input_tokens") +
+            count(usage, "output_tokens") +
+            count(usage, "cache_creation_input_tokens"),
+        };
       }
 
       for (const block of (message?.content ?? []) as Array<Record<string, unknown>>) {
@@ -270,8 +282,18 @@ export async function* chatTurn(
   const content = redactSecrets(rawContent);
   const owned = conversationId ? await findConversation(db, conversationId, user.id) : null;
   const conversation = owned?.id ?? (await createConversation(db, user.id));
-  const releaseTurn = await holdTurn(String(conversation));
+  const releaseTurn = await holdTurn(String(conversation), abortSignal);
+
+  if (!releaseTurn) {
+    // The client left while queued: nothing ran, so nothing is stored or charged
+    await refundMessage(db, user.id, timeZone).catch(() => undefined);
+    return;
+  }
+
   const spent = { tokensIn: 0, tokensOut: 0, cachedIn: 0, costMillionths: 0, measured: false };
+  // Estimated tokens of an attempt that has not reported its exact usage yet
+  let unreported = 0;
+  let answered = false;
   let releaseMcp = async () => {};
 
   try {
@@ -294,12 +316,20 @@ export async function* chatTurn(
     const freshSession = !owned || !existsSync(workspace);
     mkdirSync(workspace, { recursive: true });
     // Rewritten every turn: it carries today's date
-    const instructions = chatInstructions(user, deps.prompt, new Date());
-    writeFileSync(join(workspace, "CLAUDE.md"), instructions);
-    installSourceGate(workspace);
+    const now = new Date();
+    writeFileSync(join(workspace, "CLAUDE.md"), chatInstructions(user, deps.prompt, now));
+    // Only the exact dates the server hands the model are exempt from the figure checks
+    const dates = calendar(now, timeZone);
+    const knownDates = dateSpellings([
+      dates.today,
+      dates.weekStart,
+      dates.weekEnd,
+      dates.monthStart,
+    ]);
+    installSourceGate(workspace, knownDates);
 
-    // Figures already in the thread or in the instructions are known, so repeating one is no invention
-    const known = [content, instructions, ...earlier.map((message) => message.content)].join("\n");
+    // Figures already in the thread are known, so repeating one is no invention
+    const known = [content, ...earlier.map((message) => message.content)].join("\n");
 
     yield { type: "start", conversationId: conversation, userMessageId };
 
@@ -331,14 +361,20 @@ export async function* chatTurn(
       const seen: TurnEvent[] = [];
       let text = "";
 
-      const run = runCli(deps, model, workspace, prompt, resume, abortSignal);
+      const attemptSignal = AbortSignal.any([
+        ...(abortSignal ? [abortSignal] : []),
+        AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
+      ]);
+      const run = runCli(deps, model, workspace, prompt, resume, attemptSignal);
       let step = await run.next();
 
       while (!step.done) {
         const event = step.value;
         seen.push(event);
 
-        if (event.text !== undefined) {
+        if (event.spentTokens !== undefined) {
+          unreported += event.spentTokens;
+        } else if (event.text !== undefined) {
           text += (text === "" ? "" : "\n\n") + event.text;
           yield { type: "delta", text: event.text };
         } else if (event.toolPending) {
@@ -357,11 +393,13 @@ export async function* chatTurn(
 
       const outcome = step.value;
       // Every attempt consumed tokens, the discarded ones too
-      spent.tokensIn += outcome.tokensIn ?? 0;
+      // A CLI that died before its result event leaves only the running estimate
+      spent.tokensIn += outcome.tokensIn ?? (outcome.tokensOut === null ? unreported : 0);
       spent.tokensOut += outcome.tokensOut ?? 0;
       spent.cachedIn += outcome.cachedIn ?? 0;
       spent.costMillionths += outcome.costMillionths ?? 0;
       spent.measured ||= outcome.costMillionths !== null;
+      unreported = 0;
 
       const blocks = turnBlocks(seen);
       text = joinWithoutRepeats(blocks.all) || text;
@@ -378,7 +416,8 @@ export async function* chatTurn(
           : trimLeadingNarration(
               (usedTools && afterTools !== "" ? afterTools : text || outcome.resultText).trim(),
             ));
-      const unsourced = outcome.ok && claimsUnsourcedFigures(candidate, known, names.size);
+      const unsourced =
+        outcome.ok && claimsUnsourcedFigures(candidate, known, names.size, knownDates);
       const answer = unsourced ? (attempt === 0 ? "" : NO_DATA) : candidate;
       const silent = outcome.ok && (answer === "" || (!usedTools && isOnlyAnnouncement(text)));
 
@@ -423,6 +462,7 @@ export async function* chatTurn(
           },
           toolCallsExecuted: executed,
         };
+        answered = true;
 
         return;
       }
@@ -444,10 +484,16 @@ export async function* chatTurn(
     await recordTokens(
       db,
       user.id,
-      spent.tokensIn + spent.tokensOut,
+      spent.tokensIn + spent.tokensOut + unreported,
       spent.costMillionths,
       timeZone,
     ).catch(() => undefined);
+
+    // A turn the server failed is not the person's message to lose; one they left is
+    if (!answered && !abortSignal?.aborted) {
+      await refundMessage(db, user.id, timeZone).catch(() => undefined);
+    }
+
     await releaseMcp().catch(() => undefined);
     releaseTurn();
   }
