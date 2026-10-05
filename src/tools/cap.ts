@@ -178,20 +178,26 @@ export async function capResult(
     }
   };
 
+  const tooBig: Capped = {
+    ok: false,
+    message:
+      `Aun sin sus listas, el resultado pasa de ${maxBytes / 1000} KB. Vuelve a llamar con ` +
+      "filtros más angostos; no respondas con datos parciales.",
+  };
+
   shrink();
   // Nothing is archived for a result that cannot fit even without its lists
   if (!fits()) {
-    return {
-      ok: false,
-      message:
-        `Aun sin sus listas, el resultado pasa de ${maxBytes / 1000} KB. Vuelve a llamar con ` +
-        "filtros más angostos; no respondas con datos parciales.",
-    };
+    return tooBig;
   }
 
   if (saved && archive) {
     saved = await archive.save(heavy.map((entry) => sheetOf(entry.name, entry.list)));
     shrink();
+    // A real link longer than the room kept for it can still push the result over
+    if (!fits()) {
+      return tooBig;
+    }
   }
 
   return { ok: true, truncated: true, data: build() };
@@ -209,6 +215,7 @@ export function withCapFields(schema: JsonSchema): JsonSchema {
     ...schema,
     properties: {
       ...((schema.properties as Record<string, unknown>) ?? {}),
+      // These win over a tool field of the same name: the cap writes them over the data too
       archivo: { type: "object" },
       filas_omitidas: { type: "object" },
       nota: { type: "string" },

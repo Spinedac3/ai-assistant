@@ -87,24 +87,31 @@ describe("result cap", () => {
   });
 
   it("keeps as many rows of the main list as fit", async () => {
-    // Performs the test.
-    const capped = await capResult({ pedidos: rows(1_000) }, 40_000, null);
-    if (!capped.ok) {
-      throw new Error(capped.message);
-    }
-    const shown = (capped.data.pedidos as unknown[]).length;
-    const oneMore = { ...capped.data, pedidos: rows(shown + 1) };
+    for (const [count, limit] of [
+      [1_000, 40_000],
+      [777, 20_000],
+      [1_234, 30_000],
+      [5_000, 250_000],
+    ] as const) {
+      // Performs the test.
+      const capped = await capResult({ pedidos: rows(count) }, limit, null);
+      if (!capped.ok) {
+        throw new Error(capped.message);
+      }
+      const shown = (capped.data.pedidos as unknown[]).length;
+      const oneMore = { ...capped.data, pedidos: rows(shown + 1) };
 
-    // Performs assertions.
-    expect(size(capped.data)).toBeLessThanOrEqual(40_000);
-    expect(size(oneMore)).toBeGreaterThan(40_000);
-    expect(String(capped.data.nota)).toMatch(/^Resultado recortado/);
+      // Performs assertions.
+      expect(size(capped.data)).toBeLessThanOrEqual(limit);
+      expect(size(oneMore)).toBeGreaterThan(limit);
+      expect(String(capped.data.nota)).toMatch(/^Resultado recortado/);
+    }
   });
 
   it("stays under the limit with many small lists, giving the summaries up last", async () => {
     // Performs the test.
     const data = Object.fromEntries(
-      Array.from({ length: 340 }, (_, index) => [`lista${index}`, rows(1, 80)]),
+      Array.from({ length: 400 }, (_, index) => [`lista${index}`, rows(1, 80)]),
     );
     const capped = await capResult(data, 40_000, null);
 
@@ -147,6 +154,35 @@ describe("result cap", () => {
       filas_fuera_del_archivo: { filas: 5, otras: 2 },
     });
     expect(String(capped.data.nota)).toContain(`cada lista hasta ${MAX_SHEET_ROWS} filas`);
+  });
+
+  it("says nothing is out of the Excel for a list exactly the size of a sheet", async () => {
+    // Performs the test.
+    const { archive } = recordingArchive();
+    const capped = await capResult({ filas: rows(MAX_SHEET_ROWS, 1) }, 40_000, archive);
+    if (!capped.ok) {
+      throw new Error(capped.message);
+    }
+
+    // Performs assertions.
+    expect(capped.data.archivo).not.toHaveProperty("filas_fuera_del_archivo");
+  });
+
+  it("measures again with the real link, and refuses when it no longer fits", async () => {
+    // Performs the test.
+    const longLink = (length: number): Archive => ({
+      save: async () => ({ url: "x".repeat(length), expiresInDays: 7 }),
+    });
+    const cut = await capResult({ filas: rows(1_000) }, 40_000, longLink(5_000));
+    const nearlyFull = () => ({ texto: "x".repeat(38_000), filas: rows(1_000) });
+    const fits = await capResult(nearlyFull(), 40_000, longLink(50));
+    const over = await capResult(nearlyFull(), 40_000, longLink(5_000));
+
+    // Performs assertions.
+    expect(cut.ok && size(cut.data)).toBeLessThanOrEqual(40_000);
+    expect(cut.ok && (cut.data.filas as unknown[]).length).toBeGreaterThan(0);
+    expect(fits.ok).toBe(true);
+    expect(over.ok).toBe(false);
   });
 
   it("keeps the small summaries while the heavy list is cut", async () => {
