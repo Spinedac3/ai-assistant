@@ -14,9 +14,9 @@
   },
   "packageManager": "pnpm@12.9.1",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "node --env-file-if-exists=.env dist/index.js",
     "typecheck": "tsc -p tsconfig.check.json",
     "lint": "biome check",
     "lint:fix": "biome check --write",
@@ -26,11 +26,11 @@
     "test:integration": "cross-env INTEGRATION_TESTS=true vitest run --no-file-parallelism",
     "test:golden": "cross-env GOLDEN_TESTS=true vitest run tests/golden",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/cli/migrate.ts",
-    "db:seed": "tsx src/cli/seed.ts",
+    "db:migrate": "tsx --env-file-if-exists=.env src/cli/migrate.ts",
+    "db:seed": "tsx --env-file-if-exists=.env src/cli/seed.ts",
     "keys:generate": "tsx src/cli/generateKeys.ts",
-    "admin:create": "tsx src/cli/createAdmin.ts",
-    "docs:load": "tsx src/cli/loadDocuments.ts"
+    "admin:create": "tsx --env-file-if-exists=.env src/cli/createAdmin.ts",
+    "docs:load": "tsx --env-file-if-exists=.env src/cli/loadDocuments.ts"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.2",
