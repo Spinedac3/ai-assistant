@@ -1,0 +1,281 @@
+import type { Database } from "../db/client.js";
+import { type ColumnKind, runQuery, TooManyRowsError } from "../sources/engines.js";
+import { connectionFor, sourceScope } from "../sources/registry.js";
+import type { JsonSchema, Tool, ToolResult } from "../tools/contract.js";
+import type { Secrets } from "../vault/envelope.js";
+import { type BaseColumn, normalizeRows } from "./columns.js";
+import type { ToolDefinitionSpec } from "./definition.js";
+import { checkPasted } from "./pasted.js";
+import { buildQuery, paramName } from "./sql.js";
+
+export interface CreatedToolDependencies {
+  db: Database;
+  secrets: Secrets;
+  // Zone of the application, the last one a date without zone falls back to
+  appTimeZone: string;
+}
+
+export interface CreatedTool {
+  name: string;
+  sourceCode: string;
+  spec: ToolDefinitionSpec;
+  // Columns of the base as the source describes them
+  columns: BaseColumn[];
+}
+
+// A slow report still answers; past this the source is struggling and the person should narrow it
+const QUERY_TIMEOUT_MS = 60_000;
+// Rows held in memory before the query is cut; the cap by bytes and the Excel come after, so this
+// only guards the server, and it fails loudly instead of answering with part of the rows
+const MAX_ROWS = 200_000;
+
+const DATE = "^\\d{4}-\\d{2}-\\d{2}$";
+const DATE_TIME = "^\\d{4}-\\d{2}-\\d{2}( \\d{2}:\\d{2}(:\\d{2})?)?$";
+
+/**
+ * Describes one value of a column for the input schema
+ *
+ * @param   kind  What the column holds
+ *
+ * @return  JSON schema of one value
+ */
+function valueSchema(kind: ColumnKind): Record<string, unknown> {
+  switch (kind) {
+    case "number":
+      return { type: "number" };
+    case "boolean":
+      return { type: "boolean" };
+    case "date":
+      return { type: "string", pattern: DATE };
+    case "datetime":
+      return { type: "string", pattern: DATE_TIME };
+    case "text":
+      return { type: "string" };
+  }
+}
+
+/**
+ * Tells in words what a filter does, for the model choosing the arguments
+ *
+ * @param   filter  Filter of the definition
+ * @param   kind    What its column holds
+ *
+ * @return  The description
+ */
+function filterText(filter: ToolDefinitionSpec["filters"][number], kind: ColumnKind): string {
+  const own = filter.description ? ` ${filter.description}` : "";
+  const day =
+    kind === "date" || kind === "datetime"
+      ? " Una fecha sola (AAAA-MM-DD) cubre el día entero."
+      : "";
+  const what: Record<string, string> = {
+    "=": `Igual a ${filter.column}.`,
+    "!=": `Distinto de ${filter.column}.`,
+    ">": `${filter.column} mayor que el valor.`,
+    ">=": `${filter.column} desde el valor.`,
+    "<": `${filter.column} menor que el valor.`,
+    "<=": `${filter.column} hasta el valor.`,
+    between: `${filter.column} entre [desde, hasta], ambos incluidos.`,
+    in: `${filter.column} igual a alguno de la lista.`,
+    contains: `${filter.column} contiene el texto, sin distinguir mayúsculas.`,
+    empty: `true: solo filas sin ${filter.column}; false: solo filas con ${filter.column}.`,
+  };
+
+  return `${what[filter.op]}${day}${own}`;
+}
+
+/**
+ * Builds the input schema of a created tool: one parameter per filter, typed by its column
+ *
+ * @param   tool  Created tool
+ *
+ * @return  The input schema
+ */
+export function inputSchemaOf(tool: CreatedTool): JsonSchema {
+  const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
+  const properties: Record<string, unknown> = {};
+  for (const filter of tool.spec.filters) {
+    const kind = kinds.get(filter.column) ?? "text";
+    const one = valueSchema(kind);
+    const schema =
+      filter.op === "between"
+        ? { type: "array", items: one, minItems: 2, maxItems: 2 }
+        : filter.op === "in"
+          ? { type: "array", items: one, minItems: 1 }
+          : filter.op === "contains"
+            ? { type: "string", minLength: 1 }
+            : filter.op === "empty"
+              ? { type: "boolean" }
+              : one;
+    properties[paramName(filter.column)] = { ...schema, description: filterText(filter, kind) };
+  }
+
+  return {
+    type: "object",
+    properties,
+    required: tool.spec.filters.filter((filter) => filter.required).map((f) => paramName(f.column)),
+    additionalProperties: false,
+  };
+}
+
+/**
+ * Lists the columns a created tool returns and what each holds
+ *
+ * @param   tool  Created tool
+ *
+ * @return  Output columns in order
+ */
+export function outputColumnsOf(tool: CreatedTool): BaseColumn[] {
+  const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
+  const summary = tool.spec.summary;
+  if (!summary) {
+    return tool.spec.columns.map((column) => ({
+      name: column.name,
+      kind: kinds.get(column.name) ?? "text",
+    }));
+  }
+
+  return [
+    ...summary.group_by.map((name) => ({ name, kind: kinds.get(name) ?? "text" })),
+    // Every aggregate is a number but min and max, which keep their column's kind
+    ...summary.aggregates.map((aggregate) => ({
+      name: aggregate.as,
+      kind:
+        (aggregate.fn === "min" || aggregate.fn === "max") && aggregate.column
+          ? (kinds.get(aggregate.column) ?? "text")
+          : ("number" as ColumnKind),
+    })),
+  ];
+}
+
+/**
+ * Builds the output schema of a created tool: its rows and how many there are
+ *
+ * @param   tool  Created tool
+ *
+ * @return  The output schema
+ */
+export function outputSchemaOf(tool: CreatedTool): JsonSchema {
+  const json: Record<ColumnKind, string> = {
+    number: "number",
+    boolean: "boolean",
+    text: "string",
+    date: "string",
+    datetime: "string",
+  };
+  const columns = outputColumnsOf(tool);
+
+  return {
+    type: "object",
+    properties: {
+      filas: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: Object.fromEntries(
+            columns.map((column) => [column.name, { type: [json[column.kind], "null"] }]),
+          ),
+          required: columns.map((column) => column.name),
+        },
+      },
+      total_filas: { type: "integer" },
+    },
+    required: ["filas", "total_filas"],
+  };
+}
+
+/**
+ * Writes what the model reads to decide when to call a created tool and how to read it
+ *
+ * @param   tool      Created tool
+ * @param   timeZone  Zone of its dates
+ *
+ * @return  The description
+ */
+export function descriptionOf(tool: CreatedTool, timeZone: string): string {
+  const { meaning } = tool.spec;
+  const labels = new Map(tool.spec.columns.map((column) => [column.name, column.label]));
+  const columns = outputColumnsOf(tool)
+    .map((column) =>
+      labels.get(column.name) ? `${column.name} (${labels.get(column.name)})` : column.name,
+    )
+    .join(", ");
+  const parts = [
+    meaning.definition,
+    `Cada fila es: ${meaning.grain}. Columnas: ${columns}.`,
+    meaning.additive
+      ? "Las cantidades se pueden sumar entre filas."
+      : "Las cantidades NO se suman entre filas: cada fila ya es un valor completo.",
+    `Las fechas están en hora de ${timeZone}; «hoy» es la fecha de esa zona.`,
+    ...(meaning.synonyms.length > 0 ? [`También se le dice: ${meaning.synonyms.join(", ")}.`] : []),
+    ...meaning.caveats.map((caveat) => `Ojo: ${caveat}`),
+  ];
+
+  return parts.join(" ");
+}
+
+/**
+ * Turns a definition into a tool the registry runs like any other: it reads the source as its
+ * read-only user, with the values bound and never written into the query
+ *
+ * @param   tool  Created tool
+ * @param   deps  Database, vault and the zone of the application
+ * @param   zone  Zone of the source, which the tool's own overrides
+ *
+ * @return  The tool
+ */
+export function toolFrom(
+  tool: CreatedTool,
+  deps: CreatedToolDependencies,
+  zone: string | null,
+): Tool {
+  const timeZone = tool.spec.time_zone ?? zone ?? deps.appTimeZone;
+  const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
+
+  return {
+    definition: {
+      name: tool.name,
+      description: descriptionOf(tool, timeZone),
+      inputSchema: inputSchemaOf(tool),
+      outputSchema: outputSchemaOf(tool),
+      requiredScopes: [sourceScope(tool.sourceCode)],
+      readOnly: true,
+    },
+    execute: async (args): Promise<ToolResult> => {
+      const source = await connectionFor(deps.db, deps.secrets, tool.sourceCode);
+      if (!source) {
+        return {
+          ok: false,
+          error: "source_missing",
+          message: "La fuente de esta herramienta ya no existe",
+        };
+      }
+
+      let pasted: string | null = null;
+      if (tool.spec.base.kind === "query") {
+        const checked = checkPasted(tool.spec.base.sql, source.info.engine);
+        if (!checked.ok) {
+          return { ok: false, error: "invalid_base", message: checked.message };
+        }
+        pasted = checked.sql;
+      }
+
+      const query = buildQuery(tool.spec, source.info.engine, pasted, args, kinds);
+      try {
+        const result = await runQuery(source.info, query.sql, query.params, {
+          timeoutMs: QUERY_TIMEOUT_MS,
+          maxRows: MAX_ROWS,
+          timeZone,
+        });
+        const rows = normalizeRows(result);
+
+        return { ok: true, data: { filas: rows, total_filas: rows.length }, rows: rows.length };
+      } catch (error) {
+        if (error instanceof TooManyRowsError) {
+          return { ok: false, error: "too_many_rows", message: error.message };
+        }
+        throw error;
+      }
+    },
+  };
+}

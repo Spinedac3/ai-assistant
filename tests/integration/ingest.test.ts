@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { auditLogs, documentJobs, scopes, toolCalls } from "../../src/db/schema.js";
+import { oneAtATime } from "../../src/lib/oneAtATime.js";
 import { parseDocument } from "../../src/rag/document.js";
 import { Embedder } from "../../src/rag/embeddings.js";
 import type { Index } from "../../src/rag/ingest.js";
@@ -8,7 +9,7 @@ import { claimNext, runJob } from "../../src/rag/jobs.js";
 import { Solr } from "../../src/rag/solr.js";
 import { DocumentStorage } from "../../src/rag/storage.js";
 import { searchTool } from "../../src/tools/native/documents.js";
-import { INGEST, ingestTool, oneAtATime } from "../../src/tools/native/ingest.js";
+import { INGEST, ingestTool } from "../../src/tools/native/ingest.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
 import { type FakeEmbed, startFakeEmbed } from "../support/fakeEmbed.js";
 import { createCores, dropCores } from "../support/solrCores.js";

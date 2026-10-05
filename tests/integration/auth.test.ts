@@ -174,6 +174,7 @@ describe("auth", () => {
       "docs.manage",
       "settings.manage",
       "sources.manage",
+      "tools.manage",
       "usage.read",
       "users.manage",
     ]);

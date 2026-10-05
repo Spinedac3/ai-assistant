@@ -10,6 +10,7 @@ import {
   SOURCE_CODE,
   saveSource,
   sourceInput,
+  sourceScope,
   verifySource,
 } from "../sources/registry.js";
 import type { Secrets } from "../vault/envelope.js";
@@ -17,6 +18,8 @@ import type { Secrets } from "../vault/envelope.js";
 export interface SourcesRoutesOptions {
   db: Database;
   secrets: Secrets;
+  // Lets the tools made over a source follow a change to it
+  onSaved?: (code: string, retargeted: boolean) => Promise<void>;
 }
 
 const codeParams = z.object({ code: z.string().regex(SOURCE_CODE) });
@@ -68,7 +71,15 @@ export default async function sourcesRoutes(
     }
 
     const userId = request.authUser?.id ?? 0;
-    await saveSource(db, secrets, parsed.data, userId);
+    const saved = await saveSource(db, secrets, parsed.data, userId);
+    if (!saved.saved) {
+      return reply.code(409).send({
+        ok: false,
+        error: "scope_taken",
+        message: `Ya existe un permiso ${sourceScope(parsed.data.code)}; usa otro código para la fuente`,
+      });
+    }
+
     await logAudit(db, {
       userId,
       level: "info",
@@ -76,6 +87,16 @@ export default async function sourcesRoutes(
       message: `${parsed.data.code} (${parsed.data.engine} ${parsed.data.host}/${parsed.data.database})`,
       ip: request.ip,
     });
+
+    // The source is saved; tools that fail to follow it are logged and catch up on the next start
+    await options
+      .onSaved?.(parsed.data.code, saved.retargeted)
+      .catch((error) =>
+        request.log.error(
+          { err: error, source: parsed.data.code },
+          "tools did not follow the source",
+        ),
+      );
 
     return reply.code(201).send({ ok: true, data: { code: parsed.data.code } });
   });
@@ -101,8 +122,16 @@ export default async function sourcesRoutes(
 
   app.delete("/admin/sources/:code", guard, async (request, reply) => {
     const { code } = codeParams.parse(request.params);
-    if (!(await deleteSource(db, code))) {
+    const deleted = await deleteSource(db, code);
+    if (deleted === "missing") {
       return reply.code(404).send({ ok: false, error: "source_not_found" });
+    }
+    if (deleted === "in_use") {
+      return reply.code(409).send({
+        ok: false,
+        error: "source_in_use",
+        message: "La fuente tiene herramientas creadas; bórralas antes de borrar la fuente",
+      });
     }
 
     await logAudit(db, {

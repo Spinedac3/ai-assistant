@@ -26,6 +26,11 @@ const SCOPES = [
     description: "Registrar y administrar las bases de datos que leen las tools",
     sensitive: true,
   },
+  {
+    code: "tools.manage",
+    description: "Crear, probar y publicar herramientas sobre las fuentes que puede usar",
+    sensitive: true,
+  },
   // Each area of documents is one of these; the admin creates the rest as needed
   { code: "docs.general.read", description: "Leer los documentos generales", sensitive: false },
 ];

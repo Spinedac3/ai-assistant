@@ -18,11 +18,17 @@ export interface QueryLimits {
   timeoutMs: number;
   // Rows read before giving up; the query is cut, never loaded whole into memory
   maxRows: number;
+  // Zone in which Postgres reads and shows the dates that carry one; the session's otherwise
+  timeZone?: string;
 }
+
+// What a column holds, read from the engine's own type and not from the values
+export type ColumnKind = "number" | "text" | "date" | "datetime" | "boolean";
 
 export interface QueryResult {
   columns: string[];
   rows: Array<Record<string, unknown>>;
+  kinds: Record<string, ColumnKind>;
 }
 
 export class TooManyRowsError extends Error {
@@ -38,6 +44,61 @@ const CHECK_TIMEOUT_MS = 30_000;
 // Dates come back as the source wrote them, so every engine gives the same text; the zone of
 // the source gives the naive ones their meaning later
 const PG_TEXT_TYPES = new Set([1082, 1114, 1184]);
+
+// Type ids of each engine by kind; anything else is text
+const PG_KINDS: Record<number, ColumnKind> = {
+  20: "number",
+  21: "number",
+  23: "number",
+  700: "number",
+  701: "number",
+  1700: "number",
+  16: "boolean",
+  1082: "date",
+  1114: "datetime",
+  1184: "datetime",
+};
+const MYSQL_KINDS: Record<number, ColumnKind> = {
+  0: "number",
+  1: "number",
+  2: "number",
+  3: "number",
+  4: "number",
+  5: "number",
+  8: "number",
+  9: "number",
+  13: "number",
+  246: "number",
+  10: "date",
+  14: "date",
+  7: "datetime",
+  12: "datetime",
+};
+interface MysqlField {
+  name: string;
+  type?: number;
+  columnType?: number;
+  columnLength?: number;
+}
+
+const MSSQL_KINDS: Record<string, ColumnKind> = {
+  int: "number",
+  bigint: "number",
+  smallint: "number",
+  tinyint: "number",
+  float: "number",
+  real: "number",
+  decimal: "number",
+  numeric: "number",
+  money: "number",
+  smallmoney: "number",
+  bit: "boolean",
+  date: "date",
+  datetime: "datetime",
+  datetime2: "datetime",
+  smalldatetime: "datetime",
+  datetimeoffset: "datetime",
+};
 
 /**
  * Refuses a result whose columns cannot become one field each
@@ -104,8 +165,20 @@ async function postgresQuery(
 
   try {
     await client.query("BEGIN READ ONLY");
+    // A backslash inside '' is plain text, whatever the server's default
+    await client.query("SET LOCAL standard_conforming_strings = on");
+    if (limits.timeZone) {
+      await client.query("SELECT set_config('TimeZone', $1, true)", [limits.timeZone]);
+    }
     const rows: Array<Record<string, unknown>> = [];
     let columns: string[] = [];
+    let kinds: Record<string, ColumnKind> = {};
+    const readFields = (fields: pg.FieldDef[]) => {
+      columns = fields.map((field) => field.name);
+      kinds = Object.fromEntries(
+        fields.map((field) => [field.name, PG_KINDS[field.dataTypeID] ?? "text"]),
+      );
+    };
 
     await new Promise<void>((resolve, reject) => {
       // The extended protocol takes one statement only, so no text can end the read-only
@@ -122,7 +195,7 @@ async function postgresQuery(
           return;
         }
         if (columns.length === 0 && result) {
-          columns = result.fields.map((field) => field.name);
+          readFields(result.fields);
         }
         rows.push(row);
         if (rows.length > limits.maxRows) {
@@ -133,7 +206,9 @@ async function postgresQuery(
         }
       });
       query.on("end", (result: pg.QueryResult) => {
-        columns = columns.length > 0 ? columns : result.fields.map((field) => field.name);
+        if (columns.length === 0) {
+          readFields(result.fields);
+        }
         resolve();
       });
       query.on("error", reject);
@@ -142,7 +217,7 @@ async function postgresQuery(
     await client.query("ROLLBACK");
     checkColumns(columns);
 
-    return { columns, rows };
+    return { columns, rows, kinds };
   } finally {
     await client.end().catch(() => {});
   }
@@ -186,17 +261,34 @@ async function mysqlQuery(
   try {
     // The client timeout only stops waiting; this one stops the query on the server too
     await run(`SET SESSION max_execution_time = ${Math.trunc(limits.timeoutMs)}`);
+    // "" is a string and a backslash escapes inside strings, whatever the server's default
+    await run(
+      "SET SESSION sql_mode = REPLACE(REPLACE(@@SESSION.sql_mode, 'ANSI_QUOTES', ''), 'NO_BACKSLASH_ESCAPES', '')",
+    );
     await run("START TRANSACTION READ ONLY");
     const rows: Array<Record<string, unknown>> = [];
     let columns: string[] = [];
+    let kinds: Record<string, ColumnKind> = {};
 
     await new Promise<void>((resolve, reject) => {
       let stopped = false;
       connection
         .query({ sql, values: params, timeout: limits.timeoutMs })
         // Statements that return no rows come without fields
-        .on("fields", (fields?: Array<{ name: string }>) => {
+        .on("fields", (fields?: MysqlField[]) => {
           columns = (fields ?? []).map((field) => field.name);
+          kinds = Object.fromEntries(
+            (fields ?? []).map((field) => {
+              const type = field.type ?? field.columnType ?? -1;
+              // MySQL stores a boolean as a one-digit tinyint or a one-bit field
+              return [
+                field.name,
+                (type === 1 || type === 16) && field.columnLength === 1
+                  ? "boolean"
+                  : (MYSQL_KINDS[type] ?? "text"),
+              ];
+            }),
+          );
         })
         .on("result", (row: Record<string, unknown>) => {
           // Without columns the "row" is the server's status packet, not data
@@ -217,7 +309,7 @@ async function mysqlQuery(
     await run("ROLLBACK");
     checkColumns(columns);
 
-    return { columns, rows };
+    return { columns, rows, kinds };
   } finally {
     connection.destroy();
   }
@@ -259,7 +351,8 @@ async function mssqlQuery(
 
   try {
     await transaction.begin();
-    await new mssql.Request(transaction).query("SET XACT_ABORT ON");
+    // Dates in YYYY-MM-DD read the same whatever language the login has
+    await new mssql.Request(transaction).query("SET XACT_ABORT ON; SET DATEFORMAT ymd");
     const request = new mssql.Request(transaction);
     request.stream = true;
     for (const [position, value] of params.entries()) {
@@ -267,6 +360,7 @@ async function mssqlQuery(
     }
     const rows: Array<Record<string, unknown>> = [];
     let columns: string[] = [];
+    let kinds: Record<string, ColumnKind> = {};
 
     // Settled only when the request is done: rolling back while it still runs fails, and the
     // transaction would then hold the connection forever
@@ -285,6 +379,12 @@ async function mssqlQuery(
           stop(new Error("La consulta devolvió más de un resultado; debe ser una sola consulta"));
         }
         columns = Object.keys(meta);
+        kinds = Object.fromEntries(
+          Object.entries(meta).map(([name, column]) => {
+            const type = (column as { type?: { declaration?: string } }).type;
+            return [name, MSSQL_KINDS[type?.declaration ?? ""] ?? "text"];
+          }),
+        );
       });
       request.on("row", (row: Record<string, unknown>) => {
         if (stopped) {
@@ -309,7 +409,7 @@ async function mssqlQuery(
     // Repeated names come back as an array under one key
     checkColumns(rows.some((row) => Object.values(row).some(Array.isArray)) ? [""] : columns);
 
-    return { columns, rows };
+    return { columns, rows, kinds };
   } finally {
     await new Promise((resolve) => setImmediate(resolve));
     await transaction.rollback().catch(() => {});
