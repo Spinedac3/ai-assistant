@@ -550,5 +550,6 @@ describe("chat", () => {
     expect(anonymous.statusCode).toBe(401);
     expect(full).toMatchObject({ statusCode: 429 });
     expect(full.json()).toMatchObject({ error: "uploads_full" });
+    expect(full.json().message).toContain("Ya tienes");
   });
 });

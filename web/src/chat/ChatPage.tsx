@@ -14,7 +14,7 @@ import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { FiCheck, FiPaperclip, FiPlus, FiSend, FiSquare, FiStar, FiX } from "react-icons/fi";
 import type { Components } from "react-markdown";
 import Markdown from "react-markdown";
-import { NavLink, useNavigate, useParams } from "react-router";
+import { NavLink, useLocation, useNavigate, useParams } from "react-router";
 import remarkGfm from "remark-gfm";
 import { ApiError, api } from "../api/http";
 import { type ChatMessage, type ConversationSummary, streamTurn, toolLabel } from "./api";
@@ -66,7 +66,10 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
   const queries = useQueryClient();
   const [input, setInput] = useState("");
   const [draft, setDraft] = useState<Draft | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const location = useLocation();
+  const [error, setError] = useState<string | null>(
+    (location.state as { error?: string | null } | null)?.error ?? null,
+  );
   const [attached, setAttached] = useState<{ fileId: string; name: string } | null>(null);
   const [uploading, setUploading] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
@@ -74,7 +77,14 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
   const bottom = useRef<HTMLDivElement>(null);
 
   // Leaving the page stops the turn that was answering on it
-  useEffect(() => () => stop.current?.abort(), []);
+  const unmounted = useRef(false);
+  useEffect(
+    () => () => {
+      unmounted.current = true;
+      stop.current?.abort();
+    },
+    [],
+  );
 
   const list = useQuery({
     queryKey: ["conversations"],
@@ -136,6 +146,11 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
     stop.current = controller;
     let target = conversationId;
     let finished = false;
+    let failedWith: string | null = null;
+    const fail = (message: string) => {
+      failedWith = message;
+      setError(message);
+    };
     try {
       for await (const event of streamTurn(question, conversationId, controller.signal)) {
         if (event.type === "start") {
@@ -160,15 +175,15 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
           update((current) => ({ ...current, text: event.text }));
         } else if (event.type === "error") {
           finished = true;
-          setError(event.message);
+          fail(event.message);
         }
       }
       if (!finished && !controller.signal.aborted) {
-        setError("Se cortó la conexión antes de terminar la respuesta; vuelve a intentarlo");
+        fail("Se cortó la conexión antes de terminar la respuesta; vuelve a intentarlo");
       }
     } catch (failure) {
       if (!controller.signal.aborted) {
-        setError(
+        fail(
           failure instanceof ApiError
             ? failure.message
             : "Se cortó la conexión; vuelve a intentarlo",
@@ -177,21 +192,25 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
     } finally {
       stop.current = null;
     }
-    if (controller.signal.aborted) {
+    // Leaving the page ends here; stopping the answer still shows what the server kept of it
+    if (unmounted.current) {
       return;
     }
 
-    // The stored conversation replaces the draft only once it is loaded, so nothing flickers
+    // The stored conversation replaces the draft only once it is loaded, so nothing flickers; it
+    // is always asked again, since the copy in memory predates this turn
     await queries.invalidateQueries({ queryKey: ["conversations"] });
     if (target) {
       await queries
         .query({
           queryKey: ["conversation", target],
           queryFn: () => api<Conversation>(`/chat/conversations/${target}`),
+          staleTime: 0,
         })
         .catch(() => undefined);
       if (target !== conversationId) {
-        navigate(`/chat/${target}`);
+        // The new conversation's page opens fresh; what went wrong travels with it
+        navigate(`/chat/${target}`, { state: { error: failedWith } });
         return;
       }
     }
@@ -372,8 +391,15 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
 // follows it: the text of an answer may come from data or a document no one checked
 const LINKS: Components = {
   a: ({ href, children }) => {
-    const target = href ? new URL(href, window.location.href) : null;
-    const foreign = target !== null && target.origin !== window.location.origin;
+    // A link that does not parse is shown as its text, never as a page that fails to render
+    if (!href || !URL.canParse(href, window.location.href)) {
+      return <span>{children}</span>;
+    }
+    const target = new URL(href, window.location.href);
+    const foreign =
+      target.protocol.startsWith("http") &&
+      target.host !== "" &&
+      target.origin !== window.location.origin;
     return (
       <a href={href} target="_blank" rel="noopener noreferrer">
         {children}
@@ -495,6 +521,9 @@ function Rating({ messageId }: { messageId: number }) {
             onClick={() => void rate(pending, comment.trim())}
           >
             Enviar
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setPending(null)}>
+            Cancelar
           </Button>
         </HStack>
       )}

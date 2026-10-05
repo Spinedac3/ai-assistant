@@ -26,14 +26,14 @@ export class Uploads {
   constructor(private readonly now: () => number = Date.now) {}
 
   /**
-   * Tells whether a file of a size would fit, before it is read
+   * Tells why a file of a size would not fit, before it is read
    *
    * @param   userId  Owner
    * @param   bytes   Size of the file, or the most it may be
    *
-   * @return  Whether there is room for it
+   * @return  The person's share or the store being full, or null when it fits
    */
-  accepts(userId: number, bytes: number): boolean {
+  refusal(userId: number, bytes: number): "person" | "total" | null {
     this.sweep();
     let total = 0;
     let own = 0;
@@ -42,7 +42,11 @@ export class Uploads {
       own += file.userId === userId ? file.bytes.length : 0;
     }
 
-    return total + bytes <= TOTAL_BYTES && own + bytes <= PERSON_BYTES;
+    if (own + bytes > PERSON_BYTES) {
+      return "person";
+    }
+
+    return total + bytes > TOTAL_BYTES ? "total" : null;
   }
 
   /**
@@ -54,7 +58,7 @@ export class Uploads {
    * @return  Its id, or null when there is no room left
    */
   put(userId: number, upload: Upload): string | null {
-    if (!this.accepts(userId, upload.bytes.length)) {
+    if (this.refusal(userId, upload.bytes.length)) {
       return null;
     }
     const id = randomUUID();

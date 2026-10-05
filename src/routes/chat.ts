@@ -249,11 +249,15 @@ export default async function chatRoutes(
         message: "Espera a que termine de subir el PDF anterior",
       });
     }
-    if (!uploads.accepts(userId, MAX_UPLOAD_BYTES)) {
+    const refusal = uploads.refusal(userId, MAX_UPLOAD_BYTES);
+    if (refusal) {
       return reply.code(429).send({
         ok: false,
         error: "uploads_full",
-        message: "Tienes demasiados PDF abiertos; espera media hora o usa los que ya subiste",
+        message:
+          refusal === "person"
+            ? "Ya tienes varios PDF abiertos; cada uno se libera media hora después de su último uso"
+            : "Hay demasiados PDF abiertos en este momento; vuelve a intentarlo en unos minutos",
       });
     }
     receiving.add(userId);

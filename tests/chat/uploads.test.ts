@@ -32,8 +32,8 @@ describe("chat uploads", () => {
     const ten = Buffer.alloc(10 * MB);
     const own = [1, 2, 3].map(() => uploads.put(1, { name: "a.pdf", bytes: ten }));
     const fourth = uploads.put(1, { name: "d.pdf", bytes: ten });
-    const before = uploads.accepts(1, 1);
-    const someoneElse = uploads.accepts(2, 10 * MB);
+    const before = uploads.refusal(1, 1);
+    const someoneElse = uploads.refusal(2, 10 * MB);
     const others = [2, 3, 4, 5, 6, 7, 8].map((user) =>
       uploads.put(user, { name: "x.pdf", bytes: ten }),
     );
@@ -42,10 +42,10 @@ describe("chat uploads", () => {
     expect(PERSON_BYTES).toBe(30 * MB);
     expect(own.every((id) => id !== null)).toBe(true);
     expect(fourth).toBeNull();
-    expect(before).toBe(false);
-    expect(someoneElse).toBe(true);
+    expect(before).toBe("person");
+    expect(someoneElse).toBeNull();
     // A hundred megabytes in all: seven more people fit, then nobody
     expect(others.filter((id) => id !== null)).toHaveLength(7);
-    expect(uploads.accepts(9, 1)).toBe(false);
+    expect(uploads.refusal(9, 1)).toBe("total");
   });
 });
