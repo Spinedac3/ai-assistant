@@ -21,7 +21,6 @@ describe("cli", () => {
   it("resumes the session only when asked", () => {
     // Performs the test.
     const base = {
-      prompt: "hola",
       model: "sonnet",
       maxTurns: 12,
       mcpConfigPath: ".mcp.json",
@@ -36,7 +35,6 @@ describe("cli", () => {
   it("always isolates the MCP servers to the workspace config", () => {
     // Performs the test.
     const args = cliArgs({
-      prompt: "hola",
       model: "sonnet",
       maxTurns: 12,
       mcpConfigPath: "ws/.mcp.json",
@@ -47,6 +45,20 @@ describe("cli", () => {
     expect(args).toContain("--strict-mcp-config");
     expect(args[args.indexOf("--mcp-config") + 1]).toBe("ws/.mcp.json");
     expect(args[args.indexOf("--max-turns") + 1]).toBe("12");
+  });
+
+  it("leaves -p without a value, so the prompt can only come through stdin", () => {
+    // Performs the test.
+    const args = cliArgs({
+      model: "sonnet",
+      maxTurns: 12,
+      mcpConfigPath: "ws/.mcp.json",
+      disallowedTools: "Bash",
+    });
+
+    // Performs assertions.
+    expect(args[0]).toBe("-p");
+    expect(args[1]?.startsWith("--")).toBe(true);
   });
 });
 

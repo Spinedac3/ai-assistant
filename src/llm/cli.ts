@@ -12,7 +12,6 @@ export interface CliCommand {
 }
 
 export interface ArgvOptions {
-  prompt: string;
   model: string;
   maxTurns: number;
   mcpConfigPath: string;
@@ -27,9 +26,6 @@ export interface CliProcess {
   events: AsyncGenerator<Record<string, unknown>, void>;
   closed: Promise<number | null>;
 }
-
-// Above this the prompt travels through stdin: Linux caps one argument and Windows the whole line
-const STDIN_FROM = process.platform === "win32" ? 8_000 : 64_000;
 
 // Only what the CLI needs to run and find its own login; nothing else of the server reaches it
 const INHERITED_ENV = [
@@ -70,16 +66,16 @@ export function childEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /**
- * Builds the CLI flags for one headless turn
+ * Builds the CLI flags for one headless turn; the prompt is never one of them
  *
- * @param   options  Prompt, model and tool limits
+ * @param   options  Model and tool limits
  *
  * @return  The argument list
  */
 export function cliArgs(options: ArgvOptions): string[] {
   return [
+    // Print mode with no prompt argument reads the prompt from stdin
     "-p",
-    options.prompt,
     // One event per line while it works; stream-json requires verbose
     "--output-format",
     "stream-json",
@@ -106,6 +102,7 @@ export function cliArgs(options: ArgvOptions): string[] {
  *
  * @param   command      Binary to run
  * @param   args         CLI flags
+ * @param   prompt       Text of the turn, sent through stdin
  * @param   cwd          Workspace; stderr is written there
  * @param   abortSignal  Stops only this child
  *
@@ -114,31 +111,25 @@ export function cliArgs(options: ArgvOptions): string[] {
 export function launchCli(
   command: CliCommand,
   args: string[],
+  prompt: string,
   cwd: string,
   abortSignal?: AbortSignal,
 ): CliProcess {
-  const promptIndex = args.indexOf("-p");
-  const prompt = promptIndex >= 0 ? args[promptIndex + 1] : undefined;
-  const viaStdin = prompt !== undefined && prompt.length > STDIN_FROM;
-  // An empty -p value tells the CLI to read the prompt from stdin
-  const finalArgs = viaStdin
-    ? [...args.slice(0, promptIndex + 1), ...args.slice(promptIndex + 2)]
-    : args;
-
   // A file, not a pipe: reading only stdout can never block on a full stderr buffer
   const stderr = openSync(join(cwd, "stderr.log"), "w");
-  const child = spawn(command.bin, [...(command.binArgs ?? []), ...finalArgs], {
+  // The person's text never reaches the argument list: one starting with "--" would be read as a CLI option
+  const child = spawn(command.bin, [...(command.binArgs ?? []), ...args], {
     cwd,
     env: childEnv(process.env),
-    stdio: [viaStdin ? "pipe" : "ignore", "pipe", stderr],
+    stdio: ["pipe", "pipe", stderr],
   });
   closeSync(stderr);
-
-  if (viaStdin) {
-    child.stdin?.end(prompt);
-  }
+  child.stdin?.end(prompt);
 
   const onAbort = () => child.kill("SIGTERM");
+  if (abortSignal?.aborted) {
+    onAbort();
+  }
   abortSignal?.addEventListener("abort", onAbort, { once: true });
 
   // A missing binary emits 'error'; unhandled, it would take the whole server down
