@@ -1,7 +1,10 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
+import { chatMcpConfig } from "../chat/mcpConfig.js";
+import { findConversation } from "../chat/repository.js";
+import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
 import { type BaseColumn, describeBase } from "../creator/columns.js";
 import { definitionSchema, TOOL_NAME } from "../creator/definition.js";
@@ -23,8 +26,10 @@ import {
   toolFrom,
 } from "../creator/tool.js";
 import type { Database } from "../db/client.js";
-import { toolDefinitions } from "../db/schema.js";
+import { conversations, messages, toolDefinitions } from "../db/schema.js";
 import { oneAtATime } from "../lib/oneAtATime.js";
+import { cliToolName } from "../mcp/names.js";
+import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
 import { ToolRegistry } from "../tools/registry.js";
 
@@ -33,6 +38,12 @@ export interface ToolsRoutesOptions extends CreatedToolDependencies {
   created: CreatedTools;
   // Asks the model one question with no tools; without it the guide is off
   ask?: (prompt: string) => Promise<string>;
+  // What a trial chat needs: the chat's own settings, this server's /mcp, and the shared tools
+  trial?: {
+    chat: Omit<ChatDependencies, "db" | "logger" | "mcpConfig" | "trial">;
+    mcpUrl: string;
+    registry: ToolRegistry;
+  };
 }
 
 // Values per column the guide sees, enough to tell what a column holds
@@ -47,6 +58,18 @@ const saveBody = z
   .strict();
 const runBody = z.object({ args: z.record(z.string(), z.unknown()).default({}) }).strict();
 const guideBody = z.object({ question: z.string().trim().min(1).max(2_000).optional() }).strict();
+const trialBody = z
+  .object({
+    message: z.string().trim().min(1).max(20_000),
+    conversation_id: z.number().int().positive().optional(),
+    // Only this tool, called directly, or the whole catalog with this tool in it
+    scope: z.enum(["tool", "catalog"]).default("tool"),
+  })
+  .strict();
+const trialParams = z.object({
+  name: z.string().regex(TOOL_NAME),
+  id: z.coerce.number().int().positive(),
+});
 
 /**
  * Registers the creator: tools defined over a registered source, saved as drafts, checked, tried
@@ -333,6 +356,125 @@ export default async function toolsRoutes(
         message: "La guía no pudo responder ahora; vuelve a intentarlo",
       });
     }
+  });
+
+  // A chat through the real MCP path, where only this person can reach the draft
+  app.post("/admin/tools/:name/chat", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+    const trial = options.trial;
+    const user = request.authUser;
+    if (!trial || !user) {
+      return reply
+        .code(503)
+        .send({ ok: false, error: "trial_off", message: "El chat de prueba no está disponible" });
+    }
+    const body = trialBody.safeParse(request.body ?? {});
+    if (!body.success) {
+      return reply.code(400).send({ ok: false, error: "invalid_body" });
+    }
+
+    const { tool, zone } = found;
+    const tools = trial.registry.with(toolFrom(shapeOf(tool), options, zone));
+    const only = body.data.scope === "tool";
+    const deps: ChatDependencies = {
+      ...trial.chat,
+      db,
+      logger: request.log,
+      mcpConfig: chatMcpConfig(db, trial.mcpUrl, {
+        tools: only ? [tool.name] : null,
+        registry: tools,
+        trial: true,
+      }),
+      trial: {
+        toolName: tool.name,
+        allowedTools: only ? cliToolName(tool.name) : CHAT_CLI_ALLOWED,
+      },
+    };
+
+    let done: Extract<ChatEvent, { type: "done" }> | null = null;
+    for await (const event of chatTurn(
+      deps,
+      { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
+      body.data.message,
+      body.data.conversation_id ?? null,
+    )) {
+      if (event.type === "done") {
+        done = event;
+      }
+    }
+    if (!done) {
+      return reply
+        .code(502)
+        .send({ ok: false, error: "trial_failed", message: "El chat de prueba no respondió" });
+    }
+
+    const [stored] = await db
+      .select({ trace: messages.trace })
+      .from(messages)
+      .where(eq(messages.id, done.assistantMessageId));
+
+    return {
+      ok: true,
+      data: {
+        conversation_id: done.conversationId,
+        answer: done.text,
+        trace: stored?.trace ?? [],
+        usage: done.usage,
+      },
+    };
+  });
+
+  app.get("/admin/tools/:name/chats", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+
+    const rows = await db
+      .select({ id: conversations.id, lastMessageAt: conversations.lastMessageAt })
+      .from(conversations)
+      .where(
+        and(
+          eq(conversations.toolName, found.tool.name),
+          eq(conversations.userId, request.authUser?.id ?? 0),
+          isNull(conversations.deletedAt),
+        ),
+      )
+      .orderBy(desc(conversations.lastMessageAt));
+
+    return {
+      ok: true,
+      data: rows.map((row) => ({ id: row.id, last_message_at: row.lastMessageAt })),
+    };
+  });
+
+  app.get("/admin/tools/:name/chats/:id", guard, async (request, reply) => {
+    const found = await load(request, reply);
+    if (!found) {
+      return reply;
+    }
+    const { id } = trialParams.parse(request.params);
+    const conversation = await findConversation(db, id, request.authUser?.id ?? 0, found.tool.name);
+    if (!conversation) {
+      return reply.code(404).send({ ok: false, error: "conversation_not_found" });
+    }
+
+    const rows = await db
+      .select({
+        id: messages.id,
+        role: messages.role,
+        content: messages.content,
+        trace: messages.trace,
+        createdAt: messages.createdAt,
+      })
+      .from(messages)
+      .where(eq(messages.conversationId, id))
+      .orderBy(messages.id);
+
+    return { ok: true, data: rows.map((row) => ({ ...row, trace: row.trace ?? [] })) };
   });
 
   app.post("/admin/tools/:name/check", guard, async (request, reply) => {
