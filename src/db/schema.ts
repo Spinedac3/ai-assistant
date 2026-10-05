@@ -206,7 +206,7 @@ export const settings = pgTable("settings", {
   updatedBy: integer("updated_by"),
 });
 
-// Metadata of every tool call; the result itself is never stored, only its hash (D35)
+// Metadata of every tool call; the result itself is never stored, only its hash
 export const toolCalls = pgTable(
   "tool_calls",
   {
@@ -241,8 +241,10 @@ export const accessTokens = pgTable(
     clientId: varchar("client_id", { length: 64 }).notNull(),
     accessTokenHash: varchar("access_token_hash", { length: 64 }).notNull(),
     refreshTokenHash: varchar("refresh_token_hash", { length: 64 }),
-    // The refresh hash before the last rotation; presenting it again means it was stolen
+    // The refresh hash before the last rotation; presenting it again later means it was stolen
     previousRefreshHash: varchar("previous_refresh_hash", { length: 64 }),
+    // When it last rotated; a client racing two refreshes is not mistaken for a thief
+    rotatedAt: timestamptz("rotated_at"),
     kind: varchar("kind", { length: 20, enum: ["oauth", "run"] }).notNull(),
     accessExpiresAt: timestamptz("access_expires_at").notNull(),
     refreshExpiresAt: timestamptz("refresh_expires_at"),
@@ -254,10 +256,11 @@ export const accessTokens = pgTable(
     uniqueIndex("access_tokens_access_hash_unique").on(t.accessTokenHash),
     uniqueIndex("access_tokens_refresh_hash_unique").on(t.refreshTokenHash),
     index("access_tokens_user_idx").on(t.userId),
+    index("access_tokens_previous_refresh_idx").on(t.previousRefreshHash),
   ],
 );
 
-// What people asked through external MCP clients, kept only for a while (D36)
+// What people asked through external MCP clients, kept only for a while
 export const mcpIntents = pgTable(
   "mcp_intents",
   {
@@ -268,4 +271,17 @@ export const mcpIntents = pgTable(
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [index("mcp_intents_created_idx").on(t.createdAt)],
+);
+
+// MCP clients registered dynamically (RFC 7591); public clients, protected by PKCE and exact redirects
+export const oauthClients = pgTable(
+  "oauth_clients",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    clientId: varchar("client_id", { length: 64 }).notNull(),
+    clientName: varchar("client_name", { length: 200 }),
+    redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("oauth_clients_client_id_unique").on(t.clientId)],
 );

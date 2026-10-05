@@ -59,12 +59,13 @@ const app = await buildApp({
     },
   },
   logger: true,
+  trustProxy: env.TRUST_PROXY,
 });
 
 // Tool failures, broken contracts and audit errors must reach the server log
 registry.useLogger(app.log);
 
-// Questions from external clients are kept only for the retention period (D36)
+// Questions from external clients are kept only for the retention period
 const purge = () =>
   purgeIntents(database.db, env.MCP_INTENT_RETENTION_DAYS).catch((error) =>
     app.log.error({ err: error }, "intent purge failed"),
