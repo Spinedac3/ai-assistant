@@ -303,6 +303,52 @@ describe("tool creator", () => {
     expect(listed.body.data).toEqual([]);
   });
 
+  it("tells the columns of a base before anything is saved, only over a source the person may use", async () => {
+    // Performs the test.
+    const source = `demo-${available[0]}`;
+    const table = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "table", name: "entregas" },
+    });
+    const pasted = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "query", sql: "select ruta, count(*) as total from entregas group by ruta" },
+    });
+    const ordered = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "query", sql: "select * from entregas order by ruta" },
+    });
+    const missing = await api("POST", "/admin/tools/describe", {
+      source,
+      base: { kind: "table", name: "no_existe" },
+    });
+    const foreign = await api(
+      "POST",
+      "/admin/tools/describe",
+      { source, base: { kind: "table", name: "entregas" } },
+      managerToken,
+    );
+    const listed = await api("GET", "/admin/tools");
+
+    // Performs assertions.
+    expect(table.body.data.columns).toEqual(
+      expect.arrayContaining([
+        { name: "ruta", kind: "text" },
+        { name: "entregado_en", kind: "datetime" },
+        { name: "a_tiempo", kind: "boolean" },
+      ]),
+    );
+    expect(pasted.body.data.columns.map((column: { name: string }) => column.name)).toEqual([
+      "ruta",
+      "total",
+    ]);
+    expect(ordered.body).toMatchObject({ error: "invalid_query" });
+    expect(missing.body).toMatchObject({ error: "base_unreadable" });
+    expect(foreign.status).toBe(403);
+    // Nothing was saved
+    expect(listed.body.data.map((tool: { name: string }) => tool.name)).not.toContain("describe");
+  });
+
   it("publishes only the version that was checked, never one saved in the meantime", async () => {
     // Performs the test.
     const url = "/admin/tools/entregas_carrera";

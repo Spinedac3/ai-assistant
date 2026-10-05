@@ -13,7 +13,7 @@ import { findConversation } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
 import { type BaseColumn, describeBase } from "../creator/columns.js";
-import { definitionSchema, TOOL_NAME } from "../creator/definition.js";
+import { baseSchema, definitionSchema, TOOL_NAME } from "../creator/definition.js";
 import { guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
 import { checkPasted } from "../creator/pasted.js";
 import {
@@ -60,6 +60,7 @@ const GUIDE_SAMPLES = 5;
 const CHECK_LIMITS = { timeoutMs: 60_000, maxRows: 200_000 };
 
 const nameParams = z.object({ name: z.string().regex(TOOL_NAME) });
+const describeBody = z.object({ source: z.string().regex(SOURCE_CODE), base: baseSchema }).strict();
 const saveBody = z
   .object({ source: z.string().regex(SOURCE_CODE), definition: z.unknown() })
   .strict();
@@ -205,6 +206,52 @@ export default async function toolsRoutes(
         output_schema: outputSchemaOf(shaped),
       },
     };
+  });
+
+  // The columns of a base before anything is saved, so a person picks them instead of typing them
+  app.post("/admin/tools/describe", guard, async (request, reply) => {
+    const body = describeBody.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "invalid_body", message: body.error.issues[0]?.message });
+    }
+    const { source, base } = body.data;
+    if (!request.authUser?.scopes.has(sourceScope(source))) {
+      return reply.code(403).send({
+        ok: false,
+        error: "source_not_allowed",
+        message: "No tienes el permiso de esa fuente",
+      });
+    }
+    const connection = await connectionFor(db, options.secrets, source);
+    if (!connection) {
+      return reply.code(404).send({ ok: false, error: "source_not_found" });
+    }
+    let pasted: string | null = null;
+    if (base.kind === "query") {
+      const checked = checkPasted(base.sql, connection.info.engine);
+      if (!checked.ok) {
+        return reply
+          .code(400)
+          .send({ ok: false, error: "invalid_query", message: checked.message });
+      }
+      pasted = checked.sql;
+    }
+    try {
+      // Reads no row: the source only says which columns the base has
+      const columns = await oneAtATime(`checks:${source}`, () =>
+        describeBase(connection.info, base, pasted, CHECK_LIMITS),
+      );
+      return { ok: true, data: { columns } };
+    } catch (error) {
+      request.log.warn({ err: error, source }, "base could not be described");
+      return reply.code(400).send({
+        ok: false,
+        error: "base_unreadable",
+        message: "No se pudo leer esa base en la fuente; revisa la tabla o la consulta",
+      });
+    }
   });
 
   // Saving a published tool turns it back into a draft until it passes its checks again
