@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { auditLogs, scopes } from "../../src/db/schema.js";
+import { auditLogs, documentJobs, scopes } from "../../src/db/schema.js";
 import { parseDocument } from "../../src/rag/document.js";
 import { Embedder } from "../../src/rag/embeddings.js";
 import type { Index } from "../../src/rag/ingest.js";
@@ -37,6 +37,8 @@ const outsider = {
 const fields = { doc_title: "Guía de bodega", doc_version: "V001", area: "general" };
 const body =
   "# Bodega\n\n## Montacargas\n\nLa velocidad máxima del montacargas es de ocho kilómetros por hora.\n";
+
+const HOUR = 3_600_000;
 
 let database: DatabaseHandle;
 let embed: FakeEmbed;
@@ -160,6 +162,7 @@ describe("ingest_document", () => {
     await send(3, "# Ajeno\n\nde otra persona.", outsider);
     const third = await send(3, "# Tres\n\nTercera parte.");
     const stored = parseDocument(await storage.readMarkdown(code));
+    const left = (owner: number) => storage.partsReceived({ owner, docCode: code, parts: 3 }, HOUR);
 
     // Performs assertions.
     expect(second).toMatchObject({ result: "part_received", pending_parts: [1, 3] });
@@ -169,50 +172,83 @@ describe("ingest_document", () => {
     expect(stored.body).toBe(
       "# Uno\n\nPrimera parte.\n\n# Dos\n\nSegunda parte.\n\n# Tres\n\nTercera parte.",
     );
-    expect(await storage.partsReceived(manager.userId, code)).toEqual([]);
-    expect(await storage.partsReceived(outsider.userId, code)).toEqual([3]);
+    expect(await left(manager.userId)).toEqual([]);
+    expect((await left(outsider.userId)).map((item) => item.part)).toEqual([3]);
   });
 
-  it("drops the parts of a refused upload and refuses one past the size of an upload", async () => {
+  it("keeps an attempt split differently apart, and gathers parts sent at once only once", async () => {
+    // Performs the test.
+    const code = "MANUAL-FLOTA-V001";
+    await storage.removeParts(manager.userId, code);
+    const send = (part: number, parts: number, text: string) =>
+      call({ mode: "ingest", doc_code: code, ...fields, markdown: text, part, parts });
+    await send(2, 3, "# Viejo\n\nde un intento en tres partes.");
+    const parallel = await Promise.all([
+      send(1, 2, "# Uno\n\nNuevo."),
+      send(2, 2, "# Dos\n\nNuevo."),
+    ]);
+    const stored = parseDocument(await storage.readMarkdown(code));
+    const jobs = await database.db.select().from(documentJobs);
+
+    // Performs assertions.
+    expect(parallel.filter((outcome) => outcome.result === "queued")).toHaveLength(1);
+    expect(parallel.some((outcome) => outcome.error)).toBe(false);
+    expect(stored.body).toBe("# Uno\n\nNuevo.\n\n# Dos\n\nNuevo.");
+    expect(jobs.filter((job) => job.docCode === code)).toHaveLength(1);
+  });
+
+  it("refuses parts past the size of an upload as soon as they pass it", async () => {
     // Performs the test.
     const code = "ENORME-V001";
     await storage.removeParts(manager.userId, code);
-    // Each part within the limit of a call, all six past the limit of a document
+    // Each part within the limit of a call; six of them pass the limit of a document
     const piece = "x".repeat(390_000);
     const send = (part: number) =>
-      call({ mode: "ingest", doc_code: code, ...fields, markdown: piece, part, parts: 6 });
-    for (const part of [1, 2, 3, 4, 5]) {
-      await send(part);
+      call({ mode: "ingest", doc_code: code, ...fields, markdown: piece, part, parts: 30 });
+    const outcomes = [];
+    for (const part of [1, 2, 3, 4, 5, 6]) {
+      outcomes.push(await send(part));
     }
-    const tooLarge = await send(6);
 
     // Performs assertions.
-    expect(tooLarge.error).toBe("too_large");
-    expect(await storage.partsReceived(manager.userId, code)).toEqual([]);
+    expect(outcomes.slice(0, 5).every((outcome) => outcome.result === "part_received")).toBe(true);
+    expect(outcomes[5].error).toBe("too_large");
+    expect(
+      await storage.partsReceived({ owner: manager.userId, docCode: code, parts: 30 }, HOUR),
+    ).toEqual([]);
   });
 
-  it("forgets the parts of an upload left unfinished", async () => {
+  it("forgets the parts of an attempt left unfinished, by the storage's own clock", async () => {
     // Performs the test.
-    const code = "OLVIDADO-V001";
-    await storage.removeParts(manager.userId, code);
-    await storage.savePart(manager.userId, code, 1, "# Uno");
-    const later = new Date(Date.now() + 60_000);
-    const fresh = await storage.partsReceived(manager.userId, code);
-    const afterLifetime = await storage.partsReceived(manager.userId, code, later);
+    const upload = { owner: manager.userId, docCode: "OLVIDADO-V001", parts: 2 };
+    await storage.removeParts(upload.owner, upload.docCode);
+    await storage.savePart(upload, 1, "# Uno");
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await storage.savePart(upload, 2, "# Dos");
+    // A lifetime shorter than the gap: the older part belongs to an abandoned attempt
+    const received = await storage.partsReceived(upload, 500);
 
     // Performs assertions.
-    expect(fresh).toEqual([1]);
-    expect(afterLifetime).toEqual([]);
-    expect(await storage.partsReceived(manager.userId, code)).toEqual([]);
+    expect(received.map((item) => item.part)).toEqual([2]);
+    expect((await storage.partsReceived(upload, HOUR)).map((item) => item.part)).toEqual([2]);
   });
 
-  it("lets nobody publish to, move from or describe an area they do not read", async () => {
+  it("lets nobody publish over, move, describe or follow a document of an area they do not read", async () => {
     // Performs the test.
     const salaries = { ...fields, area: "rrhh", markdown: body };
-    await call({ mode: "ingest", doc_code: "SALARIOS-V001", ...salaries });
+    const created = await call({ mode: "ingest", doc_code: "SALARIOS-V001", ...salaries });
     await drainQueue();
     const publish = await call(
       { mode: "ingest", doc_code: "SALARIOS-V002", ...salaries },
+      outsider,
+    );
+    // From an area they read, over a family that lives in one they do not
+    const supersede = await call(
+      { mode: "ingest", doc_code: "SALARIOS-V002", ...fields, markdown: body },
+      outsider,
+    );
+    const overwrite = await call(
+      { mode: "ingest", doc_code: "SALARIOS-V001", ...fields, markdown: body },
       outsider,
     );
     const move = await call(
@@ -227,13 +263,19 @@ describe("ingest_document", () => {
     );
     const described = await call({ mode: "validate", doc_code: "SALARIOS-V002" }, outsider);
     const seen = await call({ mode: "validate", doc_code: "SALARIOS-V002" });
+    const followed = await call({ mode: "status", job_id: created.job_id }, outsider);
+    const stored = parseDocument(await storage.readMarkdown("SALARIOS-V001"));
 
     // Performs assertions.
     expect(publish.error).toBe("area_not_readable");
-    expect(move.error).toBe("area_not_readable");
+    expect(supersede.error).toBe("area_not_readable");
+    expect(overwrite.error).toBe("area_not_readable");
+    expect(stored.frontmatter.area).toBe("rrhh");
+    expect(move.error).toBe("document_not_found");
     expect(moveInto.error).toBe("area_not_readable");
     expect(described.current_version).toBeNull();
     expect(seen.current_version).toMatchObject({ doc_code: "SALARIOS-V001" });
+    expect(followed.error).toBe("job_not_found");
   });
 
   it("refuses an unknown area, missing fields, a bad part and an older version", async () => {

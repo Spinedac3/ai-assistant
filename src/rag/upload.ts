@@ -3,7 +3,7 @@ import { logAudit } from "../audit.js";
 import type { Database } from "../db/client.js";
 import { scopes } from "../db/schema.js";
 import { areaScope, type Frontmatter, parseDocument } from "./document.js";
-import { type Index, newerCurrent } from "./ingest.js";
+import { currentOfFamily, type Index, newerCurrent } from "./ingest.js";
 import { enqueue } from "./jobs.js";
 import type { DocumentStorage } from "./storage.js";
 
@@ -18,7 +18,11 @@ export interface UploadDependencies {
 
 export type Stored =
   | { ok: true; jobId: number; frontmatter: Frontmatter }
-  | { ok: false; error: "invalid_document" | "unknown_area" | "older_version"; message: string };
+  | {
+      ok: false;
+      error: "invalid_document" | "unknown_area" | "area_not_readable" | "older_version";
+      message: string;
+    };
 
 /**
  * Writes a frontmatter back as the flat YAML block the parser reads
@@ -85,7 +89,7 @@ export async function listAreas(db: Database): Promise<string[]> {
  *
  * @param   deps      Database, index and storage
  * @param   markdown  Whole document with its frontmatter
- * @param   actor     Who uploads it, and from where
+ * @param   actor     Who uploads it, what they read, and from where
  * @param   original  PDF the markdown came from, if any
  *
  * @return  The queued job, or why the document was refused
@@ -93,7 +97,7 @@ export async function listAreas(db: Database): Promise<string[]> {
 export async function storeDocument(
   deps: UploadDependencies,
   markdown: string,
-  actor: { userId: number; ip: string | null },
+  actor: { userId: number; scopes: ReadonlySet<string>; ip: string | null },
   original?: Buffer,
 ): Promise<Stored> {
   let parsed: ReturnType<typeof parseDocument>;
@@ -110,6 +114,18 @@ export async function storeDocument(
       ok: false,
       error: "unknown_area",
       message: `El área ${frontmatter.area} no existe; créala primero como permiso ${scope}`,
+    };
+  }
+
+  // Publishing reaches the target area and replaces the current versions of the family, so the
+  // uploader must read every one of those areas; which areas they are is not told
+  const current = await currentOfFamily(deps.index, frontmatter.doc_code);
+  const reached = [scope, ...current.map((document) => document.required_scope)];
+  if (reached.some((required) => !actor.scopes.has(required))) {
+    return {
+      ok: false,
+      error: "area_not_readable",
+      message: "Este documento toca un área que no lees, así que no puedes publicarlo.",
     };
   }
 

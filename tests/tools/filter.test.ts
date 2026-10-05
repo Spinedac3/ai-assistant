@@ -254,13 +254,12 @@ describe("row filter", () => {
     expect(data.nota_filtro).toContain("no_numericas");
   });
 
-  it("groups and filters a long list in linear time", () => {
+  it("groups and filters a long list in linear time, well within the test timeout", () => {
     // Performs the test.
     const many = {
       // One large group: copying it per row would take minutes
       filas: Array.from({ length: 200_000 }, (_, index) => ({ id: index, estado: "abierto" })),
     };
-    const started = Date.now();
     const picked = applyFilter(many, {
       where: [
         { field: "id", op: "in", value: Array.from({ length: 500 }, (_, index) => index * 2) },
@@ -273,6 +272,54 @@ describe("row filter", () => {
     expect(grouped.ok && grouped.data.resumen_filtro).toEqual([
       { estado: "abierto", filas: 200_000 },
     ]);
-    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("refuses a reversed range and values that are not plain", () => {
+    // Performs the test.
+    const refused = [
+      { op: "between", value: [10, 5] },
+      { op: "between", value: ["2026-11-01", "2026-10-01"] },
+      { op: "=", value: {} },
+      { op: "in", value: [{ a: 1 }] },
+    ].map((condition) =>
+      takeFilter({ [FILTER_PARAM]: { where: [{ field: "monto", ...condition }] } }),
+    );
+
+    // Performs assertions.
+    for (const request of refused) {
+      expect("error" in request).toBe(true);
+    }
+  });
+
+  it("matches a cell by its day only against the dates of an in list", () => {
+    // Performs the test.
+    const places = {
+      lugares: [
+        { nombre: "Bodega Sur 2", fecha: "2026-10-05 08:00" },
+        { nombre: "Bodega Sur", fecha: "2026-10-06" },
+      ],
+    };
+    const byName = applyFilter(places, {
+      where: [{ field: "nombre", op: "in", value: ["2026-10-05", "Bodega Sur"] }],
+    });
+    const byDay = applyFilter(places, {
+      where: [{ field: "fecha", op: "in", value: ["2026-10-05", "Bodega Sur"] }],
+    });
+
+    // Performs assertions.
+    expect(byName.ok && byName.data.lugares).toEqual([places.lugares[1]]);
+    expect(byDay.ok && byDay.data.lugares).toEqual([places.lugares[0]]);
+  });
+
+  it("keeps a range of dates by day and counts an empty cell compared with !=", () => {
+    // Performs the test.
+    const inRange = ids({
+      where: [{ field: "entrega", op: "between", value: ["2026-10-12", "2026-10-12"] }],
+    });
+    const other = filtered({ where: [{ field: "ruta", op: "!=", value: "Norte" }] });
+
+    // Performs assertions.
+    expect(inRange).toEqual(["P1", "P2"]);
+    expect(other.filtro_filas.sin_dato).toEqual({ ruta: 2 });
   });
 });

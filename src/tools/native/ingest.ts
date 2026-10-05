@@ -2,6 +2,7 @@ import { logAudit } from "../../audit.js";
 import { areaScope, DOC_CODE, parseDocument } from "../../rag/document.js";
 import { currentOfFamily, isCurrent } from "../../rag/ingest.js";
 import { enqueue, findJob } from "../../rag/jobs.js";
+import type { PartUpload } from "../../rag/storage.js";
 import {
   areaExists,
   listAreas,
@@ -21,7 +22,7 @@ type Mode = (typeof MODES)[number];
 const MAX_MARKDOWN_CHARS = 400_000;
 const MAX_PARTS = 30;
 // An upload sends its parts within minutes; a part older than this is of one left unfinished
-export const PART_LIFETIME_MS = 3_600_000;
+const PART_LIFETIME_MS = 3_600_000;
 
 const REQUIRED = [
   {
@@ -139,39 +140,64 @@ async function validate(
   };
 }
 
+// Parts of one document sent in parallel would each see the set complete; one at a time, the
+// last one gathers it once
+const uploading = new Map<string, Promise<unknown>>();
+
 /**
- * Gathers the parts of a document sent in pieces; each person's parts are kept apart, and a part
- * sent again replaces the earlier one
+ * Runs the work of one person's document after the work already running for it
  *
- * @param   deps   Database, index and storage
- * @param   owner  Who sends it
- * @param   code   Document code
- * @param   part   This part's number
- * @param   parts  How many parts there are
- * @param   text   This part's markdown
+ * @param   key   Person and document
+ * @param   work  What to run
  *
- * @return  The whole body, or the parts still missing
+ * @return  What the work returns
+ */
+async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const previous = uploading.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(work);
+  uploading.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (uploading.get(key) === current) {
+      uploading.delete(key);
+    }
+  }
+}
+
+/**
+ * Keeps a part of a document sent in pieces and, once all are in, puts the body together
+ *
+ * @param   deps    Database, index and storage
+ * @param   upload  Who sends which document, in how many parts
+ * @param   part    This part's number
+ * @param   text    This part's markdown
+ *
+ * @return  The whole body, the parts still missing, or that the parts already pass the size
  */
 async function gather(
   deps: UploadDependencies,
-  owner: number,
-  code: string,
+  upload: PartUpload,
   part: number,
-  parts: number,
   text: string,
-): Promise<{ body: string } | { pending: number[] }> {
-  const since = new Date(Date.now() - PART_LIFETIME_MS);
-  await deps.storage.savePart(owner, code, part, text);
-  const received = new Set(await deps.storage.partsReceived(owner, code, since));
-  const pending = Array.from({ length: parts }, (_, index) => index + 1).filter(
-    (number) => !received.has(number),
+): Promise<{ body: string } | { pending: number[] } | { tooLarge: true }> {
+  await deps.storage.savePart(upload, part, text);
+  const received = await deps.storage.partsReceived(upload, PART_LIFETIME_MS);
+  // Cut as soon as the parts pass the size of a document, not after holding all of them
+  if (received.reduce((total, item) => total + item.bytes, 0) > MAX_MARKDOWN_BYTES) {
+    return { tooLarge: true };
+  }
+
+  const numbers = new Set(received.map((item) => item.part));
+  const pending = Array.from({ length: upload.parts }, (_, index) => index + 1).filter(
+    (number) => !numbers.has(number),
   );
   if (pending.length > 0) {
     return { pending };
   }
 
   const texts = await Promise.all(
-    Array.from({ length: parts }, (_, index) => deps.storage.readPart(owner, code, index + 1)),
+    Array.from({ length: upload.parts }, (_, index) => deps.storage.readPart(upload, index + 1)),
   );
 
   return { body: texts.join("\n\n") };
@@ -214,7 +240,7 @@ async function ingest(
       `El área ${area} no existe. Usa mode 'validate' para ver las áreas.`,
     );
   }
-  // Whoever publishes to an area must read it, or anyone managing documents could reach any area
+  // Also checked on storing; here first, so no part is kept for an area they cannot publish to
   if (!context.scopes.has(areaScope(area))) {
     return refuse(
       "area_not_readable",
@@ -222,31 +248,37 @@ async function ingest(
     );
   }
 
-  let body = String(args.markdown);
-  if (parts > 1) {
-    const gathered = await gather(deps, context.userId, code, part, parts, body);
-    if ("pending" in gathered) {
-      return {
-        ok: true,
-        data: {
-          result: "part_received",
-          doc_code: code,
-          part,
-          parts,
-          pending_parts: gathered.pending,
-          note: `Parte ${part} de ${parts} recibida. Envía las partes ${gathered.pending.join(", ")} con el mismo doc_code y parts; con la última se arma y se encola sola.`,
-        },
-      };
-    }
-    body = gathered.body;
-  }
-
-  try {
-    if (Buffer.byteLength(body, "utf8") > MAX_MARKDOWN_BYTES) {
-      return refuse(
-        "too_large",
-        `El documento pasa de ${MAX_MARKDOWN_BYTES / 1024 / 1024} MB; divídelo en documentos más chicos.`,
+  return oneAtATime(`${context.userId}:${code}`, async () => {
+    let body = String(args.markdown);
+    if (parts > 1) {
+      const gathered = await gather(
+        deps,
+        { owner: context.userId, docCode: code, parts },
+        part,
+        body,
       );
+      if ("pending" in gathered) {
+        return {
+          ok: true,
+          data: {
+            result: "part_received",
+            doc_code: code,
+            part,
+            parts,
+            pending_parts: gathered.pending,
+            note: `Parte ${part} de ${parts} recibida. Envía las partes ${gathered.pending.join(", ")} con el mismo doc_code y parts; con la última se arma y se encola sola.`,
+          },
+        };
+      }
+      // Gathered or too large, these parts are done; sent again, the upload starts from scratch
+      await deps.storage.removeParts(context.userId, code).catch(() => {});
+      if ("tooLarge" in gathered) {
+        return refuse(
+          "too_large",
+          `El documento pasa de ${MAX_MARKDOWN_BYTES / 1024 / 1024} MB; divídelo en documentos más chicos.`,
+        );
+      }
+      body = gathered.body;
     }
 
     const frontmatter = {
@@ -262,6 +294,7 @@ async function ingest(
     };
     const stored = await storeDocument(deps, writeDocument(frontmatter, body), {
       userId: context.userId,
+      scopes: context.scopes,
       ip: null,
     });
     if (!stored.ok) {
@@ -281,12 +314,7 @@ async function ingest(
           "job_id y el doc_code tal cual y confirma con mode 'status' antes de decir que terminó.",
       },
     };
-  } finally {
-    // Gathered or refused, its parts are done; sent again, it starts from scratch
-    if (parts > 1) {
-      await deps.storage.removeParts(context.userId, code).catch(() => {});
-    }
-  }
+  });
 }
 
 /**
@@ -336,14 +364,18 @@ async function reclassify(
 
   const document = parseDocument(await deps.storage.readMarkdown(code));
   const before = document.frontmatter.area;
-  // Moving a document needs both areas: the one it leaves and the one it reaches
-  const unreadable = [...new Set([before, args.area ?? before])].filter(
-    (area) => !context.scopes.has(areaScope(area)),
-  );
-  if (unreadable.length > 0) {
+  // A document in an area the person does not read looks missing, so codes cannot be probed
+  if (!context.scopes.has(areaScope(before))) {
+    return refuse(
+      "document_not_found",
+      `${code} no es la versión vigente de un documento cargado.`,
+    );
+  }
+  // Moving it also needs the area it reaches
+  if (args.area && !context.scopes.has(areaScope(args.area))) {
     return refuse(
       "area_not_readable",
-      `No lees el área ${unreadable.join(" ni ")}, así que no puedes cambiar este documento.`,
+      `No lees el área ${args.area}, así que no puedes mover el documento ahí.`,
     );
   }
 
@@ -403,18 +435,24 @@ async function reclassify(
 /**
  * Reports how the indexing of a document went
  *
- * @param   deps  Database, index and storage
- * @param   args  Job id
+ * @param   deps     Database, index and storage
+ * @param   args     Job id
+ * @param   context  Who calls
  *
  * @return  The job status
  */
-async function status(deps: UploadDependencies, args: Args): Promise<ToolResult> {
+async function status(
+  deps: UploadDependencies,
+  args: Args,
+  context: ToolContext,
+): Promise<ToolResult> {
   if (!args.job_id) {
     return refuse("missing_fields", "mode 'status' necesita el job_id que devolvió 'ingest'.");
   }
 
   const job = await findJob(deps.db, args.job_id);
-  if (!job) {
+  // A job names its document; someone else's could be of an area this person does not read
+  if (!job || job.userId !== context.userId) {
     return refuse("job_not_found", `No existe el job ${args.job_id}.`);
   }
 
@@ -511,7 +549,7 @@ export function ingestTool(deps: UploadDependencies): Tool {
         return reclassify(deps, args, context);
       }
 
-      return status(deps, args);
+      return status(deps, args, context);
     },
   };
 }

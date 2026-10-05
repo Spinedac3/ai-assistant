@@ -179,58 +179,52 @@ export class DocumentStorage {
   /**
    * Keeps one part of a document sent in pieces, replacing a part with the same number
    *
-   * @param   owner    Who sends it
-   * @param   docCode  Document code
-   * @param   part     Part number
-   * @param   text     Markdown of the part
+   * @param   upload  Who sends which document, in how many parts
+   * @param   part    Part number
+   * @param   text    Markdown of the part
    */
-  async savePart(owner: number, docCode: string, part: number, text: string): Promise<void> {
+  async savePart(upload: PartUpload, part: number, text: string): Promise<void> {
     const data = Buffer.from(text, "utf8");
-    await this.client.putObject(
-      this.config.bucket,
-      partKey(owner, docCode, part),
-      data,
-      data.length,
-    );
+    await this.client.putObject(this.config.bucket, partKey(upload, part), data, data.length);
   }
 
   /**
-   * Lists the part numbers received of a document since a moment, dropping older ones: those are
-   * of an upload left unfinished, and must not join a new one
+   * Lists the parts received of an upload, dropping those of an earlier attempt left unfinished
    *
-   * @param   owner    Who sends it
-   * @param   docCode  Document code
-   * @param   since    Parts saved before this moment no longer count
+   * @param   upload    Who sends which document, in how many parts
+   * @param   lifetime  Milliseconds a part counts, before the newest one; measured on the storage
+   *                    clock alone, so a server running ahead or behind cannot drop a fresh part
    *
-   * @return  The numbers
+   * @return  Each part number with its size in bytes
    */
-  async partsReceived(owner: number, docCode: string, since = new Date(0)): Promise<number[]> {
-    const names = await this.list(partKey(owner, docCode));
-    const stale = names.filter((item) => item.lastModified < since);
-    if (stale.length > 0) {
-      await this.client.removeObjects(
-        this.config.bucket,
-        stale.map(({ name }) => name),
-      );
-    }
+  async partsReceived(
+    upload: PartUpload,
+    lifetime: number,
+  ): Promise<{ part: number; bytes: number }[]> {
+    const found = await this.list(partKey(upload));
+    const newest = Math.max(0, ...found.map((item) => item.lastModified.getTime()));
+    const stale = found.filter((item) => item.lastModified.getTime() < newest - lifetime);
+    await this.removeKeys(stale.map((item) => item.name));
 
-    return names
-      .filter((item) => item.lastModified >= since)
-      .map(({ name }) => Number(name.split("/").pop()?.replace(".md", "")))
-      .sort((a, b) => a - b);
+    return found
+      .filter((item) => !stale.includes(item))
+      .map((item) => ({
+        part: Number(item.name.split("/").pop()?.replace(".md", "")),
+        bytes: item.size,
+      }))
+      .sort((a, b) => a.part - b.part);
   }
 
   /**
-   * Reads one part of a document
+   * Reads one part of an upload
    *
-   * @param   owner    Who sends it
-   * @param   docCode  Document code
-   * @param   part     Part number
+   * @param   upload  Who sends which document, in how many parts
+   * @param   part    Part number
    *
    * @return  Its markdown
    */
-  async readPart(owner: number, docCode: string, part: number): Promise<string> {
-    const stream = await this.client.getObject(this.config.bucket, partKey(owner, docCode, part));
+  async readPart(upload: PartUpload, part: number): Promise<string> {
+    const stream = await this.client.getObject(this.config.bucket, partKey(upload, part));
     const pieces: Buffer[] = [];
     for await (const piece of stream) {
       pieces.push(piece as Buffer);
@@ -240,17 +234,14 @@ export class DocumentStorage {
   }
 
   /**
-   * Drops every part of a document, once it is gathered or refused
+   * Drops every part a person sent of a document, whatever the number of parts it was split in
    *
    * @param   owner    Who sends it
    * @param   docCode  Document code
    */
   async removeParts(owner: number, docCode: string): Promise<void> {
-    const names = await this.list(partKey(owner, docCode));
-    await this.client.removeObjects(
-      this.config.bucket,
-      names.map(({ name }) => name),
-    );
+    const found = await this.list(partKey({ owner, docCode }));
+    await this.removeKeys(found.map((item) => item.name));
   }
 
   /**
@@ -259,12 +250,20 @@ export class DocumentStorage {
    * @param   olderThan  Parts saved before this moment go
    */
   async purgeParts(olderThan: Date): Promise<void> {
-    const stale = (await this.list(`${PARTS}/`)).filter((item) => item.lastModified < olderThan);
-    if (stale.length > 0) {
-      await this.client.removeObjects(
-        this.config.bucket,
-        stale.map(({ name }) => name),
-      );
+    const found = await this.list(`${PARTS}/`);
+    await this.removeKeys(
+      found.filter((item) => item.lastModified < olderThan).map((item) => item.name),
+    );
+  }
+
+  /**
+   * Removes objects by key; an empty list makes no request
+   *
+   * @param   keys  Object keys
+   */
+  private async removeKeys(keys: string[]): Promise<void> {
+    if (keys.length > 0) {
+      await this.client.removeObjects(this.config.bucket, keys);
     }
   }
 
@@ -273,13 +272,15 @@ export class DocumentStorage {
    *
    * @param   prefix  Key prefix
    *
-   * @return  Their names and when they were saved
+   * @return  Their names, sizes and when they were saved
    */
-  private async list(prefix: string): Promise<{ name: string; lastModified: Date }[]> {
-    const found: { name: string; lastModified: Date }[] = [];
+  private async list(
+    prefix: string,
+  ): Promise<{ name: string; size: number; lastModified: Date }[]> {
+    const found: { name: string; size: number; lastModified: Date }[] = [];
     for await (const item of this.client.listObjectsV2(this.config.bucket, prefix, true)) {
       if (item.name) {
-        found.push({ name: item.name, lastModified: item.lastModified });
+        found.push({ name: item.name, size: item.size, lastModified: item.lastModified });
       }
     }
 
@@ -287,22 +288,38 @@ export class DocumentStorage {
   }
 }
 
+export interface PartUpload {
+  owner: number;
+  docCode: string;
+  parts: number;
+}
+
 /**
- * Builds the key of a part of a document still being sent; the folder holds a slash, which no
- * document code can, so a part never overwrites or joins a real document
+ * Builds the key of a part, or the folder of an upload or of a person's document
  *
- * @param   owner    Who sends it
- * @param   docCode  Document code
- * @param   part     Part number
+ * The folder holds a slash, which no document code can, so a part never overwrites or joins a real
+ * document; the number of parts is part of it, so an attempt split differently never mixes in.
  *
- * @return  The key
+ * @param   upload  Who sends which document, and in how many parts when known
+ * @param   part    Part number, for the key of one part
+ *
+ * @return  The key or folder
  */
-export function partKey(owner: number, docCode: string, part?: number): string {
+export function partKey(
+  upload: Omit<PartUpload, "parts"> & { parts?: number },
+  part?: number,
+): string {
+  const { owner, docCode, parts } = upload;
   if (!DOC_CODE.test(docCode) || !Number.isInteger(owner)) {
     throw new Error(`Código de documento inválido: ${docCode}`);
   }
 
-  return `${PARTS}/${owner}/${docCode}/${part === undefined ? "" : `${part}.md`}`;
+  const folder = `${PARTS}/${owner}/${docCode}/`;
+  if (parts === undefined) {
+    return folder;
+  }
+
+  return `${folder}${parts}/${part === undefined ? "" : `${part}.md`}`;
 }
 
 /**

@@ -21,8 +21,12 @@ type Op = (typeof OPS)[number];
 const isEmpty = (value: unknown): boolean =>
   value === null || value === undefined || (typeof value === "string" && value.trim() === "");
 
-// A condition without the value its operator needs would compare against nothing and quietly
-// match no row, which reads as a true zero
+// A plain value a cell can be compared with; an object would read as "[object Object]"
+const isPlain = (value: unknown): boolean =>
+  !isEmpty(value) && ["string", "number", "boolean"].includes(typeof value);
+
+// A condition without the value its operator needs, or a range that ends before it starts, would
+// quietly match no row, which reads as a true zero
 const conditionSchema = z
   .object({ field: z.string().min(1), op: z.enum(OPS), value: z.unknown().optional() })
   .strict()
@@ -32,15 +36,23 @@ const conditionSchema = z
         return true;
       }
       if (op === "between") {
-        return Array.isArray(value) && value.length === 2 && !value.some(isEmpty);
+        return (
+          Array.isArray(value) &&
+          value.length === 2 &&
+          value.every(isPlain) &&
+          compare(normal(value[0]), normal(value[1])) <= 0
+        );
       }
       if (op === "in") {
-        return Array.isArray(value) && value.length > 0;
+        return Array.isArray(value) && value.length > 0 && value.every(isPlain);
       }
 
-      return !isEmpty(value) && !Array.isArray(value);
+      return isPlain(value);
     },
-    { message: "between lleva [desde, hasta]; in, una lista; los demás, un valor" },
+    {
+      message:
+        "between lleva [desde, hasta] con desde ≤ hasta; in, una lista de valores; los demás, un valor",
+    },
   );
 
 const filterSchema = z
@@ -108,7 +120,8 @@ interface Normal {
 const isRow = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
-// A leading zero marks a code, not a quantity: 0123 and 123 are different employees
+// A leading zero marks a code, not a quantity: 0123 and 123 are different employees, and codes
+// order as text
 const NUMERIC = /^-?(0|[1-9]\d*)(\.\d+)?$/;
 
 /**
@@ -199,8 +212,11 @@ function testFor(op: Op, value: unknown): (cell: Normal) => boolean {
       return (cell) => cell.text.includes(want.text);
     case "in": {
       const keys = new Set(values.map((item) => keyOf(item)));
-      const byDay = values.some((item) => DATE_ONLY.test(item.text));
-      return (cell) => keys.has(keyOf(cell)) || (byDay && keys.has(keyOf(cell, true)));
+      // Only a bare date matches a cell by its day; any other value matches it whole
+      const days = new Set(
+        values.filter((item) => DATE_ONLY.test(item.text)).map((item) => keyOf(item)),
+      );
+      return (cell) => keys.has(keyOf(cell)) || days.has(keyOf(cell, true));
     }
     case "empty":
     case "not_empty":
@@ -340,26 +356,28 @@ export function applyFilter(data: Record<string, unknown>, filter: RowFilter): F
     }),
   );
 
-  // A value that is not a number is counted, never added as zero to a total that looks complete
   const summed = filter.sum ?? [];
-  const notNumeric: Record<string, number> = {};
   const sums = (group: readonly Record<string, unknown>[]) =>
     Object.fromEntries(
       summed.map((column) => {
         let total = 0;
         for (const row of group) {
-          const number = isEmpty(row[column]) ? null : normal(row[column]).number;
-          if (number !== null) {
-            total += number;
-          } else if (!isEmpty(row[column]) && group === left) {
-            notNumeric[column] = (notNumeric[column] ?? 0) + 1;
-          }
+          total += isEmpty(row[column]) ? 0 : (normal(row[column]).number ?? 0);
         }
 
         return [column, Math.round(total * 1e6) / 1e6];
       }),
     );
   const totals = sums(left);
+  // A value that is not a number is counted, never added as zero to a total that looks complete
+  const notNumeric = Object.fromEntries(
+    summed
+      .map((column) => [
+        column,
+        left.filter((row) => !isEmpty(row[column]) && normal(row[column]).number === null).length,
+      ])
+      .filter(([, count]) => count !== 0),
+  ) as Record<string, number>;
 
   let counts: Record<string, unknown>[] | undefined;
   const countBy = filter.count_by ?? [];

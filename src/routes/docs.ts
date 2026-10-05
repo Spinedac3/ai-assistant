@@ -117,12 +117,18 @@ export default async function docsRoutes(
     const stored = await storeDocument(
       { db, index, storage },
       markdown.toString("utf8"),
-      { userId: request.authUser?.id ?? 0, ip: request.ip },
+      {
+        userId: request.authUser?.id ?? 0,
+        scopes: request.authUser?.scopes ?? new Set<string>(),
+        ip: request.ip,
+      },
       original,
     );
     if (!stored.ok) {
       return reply
-        .code(stored.error === "older_version" ? 409 : 400)
+        .code(
+          stored.error === "older_version" ? 409 : stored.error === "area_not_readable" ? 403 : 400,
+        )
         .send({ ok: false, error: stored.error, message: stored.message });
     }
 
