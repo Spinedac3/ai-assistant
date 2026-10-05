@@ -82,13 +82,22 @@ export class CreatedTools {
    *
    * @param   registry  Tool registry every path runs through
    * @param   deps      Database, vault and the zone of the application
-   * @param   logger    Where a tool that cannot load is reported
    */
+  private logger?: FastifyBaseLogger;
+
   constructor(
     private readonly registry: ToolRegistry,
     private readonly deps: CreatedToolDependencies,
-    private readonly logger?: FastifyBaseLogger,
   ) {}
+
+  /**
+   * Sets where a tool that cannot load is reported, once the server's logger exists
+   *
+   * @param   logger  Server logger
+   */
+  useLogger(logger: FastifyBaseLogger): void {
+    this.logger = logger;
+  }
 
   /**
    * Tells whether a name is taken by a tool the creator does not own

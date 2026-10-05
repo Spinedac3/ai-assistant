@@ -12,6 +12,7 @@ import exportsRoutes, { type ExportsRoutesOptions } from "./routes/exports.js";
 import mcpRoutes from "./routes/mcp.js";
 import oauthRoutes from "./routes/oauth.js";
 import sourcesRoutes, { type SourcesRoutesOptions } from "./routes/sources.js";
+import toolsRoutes, { type ToolsRoutesOptions } from "./routes/tools.js";
 import type { ToolRegistry } from "./tools/registry.js";
 
 export interface AppDependencies {
@@ -26,6 +27,8 @@ export interface AppDependencies {
   exports?: ExportsRoutesOptions;
   // Without it the source administration is not mounted
   sources?: Omit<SourcesRoutesOptions, "db">;
+  // The creator of tools over the registered sources
+  tools?: Omit<ToolsRoutesOptions, "db">;
   // Without it the document routes are not mounted
   docs?: Omit<DocsRoutesOptions, "db">;
   logger?: boolean;
@@ -59,6 +62,10 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   if (deps.sources) {
     await app.register(sourcesRoutes, { ...deps.sources, db: deps.db });
+  }
+
+  if (deps.tools) {
+    await app.register(toolsRoutes, { ...deps.tools, db: deps.db });
   }
 
   if (deps.docs) {

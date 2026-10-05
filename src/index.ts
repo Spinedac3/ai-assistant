@@ -41,6 +41,11 @@ registry.register(calculateTool);
 registry.register(searchTool(index));
 registry.register(fetchTool(index));
 registry.register(ingestTool({ db: database.db, index, storage }));
+const createdTools = new CreatedTools(registry, {
+  db: database.db,
+  secrets,
+  appTimeZone: env.APP_TIMEZONE,
+});
 
 const app = await buildApp({
   db: database.db,
@@ -82,6 +87,7 @@ const app = await buildApp({
   },
   docs: { index, storage },
   sources: { secrets },
+  tools: { secrets, appTimeZone: env.APP_TIMEZONE, created: createdTools },
   exports: { exports },
   logger: true,
   trustProxy: env.TRUST_PROXY,
@@ -92,11 +98,7 @@ registry.useLogger(app.log);
 registry.useExports(exports);
 
 // Tools made in the creator join the registry as stored, without waiting on their sources
-const createdTools = new CreatedTools(
-  registry,
-  { db: database.db, secrets, appTimeZone: env.APP_TIMEZONE },
-  app.log,
-);
+createdTools.useLogger(app.log);
 await createdTools
   .load()
   .catch((error) => app.log.error({ err: error }, "created tools could not load"));

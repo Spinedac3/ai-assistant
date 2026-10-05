@@ -1,7 +1,14 @@
 import { count, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client.js";
-import { roleScopes, scopes, sources, toolDefinitions, userExtraScopes } from "../db/schema.js";
+import {
+  roleScopes,
+  roles,
+  scopes,
+  sources,
+  toolDefinitions,
+  userExtraScopes,
+} from "../db/schema.js";
 import type { Secrets } from "../vault/envelope.js";
 import { type ConnectionInfo, writeAbilities } from "./engines.js";
 
@@ -190,12 +197,21 @@ export async function saveSource(
         target: sources.code,
         set: { ...values, updatedAt: sql`now()` },
       });
-    // The admin then grants it to the roles that may read this source's data
+    // The admin role holds every permission; the admin then grants this one to the roles that
+    // may read this source's data
     const description = `Usar las herramientas de la fuente ${input.name}`;
-    await tx
+    const [scope] = await tx
       .insert(scopes)
       .values({ code: sourceScope(input.code), description, sensitive: true, createdBy: userId })
-      .onConflictDoUpdate({ target: scopes.code, set: { description } });
+      .onConflictDoUpdate({ target: scopes.code, set: { description } })
+      .returning({ id: scopes.id });
+    const [admin] = await tx.select({ id: roles.id }).from(roles).where(eq(roles.code, "admin"));
+    if (scope && admin) {
+      await tx
+        .insert(roleScopes)
+        .values({ roleId: admin.id, scopeId: scope.id })
+        .onConflictDoNothing();
+    }
   });
 }
 

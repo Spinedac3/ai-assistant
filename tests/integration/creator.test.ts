@@ -10,7 +10,7 @@ import { buildQuery } from "../../src/creator/sql.js";
 import { CreatedTools, saveDefinition } from "../../src/creator/store.js";
 import { toolFrom } from "../../src/creator/tool.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { roleScopes, scopes, toolDefinitions } from "../../src/db/schema.js";
+import { roleScopes, roles, scopes, toolDefinitions } from "../../src/db/schema.js";
 import { type EngineName, runQuery } from "../../src/sources/engines.js";
 import { deleteSource, saveSource, sourceScope } from "../../src/sources/registry.js";
 import { calculateTool } from "../../src/tools/native/calculate.js";
@@ -237,7 +237,14 @@ describe("creator on the demo engines", () => {
       .select()
       .from(scopes)
       .where(eq(scopes.code, "sources.temporal.use"));
-    await database.db.insert(roleScopes).values({ roleId: 1, scopeId: scope?.id ?? 0 });
+    // The admin role holds it on its own; another role gets it as the admin would grant it
+    const [admin] = await database.db.select().from(roles).where(eq(roles.code, "admin"));
+    const [user] = await database.db.select().from(roles).where(eq(roles.code, "user"));
+    const heldByAdmin = await database.db
+      .select()
+      .from(roleScopes)
+      .where(eq(roleScopes.roleId, admin?.id ?? 0));
+    await database.db.insert(roleScopes).values({ roleId: user?.id ?? 0, scopeId: scope?.id ?? 0 });
     await saveDefinition(database.db, {
       name: "temporal_pedidos",
       sourceCode: "temporal",
@@ -266,6 +273,7 @@ describe("creator on the demo engines", () => {
       sensitive: true,
       description: "Usar las herramientas de la fuente Temporal",
     });
+    expect(heldByAdmin.some((grant) => grant.scopeId === scope?.id)).toBe(true);
     expect(inUse).toBe("in_use");
     expect(deleted).toBe("deleted");
     expect(left).toEqual([]);
