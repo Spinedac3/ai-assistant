@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "../db/client.js";
 import { rateLimits } from "../db/schema.js";
 
@@ -42,7 +42,55 @@ function windowStart(window: "hour" | "day", timeZone: string) {
 }
 
 /**
- * Rejects a new message when the user already used up a window
+ * Adds to the user's counters of one window and returns them
+ *
+ * @param   db              Own database
+ * @param   userId          Person
+ * @param   window          Hour or day
+ * @param   timeZone        Application time zone
+ * @param   messages        Messages to add
+ * @param   tokens          Tokens to add
+ * @param   costMillionths  Cost to add
+ *
+ * @return  The counters after adding
+ */
+async function bump(
+  db: Database,
+  userId: number,
+  window: "hour" | "day",
+  timeZone: string,
+  messages: number,
+  tokens: number,
+  costMillionths: number,
+) {
+  const [row] = await db
+    .insert(rateLimits)
+    .values({
+      userId,
+      windowType: window,
+      windowStart: windowStart(window, timeZone),
+      msgCount: messages,
+      tokensUsed: tokens,
+      costMillionths,
+    })
+    .onConflictDoUpdate({
+      target: [rateLimits.userId, rateLimits.windowType, rateLimits.windowStart],
+      set: {
+        msgCount: sql`${rateLimits.msgCount} + ${messages}`,
+        tokensUsed: sql`${rateLimits.tokensUsed} + ${tokens}`,
+        costMillionths: sql`${rateLimits.costMillionths} + ${costMillionths}`,
+      },
+    })
+    .returning({ msgCount: rateLimits.msgCount, tokensUsed: rateLimits.tokensUsed });
+
+  return row ?? { msgCount: 0, tokensUsed: 0 };
+}
+
+/**
+ * Counts a new message and rejects it when it goes over a quota
+ *
+ * Counting first and checking after is one atomic step per window, so parallel messages cannot
+ * all slip through on the same remaining unit.
  *
  * @param   db        Own database
  * @param   userId    Person sending
@@ -51,36 +99,40 @@ function windowStart(window: "hour" | "day", timeZone: string) {
  *
  * @throws  RateLimitExceededError
  */
-export async function assertCanSend(
+export async function reserveMessage(
   db: Database,
   userId: number,
   limits: RateLimits,
   timeZone: string,
 ): Promise<void> {
-  const [usage] = await db
-    .select({
-      hourMsgs: sql<number>`coalesce(sum(${rateLimits.msgCount}) filter (where ${rateLimits.windowType} = 'hour' and ${rateLimits.windowStart} = ${windowStart("hour", timeZone)}), 0)`,
-      dayMsgs: sql<number>`coalesce(sum(${rateLimits.msgCount}) filter (where ${rateLimits.windowType} = 'day' and ${rateLimits.windowStart} = ${windowStart("day", timeZone)}), 0)`,
-      dayTokens: sql<number>`coalesce(sum(${rateLimits.tokensUsed}) filter (where ${rateLimits.windowType} = 'day' and ${rateLimits.windowStart} = ${windowStart("day", timeZone)}), 0)`,
-    })
+  const [today] = await db
+    .select({ tokensUsed: rateLimits.tokensUsed })
     .from(rateLimits)
-    .where(eq(rateLimits.userId, userId));
+    .where(
+      and(
+        eq(rateLimits.userId, userId),
+        eq(rateLimits.windowType, "day"),
+        eq(rateLimits.windowStart, windowStart("day", timeZone)),
+      ),
+    );
 
-  if (Number(usage?.hourMsgs ?? 0) >= limits.msgsPerHour) {
+  if ((today?.tokensUsed ?? 0) >= limits.tokensPerDay) {
+    throw new RateLimitExceededError("day", "tokens");
+  }
+
+  const hour = await bump(db, userId, "hour", timeZone, 1, 0, 0);
+  if (hour.msgCount > limits.msgsPerHour) {
     throw new RateLimitExceededError("hour", "messages");
   }
 
-  if (Number(usage?.dayMsgs ?? 0) >= limits.msgsPerDay) {
+  const day = await bump(db, userId, "day", timeZone, 1, 0, 0);
+  if (day.msgCount > limits.msgsPerDay) {
     throw new RateLimitExceededError("day", "messages");
-  }
-
-  if (Number(usage?.dayTokens ?? 0) >= limits.tokensPerDay) {
-    throw new RateLimitExceededError("day", "tokens");
   }
 }
 
 /**
- * Counts one answered message against the user's hour and day windows
+ * Adds the tokens and cost a turn consumed, whether it answered or not
  *
  * @param   db              Own database
  * @param   userId          Person who sent it
@@ -88,7 +140,7 @@ export async function assertCanSend(
  * @param   costMillionths  Cost of the turn
  * @param   timeZone        Application time zone
  */
-export async function recordUsage(
+export async function recordTokens(
   db: Database,
   userId: number,
   tokens: number,
@@ -96,23 +148,6 @@ export async function recordUsage(
   timeZone: string,
 ): Promise<void> {
   for (const window of ["hour", "day"] as const) {
-    await db
-      .insert(rateLimits)
-      .values({
-        userId,
-        windowType: window,
-        windowStart: windowStart(window, timeZone),
-        msgCount: 1,
-        tokensUsed: tokens,
-        costMillionths,
-      })
-      .onConflictDoUpdate({
-        target: [rateLimits.userId, rateLimits.windowType, rateLimits.windowStart],
-        set: {
-          msgCount: sql`${rateLimits.msgCount} + 1`,
-          tokensUsed: sql`${rateLimits.tokensUsed} + ${tokens}`,
-          costMillionths: sql`${rateLimits.costMillionths} + ${costMillionths}`,
-        },
-      });
+    await bump(db, userId, window, timeZone, 0, tokens, costMillionths);
   }
 }
