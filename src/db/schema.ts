@@ -197,3 +197,11 @@ export const rateLimits = pgTable(
   },
   (t) => [primaryKey({ columns: [t.userId, t.windowType, t.windowStart] })],
 );
+
+// Settings an administrator changes at runtime, read on every use so no restart is needed
+export const settings = pgTable("settings", {
+  key: varchar("key", { length: 100 }).primaryKey(),
+  value: jsonb("value").notNull(),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  updatedBy: integer("updated_by"),
+});

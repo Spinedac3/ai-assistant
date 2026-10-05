@@ -4,6 +4,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
 import { type CliCommand, cliArgs, launchCli } from "../llm/cli.js";
 import { MCP_SERVER } from "../mcp/names.js";
+import { readSetting } from "../settings.js";
 import {
   claimsUnsourcedFigures,
   cutOffAnswer,
@@ -116,6 +117,7 @@ export function displayToolName(name: string, input: Record<string, unknown>): s
  * Runs one CLI process and yields what happens while it works
  *
  * @param   deps            Chat dependencies
+ * @param   model           Model for this turn
  * @param   workspace       Conversation workspace
  * @param   prompt          Text sent to the CLI
  * @param   continueSession Whether to resume the workspace's session
@@ -125,6 +127,7 @@ export function displayToolName(name: string, input: Record<string, unknown>): s
  */
 async function* runCli(
   deps: ChatDependencies,
+  model: string,
   workspace: string,
   prompt: string,
   continueSession: boolean,
@@ -134,7 +137,7 @@ async function* runCli(
     deps.cli,
     cliArgs({
       prompt,
-      model: deps.model,
+      model,
       maxTurns: MAX_TURNS,
       continueSession,
       mcpConfigPath: join(workspace, ".mcp.json"),
@@ -303,6 +306,9 @@ export async function* chatTurn(
     writeFileSync(join(workspace, ".mcp.json"), JSON.stringify({ mcpServers: {} }));
   }
 
+  // Read every turn, so a change in administration applies to the next message
+  const model = (await readSetting(db, "chat.model")) ?? deps.model;
+
   try {
     let retryingSilence = false;
 
@@ -314,7 +320,7 @@ export async function* chatTurn(
       const seen: TurnEvent[] = [];
       let text = "";
 
-      const run = runCli(deps, workspace, prompt, resume, abortSignal);
+      const run = runCli(deps, model, workspace, prompt, resume, abortSignal);
       let step = await run.next();
 
       while (!step.done) {

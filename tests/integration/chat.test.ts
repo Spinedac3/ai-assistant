@@ -20,6 +20,7 @@ const scenario = join(scratch, "scenario.json");
 let database: DatabaseHandle;
 let app: FastifyInstance;
 let token: string;
+let adminToken: string;
 
 interface Run {
   steps?: Array<{ text?: string; tool?: string; id?: string; ok?: boolean }>;
@@ -43,7 +44,7 @@ function script(...runs: Run[]): void {
  *
  * @return  One entry per invocation
  */
-function calls(): Array<{ continued: boolean; prompt: string }> {
+function calls(): Array<{ continued: boolean; model: string; prompt: string }> {
   const path = `${scenario}.calls`;
 
   return existsSync(path)
@@ -101,6 +102,20 @@ describe("chat", () => {
       payload: { email: "ana@example.com", password: PASSWORD },
     });
     token = login.json().data.token;
+
+    const [admin] = await database.db.select().from(roles).where(eq(roles.code, "admin"));
+    await database.db.insert(users).values({
+      email: "beto@example.com",
+      displayName: "Beto Ruiz",
+      passwordHash: await hashPassword(PASSWORD),
+      primaryRoleId: admin?.id ?? null,
+    });
+    const adminLogin = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: { email: "beto@example.com", password: PASSWORD },
+    });
+    adminToken = adminLogin.json().data.token;
   });
 
   beforeEach(async () => {
@@ -256,5 +271,42 @@ describe("chat", () => {
     expect(withoutComment.json().error).toBe("comment_required");
     expect(withComment.statusCode).toBe(200);
     expect(missing.statusCode).toBe(404);
+  });
+
+  it("uses the model chosen in administration from the next message on", async () => {
+    // Performs the test.
+    script({ steps: [{ text: "Hola." }] });
+    await send("hola");
+    const change = await app.inject({
+      method: "PUT",
+      url: "/admin/settings/chat.model",
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: { value: "claude-opus-5-5" },
+    });
+    await send("hola de nuevo");
+
+    // Performs assertions.
+    expect(change.statusCode).toBe(200);
+    expect(calls().map((call) => call.model)).toEqual(["fake", "claude-opus-5-5"]);
+  });
+
+  it("lets only administrators change settings, and only to valid values", async () => {
+    // Performs the test.
+    const put = (bearer: string, key: string, value: unknown) =>
+      app.inject({
+        method: "PUT",
+        url: `/admin/settings/${key}`,
+        headers: { authorization: `Bearer ${bearer}` },
+        payload: { value },
+      });
+    const byUser = await put(token, "chat.model", "claude-opus-5-5");
+    const invalid = await put(adminToken, "chat.model", "gpt-5; rm -rf /");
+    const unknown = await put(adminToken, "chat.temperature", 1);
+
+    // Performs assertions.
+    expect(byUser.statusCode).toBe(403);
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().message).toBe("Modelo de Claude no reconocido");
+    expect(unknown.statusCode).toBe(404);
   });
 });

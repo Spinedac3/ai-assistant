@@ -3,6 +3,7 @@ import type { ExternalSystem } from "./auth/externalSystems.js";
 import type { TokenSigner } from "./auth/tokens.js";
 import type { Database } from "./db/client.js";
 import authPlugin from "./plugins/auth.js";
+import adminRoutes from "./routes/admin.js";
 import authRoutes from "./routes/auth.js";
 import chatRoutes, { type ChatRoutesOptions } from "./routes/chat.js";
 
@@ -29,6 +30,7 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   await app.register(authPlugin, { db: deps.db, signer: deps.signer });
   await app.register(authRoutes, { db: deps.db, signer: deps.signer, systems: deps.systems });
+  await app.register(adminRoutes, { db: deps.db });
 
   if (deps.chat) {
     await app.register(chatRoutes, { ...deps.chat, db: deps.db });

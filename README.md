@@ -55,6 +55,10 @@ consultar fuentes". Si el modelo anuncia una consulta y no la hace, escribe llam
 afirma cifras sin fuente, el turno se reintenta en una sesión nueva; si vuelve a pasar, se responde
 que no se pudo, nunca un dato inventado.
 
+El modelo se elige en la administración (`PUT /admin/settings/chat.model`, permiso
+`settings.manage`) y aplica desde el siguiente mensaje, sin reiniciar. Si nadie lo eligió se usa
+`CHAT_MODEL`, que por defecto es `claude-opus-5-5`.
+
 En Windows, `CLAUDE_BIN` tiene que apuntar al `claude.exe` real: Node no ejecuta el
 `claude.cmd` sin una shell.
 

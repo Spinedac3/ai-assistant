@@ -19,7 +19,7 @@ const envSchema = z.object({
   // Markdown with what the organization is, its vocabulary and what the assistant covers
   ASSISTANT_CONTEXT_FILE: z.string().min(1).optional(),
   CLAUDE_BIN: z.string().min(1).default("claude"),
-  CHAT_MODEL: z.string().min(1).default("sonnet"),
+  CHAT_MODEL: z.string().min(1).default("claude-opus-5-5"),
   CHAT_WORKSPACES_DIR: z.string().min(1).optional(),
   RATE_LIMIT_MSGS_PER_HOUR: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_MSGS_PER_DAY: z.coerce.number().int().positive().default(300),

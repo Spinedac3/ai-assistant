@@ -11,7 +11,11 @@ writeFileSync(counterPath, String(index + 1));
 const promptAt = args.indexOf("-p");
 appendFileSync(
   `${scenarioPath}.calls`,
-  `${JSON.stringify({ continued: args.includes("--continue"), prompt: args[promptAt + 1] ?? "" })}\n`,
+  `${JSON.stringify({
+    continued: args.includes("--continue"),
+    model: args[args.indexOf("--model") + 1],
+    prompt: args[promptAt + 1] ?? "",
+  })}\n`,
 );
 
 const run = runs[Math.min(index, runs.length - 1)];

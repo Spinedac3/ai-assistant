@@ -6,6 +6,11 @@ import { roleScopes, roles, scopes } from "./schema.js";
 const SCOPES = [
   { code: "chat.use", description: "Conversar con el asistente", sensitive: false },
   { code: "users.manage", description: "Administrar usuarios, roles y permisos", sensitive: true },
+  {
+    code: "settings.manage",
+    description: "Cambiar la configuración del asistente",
+    sensitive: true,
+  },
 ];
 
 const ROLES = [
