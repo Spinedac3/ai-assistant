@@ -1,9 +1,11 @@
-import { and, eq, gt, isNull, sql } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
+import { and, eq, gt, isNull, ne, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
 import { generateToken, hashToken } from "../auth/opaqueTokens.js";
 import { hashPassword, passwordProblem } from "../auth/password.js";
+import { resetHeaders, resetPage } from "../auth/resetPage.js";
 import type { Database } from "../db/client.js";
 import { passwordResets, users } from "../db/schema.js";
 import type { SendMail } from "../notices/mailer.js";
@@ -50,24 +52,36 @@ export default async function passwordResetRoutes(
         .send({ ok: false, error: "mail_off", message: "No hay servidor de correo configurado" });
     }
     const [user] = await db
-      .select({ id: users.id, email: users.email, name: users.displayName })
+      .select({
+        id: users.id,
+        email: users.email,
+        name: users.displayName,
+        passwordHash: users.passwordHash,
+      })
       .from(users)
-      .where(and(eq(users.id, params.data.id), eq(users.active, true)));
+      .where(and(eq(users.id, params.data.id), eq(users.active, true), isNull(users.deletedAt)));
     if (!user) {
       return reply.code(404).send({ ok: false, error: "user_not_found" });
     }
+    // Giving it a password would open a door its external system controls (and may close)
+    if (user.passwordHash === null) {
+      return reply.code(409).send({
+        ok: false,
+        error: "external_account",
+        message: "Esta cuenta entra por un sistema externo; no tiene contraseña propia",
+      });
+    }
 
-    // Only the newest link works, so a mail sent by mistake is undone by sending another
-    await db
-      .delete(passwordResets)
-      .where(and(eq(passwordResets.userId, user.id), isNull(passwordResets.usedAt)));
     const token = generateToken("asp");
-    await db.insert(passwordResets).values({
-      userId: user.id,
-      tokenHash: hashToken(token),
-      expiresAt: new Date(Date.now() + LINK_MINUTES * 60_000),
-      createdBy: request.authUser?.id ?? 0,
-    });
+    const [link] = await db
+      .insert(passwordResets)
+      .values({
+        userId: user.id,
+        tokenHash: hashToken(token),
+        expiresAt: sql`now() + make_interval(mins => ${LINK_MINUTES})`,
+        createdBy: request.authUser?.id ?? 0,
+      })
+      .returning({ id: passwordResets.id });
 
     try {
       // In the fragment, the token never reaches a server log or a Referer header
@@ -80,6 +94,7 @@ export default async function passwordResetRoutes(
           "Si no lo pediste, ignora este correo; tu contraseña actual sigue igual.",
       });
     } catch (error) {
+      await db.delete(passwordResets).where(eq(passwordResets.id, link?.id ?? 0));
       request.log.warn({ err: error }, "password reset mail failed");
       return reply.code(502).send({
         ok: false,
@@ -88,6 +103,17 @@ export default async function passwordResetRoutes(
       });
     }
 
+    // Only the newest link works, so a mail sent by mistake is undone by sending another; dropped
+    // only once the new one went out, so a failed send leaves the person the link they had
+    await db
+      .delete(passwordResets)
+      .where(
+        and(
+          eq(passwordResets.userId, user.id),
+          isNull(passwordResets.usedAt),
+          ne(passwordResets.id, link?.id ?? 0),
+        ),
+      );
     await logAudit(db, {
       userId: request.authUser?.id ?? null,
       level: "info",
@@ -97,6 +123,11 @@ export default async function passwordResetRoutes(
     });
 
     return { ok: true };
+  });
+
+  app.get("/reset-password", async (_request, reply) => {
+    const nonce = randomBytes(16).toString("base64");
+    return reply.headers(resetHeaders(nonce)).send(resetPage(options.assistantName, nonce));
   });
 
   app.post("/auth/password-reset", async (request, reply) => {
@@ -112,18 +143,16 @@ export default async function passwordResetRoutes(
       });
 
     const tokenHash = hashToken(body.data.token);
+    const usable = and(
+      eq(passwordResets.tokenHash, tokenHash),
+      isNull(passwordResets.usedAt),
+      gt(passwordResets.expiresAt, sql`now()`),
+    );
     const [found] = await db
       .select({ userId: users.id, email: users.email, name: users.displayName })
       .from(passwordResets)
       .innerJoin(users, eq(users.id, passwordResets.userId))
-      .where(
-        and(
-          eq(passwordResets.tokenHash, tokenHash),
-          isNull(passwordResets.usedAt),
-          gt(passwordResets.expiresAt, sql`now()`),
-          eq(users.active, true),
-        ),
-      );
+      .where(and(usable, eq(users.active, true), isNull(users.deletedAt)));
     if (!found) {
       return invalid();
     }
@@ -134,33 +163,30 @@ export default async function passwordResetRoutes(
       return reply.code(400).send({ ok: false, error: "weak_password", message: problem });
     }
 
-    // Spending the link is the single atomic step: two requests with it cannot both pass
-    const spent = await db
-      .update(passwordResets)
-      .set({ usedAt: new Date() })
-      .where(
-        and(
-          eq(passwordResets.tokenHash, tokenHash),
-          isNull(passwordResets.usedAt),
-          gt(passwordResets.expiresAt, sql`now()`),
-        ),
-      )
-      .returning({ id: passwordResets.id });
-    if (spent.length === 0) {
+    const passwordHash = await hashPassword(body.data.password);
+    // Whole seconds, as tokens carry their issue time; whoever held the account is logged out
+    const revokedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+    // Spending the link and saving the password happen together or not at all, and the spend is
+    // conditional, so two requests with one link cannot both pass
+    const done = await db.transaction(async (tx) => {
+      const spent = await tx
+        .update(passwordResets)
+        .set({ usedAt: sql`now()` })
+        .where(usable)
+        .returning({ id: passwordResets.id });
+      if (spent.length === 0) {
+        return false;
+      }
+      await tx
+        .update(users)
+        .set({ passwordHash, failedLogins: 0, lockedUntil: null, tokensRevokedAt: revokedAt })
+        .where(eq(users.id, found.userId));
+      return true;
+    });
+    if (!done) {
       return invalid();
     }
 
-    // Whoever held the account before the reset is logged out
-    await db
-      .update(users)
-      .set({
-        passwordHash: await hashPassword(body.data.password),
-        failedLogins: 0,
-        lockedUntil: null,
-        // Whole seconds, as the sessions revoke stores it
-        tokensRevokedAt: sql`date_trunc('second', now())`,
-      })
-      .where(eq(users.id, found.userId));
     await logAudit(db, {
       userId: found.userId,
       level: "info",
@@ -168,6 +194,9 @@ export default async function passwordResetRoutes(
       message: "Contraseña nueva puesta con el enlace",
       ip: request.ip,
     });
+    // A token issued in the revoked second would be born revoked; the answer waits that second out
+    // so the login that usually follows works
+    await new Promise((resolve) => setTimeout(resolve, revokedAt.getTime() + 1_000 - Date.now()));
 
     return { ok: true };
   });

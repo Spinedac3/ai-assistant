@@ -14,7 +14,7 @@ import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
 import { smtpMailer } from "./notices/mailer.js";
-import { startNoticeWorker } from "./notices/outbox.js";
+import { purgeNotices, startNoticeWorker } from "./notices/outbox.js";
 import { startWorker } from "./rag/jobs.js";
 import { indexFrom, s3Config, storageFrom } from "./rag/services.js";
 import { readSetting } from "./settings.js";
@@ -53,6 +53,7 @@ const mailer = env.SMTP_HOST
       from: env.SMTP_FROM ?? "",
       user: env.SMTP_USER,
       passwordFile: env.SMTP_PASSWORD_FILE,
+      insecure: env.SMTP_INSECURE,
     })
   : null;
 if (mailer) {
@@ -142,11 +143,17 @@ await createdTools
   .load()
   .catch((error) => app.log.error({ err: error }, "created tools could not load"));
 
-// Questions from external clients are kept only for the retention period
+// Questions from external clients are kept only for the retention period, notices a month
 const purge = () =>
-  purgeIntents(database.db, env.MCP_INTENT_RETENTION_DAYS).catch((error) =>
-    app.log.error({ err: error }, "intent purge failed"),
-  );
+  Promise.all([
+    purgeIntents(database.db, env.MCP_INTENT_RETENTION_DAYS).catch((error) =>
+      app.log.error({ err: error }, "intent purge failed"),
+    ),
+    // Old notices carry their text; spent reset links are of no use
+    purgeNotices(database.db).catch((error) =>
+      app.log.error({ err: error }, "notice purge failed"),
+    ),
+  ]);
 void purge();
 const purgeTimer = setInterval(purge, 6 * 3_600_000);
 purgeTimer.unref();

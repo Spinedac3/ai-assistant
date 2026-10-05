@@ -58,7 +58,12 @@ const envSchema = z
     SMTP_PORT: z.coerce.number().int().positive().default(587),
     SMTP_USER: z.string().min(1).optional(),
     SMTP_PASSWORD_FILE: z.string().min(1).optional(),
-    SMTP_FROM: z.string().min(3).optional(),
+    SMTP_FROM: z.string().includes("@").optional(),
+    // Only for a local mail catcher; refused in production
+    SMTP_INSECURE: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     NOTICES_WORKER_POLL_MS: z.coerce.number().int().positive().default(10_000),
     ...ragSchema.shape,
   })
@@ -80,6 +85,25 @@ const envSchema = z
         code: "custom",
         path: ["SMTP_FROM"],
         message: "Con SMTP_HOST hace falta la dirección que envía (SMTP_FROM)",
+      });
+    }
+    if (env.NODE_ENV === "production" && env.SMTP_INSECURE) {
+      context.addIssue({
+        code: "custom",
+        path: ["SMTP_INSECURE"],
+        message: "En producción el correo siempre va cifrado",
+      });
+    }
+    // The reset link points here; over http or to localhost it would leak or lead nowhere
+    if (
+      env.NODE_ENV === "production" &&
+      env.SMTP_HOST &&
+      !env.PUBLIC_BASE_URL?.startsWith("https://")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["PUBLIC_BASE_URL"],
+        message: "Con correo en producción hace falta PUBLIC_BASE_URL con https",
       });
     }
     if (env.SMTP_USER && !env.SMTP_PASSWORD_FILE) {

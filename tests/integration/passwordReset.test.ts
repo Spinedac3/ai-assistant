@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
@@ -20,6 +20,7 @@ const ana = `ana-${run}@example.com`;
 let database: DatabaseHandle;
 let app: FastifyInstance;
 let quiet: FastifyInstance;
+let failing: FastifyInstance;
 let adminToken: string;
 let anaId: number;
 
@@ -117,6 +118,16 @@ describe("password reset by mail", () => {
       ...deps,
       passwordReset: { mailer: null, publicBaseUrl: "https://x.example.com", assistantName: "x" },
     });
+    failing = await buildApp({
+      ...deps,
+      passwordReset: {
+        mailer: async () => {
+          throw new Error("421 servicio no disponible");
+        },
+        publicBaseUrl: "https://assistant.example.com",
+        assistantName: "Lumen",
+      },
+    });
     await createUser(`admin-${run}@example.com`, "admin");
     anaId = await createUser(ana, "user");
     adminToken = (await login(`admin-${run}@example.com`)).json().data.token;
@@ -125,6 +136,7 @@ describe("password reset by mail", () => {
   afterAll(async () => {
     await app.close();
     await quiet.close();
+    await failing.close();
     await database.close();
   });
 
@@ -150,27 +162,55 @@ describe("password reset by mail", () => {
     expect(done.json()).toEqual({ ok: true });
     expect(again.json()).toMatchObject({ error: "invalid_link" });
     expect(oldSession.statusCode).toBe(401);
-    expect((await login(ana, NEW_PASSWORD)).statusCode).toBe(200);
     expect((await login(ana)).statusCode).toBe(401);
+    // The session opened right after the reset is not born revoked
+    const after = (await login(ana, NEW_PASSWORD)).json().data.token;
+    const newSession = await app.inject({
+      url: "/auth/me",
+      headers: { authorization: `Bearer ${after}` },
+    });
+    expect(newSession.statusCode).toBe(200);
   });
 
-  it("keeps only the newest link alive, and never an expired one", async () => {
+  it("keeps only the newest link alive, never an expired one, and keeps the old one when the new one fails", async () => {
     // Performs the test.
     await sendLink(anaId);
     const first = await lastLinkToken(ana);
     await sendLink(anaId);
     const second = await lastLinkToken(ana);
+    const replaced = await reset(first);
+    const failedSend = await sendLink(anaId, adminToken, failing);
+    const kept = await database.db
+      .select({ id: passwordResets.id })
+      .from(passwordResets)
+      .where(and(eq(passwordResets.userId, anaId), isNull(passwordResets.usedAt)));
     await database.db
       .update(passwordResets)
       .set({ expiresAt: sql`now() - interval '1 minute'` })
       .where(eq(passwordResets.userId, anaId));
-    const replaced = await reset(first);
     const expired = await reset(second);
 
     // Performs assertions.
     expect(first).not.toBe(second);
     expect(replaced.json()).toMatchObject({ error: "invalid_link" });
+    expect(failedSend.json()).toMatchObject({ error: "mail_failed" });
+    expect(kept).toHaveLength(1);
     expect(expired.json()).toMatchObject({ error: "invalid_link" });
+  });
+
+  it("opens a page that reads the link and runs only its own script", async () => {
+    // Performs the test.
+    const page = await app.inject({ url: "/reset-password" });
+    const nonce = page.headers["content-security-policy"]?.toString().match(/'nonce-([^']+)'/)?.[1];
+
+    // Performs assertions.
+    expect(page.statusCode).toBe(200);
+    expect(page.headers["content-type"]).toContain("text/html");
+    expect(page.headers["referrer-policy"]).toBe("no-referrer");
+    expect(nonce).toBeTruthy();
+    expect(page.body).toContain(`<script nonce="${nonce}">`);
+    expect(page.body).toContain('fetch("/auth/password-reset"');
+    expect(page.body).toContain("Nueva contraseña para Lumen");
   });
 
   it("is only for whoever manages users, to an active account, with a mail server", async () => {
@@ -178,13 +218,24 @@ describe("password reset by mail", () => {
     await createUser(`beto-${run}@example.com`, "user");
     const betoToken = (await login(`beto-${run}@example.com`)).json().data.token;
     const inactive = await createUser(`ida-${run}@example.com`, "user", false);
+    const deleted = await createUser(`eli-${run}@example.com`, "user");
+    await database.db.update(users).set({ deletedAt: new Date() }).where(eq(users.id, deleted));
+    const [external] = await database.db
+      .insert(users)
+      .values({ email: `sso-${run}@example.com`, displayName: "Por SSO" })
+      .returning({ id: users.id });
     const notAllowed = await sendLink(anaId, betoToken);
     const toInactive = await sendLink(inactive);
+    const toDeleted = await sendLink(deleted);
+    const toExternal = await sendLink(external?.id ?? 0);
     const noMail = await sendLink(anaId, adminToken, quiet);
 
     // Performs assertions.
     expect(notAllowed.statusCode).toBe(403);
     expect(toInactive.statusCode).toBe(404);
+    expect(toDeleted.statusCode).toBe(404);
+    expect(toExternal.json()).toMatchObject({ error: "external_account" });
+    expect(await mailsTo(`sso-${run}@example.com`)).toEqual([]);
     expect(noMail.json()).toMatchObject({ error: "mail_off" });
     expect(await mailsTo(`ida-${run}@example.com`)).toEqual([]);
   });

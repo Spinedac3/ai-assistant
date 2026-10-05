@@ -6,6 +6,8 @@ export interface Mail {
   subject: string;
   // Plain text; the HTML part is the same text, escaped
   text: string;
+  // Where an answer goes, when not to the sending address
+  replyTo?: string;
 }
 
 export type SendMail = (mail: Mail) => Promise<void>;
@@ -16,6 +18,8 @@ export interface SmtpConfig {
   from: string;
   user?: string;
   passwordFile?: string;
+  // Only for a local catcher such as Mailpit: allows a server without TLS
+  insecure?: boolean;
 }
 
 // A server that accepts the connection and then never answers would hold the worker forever
@@ -51,8 +55,8 @@ export function smtpMailer(config: SmtpConfig): SendMail {
     port: config.port,
     // 465 speaks TLS from the start; any other port upgrades with STARTTLS
     secure: config.port === 465,
-    // A password never travels in clear text
-    requireTLS: config.user !== undefined && config.port !== 465,
+    // Reset links and passwords never travel in clear text, even through a relay without login
+    requireTLS: config.port !== 465 && !config.insecure,
     auth:
       config.user !== undefined
         ? {
@@ -72,6 +76,7 @@ export function smtpMailer(config: SmtpConfig): SendMail {
       subject: mail.subject,
       text: mail.text,
       html: textToHtml(mail.text),
+      replyTo: mail.replyTo,
     });
   };
 }

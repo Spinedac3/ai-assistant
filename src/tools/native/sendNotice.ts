@@ -28,8 +28,9 @@ export function sendNoticeTool(db: Database): Tool {
         "carries a key you choose: the same key sent again is not delivered twice, so retrying " +
         "is safe. Delivery happens in the background and is retried if the mail server fails. " +
         `A person receives at most ${NOTICES_PER_RECIPIENT_HOUR} notices an hour. Each notice comes back as ` +
-        "queued, duplicate (key already used), unknown_recipient (no active account with that " +
-        "address) or over_quota.",
+        "queued, duplicate (key already used), already_failed (key used by a notice that could " +
+        "not be delivered; send it again with a new key), unknown_recipient (no active account " +
+        "with that address) or over_quota. The mail names you as its sender.",
       inputSchema: {
         type: "object",
         properties: {
@@ -76,7 +77,13 @@ export function sendNoticeTool(db: Database): Tool {
                 to: { type: "string" },
                 outcome: {
                   type: "string",
-                  enum: ["queued", "duplicate", "unknown_recipient", "over_quota"],
+                  enum: [
+                    "queued",
+                    "duplicate",
+                    "already_failed",
+                    "unknown_recipient",
+                    "over_quota",
+                  ],
                 },
               },
               required: ["key", "to", "outcome"],
@@ -91,18 +98,13 @@ export function sendNoticeTool(db: Database): Tool {
     },
     execute: async (args, context) => {
       const requests = (args as { notices: NoticeRequest[] }).notices;
-      const outcomes = await enqueueNotices(db, context.userId, requests);
-      const results = requests.map((request, index) => ({
-        key: request.key,
-        to: request.to,
-        outcome: outcomes[index] ?? "unknown_recipient",
-      }));
+      const results = await enqueueNotices(db, context.userId, requests);
 
       return {
         ok: true,
         data: {
           notices: results,
-          queued: outcomes.filter((outcome) => outcome === "queued").length,
+          queued: results.filter((result) => result.outcome === "queued").length,
         },
         rows: results.length,
       };

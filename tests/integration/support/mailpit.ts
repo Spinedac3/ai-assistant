@@ -4,6 +4,7 @@ export const MAILPIT_SMTP = {
   host: "localhost",
   port: 1025,
   from: "Asistente <asistente@example.com>",
+  insecure: true,
 };
 
 export interface CaughtMail {
@@ -11,6 +12,7 @@ export interface CaughtMail {
   text: string;
   html: string;
   from: string;
+  replyTo: string | null;
 }
 
 /**
@@ -22,7 +24,7 @@ export interface CaughtMail {
  */
 export async function mailsTo(to: string): Promise<CaughtMail[]> {
   const search = (await (
-    await fetch(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${to}"`)}`)
+    await fetch(`${MAILPIT}/api/v1/search?query=${encodeURIComponent(`to:"${to}"`)}&limit=500`)
   ).json()) as { messages: { ID: string }[] };
 
   const mails: CaughtMail[] = [];
@@ -32,6 +34,7 @@ export async function mailsTo(to: string): Promise<CaughtMail[]> {
       Text: string;
       HTML: string;
       From: { Address: string };
+      ReplyTo: { Address: string }[];
     };
     mails.push({
       subject: message.Subject,
@@ -39,6 +42,7 @@ export async function mailsTo(to: string): Promise<CaughtMail[]> {
       text: message.Text.replaceAll("\r\n", "\n"),
       html: message.HTML.replaceAll("\r\n", "\n"),
       from: message.From.Address,
+      replyTo: message.ReplyTo[0]?.Address ?? null,
     });
   }
 
