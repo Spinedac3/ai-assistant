@@ -71,6 +71,8 @@ describe("calculate", () => {
     expect(evaluate("round(1.005, 2)")).toBe(1.01);
     expect(evaluate("round(-2.5, 0)")).toBe(-3);
     expect(roundHalfAway(0.0000001, 2)).toBe(0);
+    expect(roundHalfAway(123456789012, 10)).toBe(123456789012);
+    expect(roundHalfAway(1.2345e20, 2)).toBe(1.2345e20);
   });
 
   it("refuses a date that does not exist instead of rolling it over", async () => {

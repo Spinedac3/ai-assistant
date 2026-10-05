@@ -64,13 +64,19 @@ export function resolveDaysBetween(expression: string, timeZone: string): string
  * @return  The rounded number
  */
 export function roundHalfAway(value: number, digits: number): number {
+  const arithmetic = () =>
+    Math.sign(value) * (Math.round(Math.abs(value) * 10 ** digits) / 10 ** digits);
   const text = String(Math.abs(value));
   // Very small or large numbers already print in exponent form, where the text shift does not apply
   if (text.includes("e")) {
-    return Math.sign(value) * (Math.round(Math.abs(value) * 10 ** digits) / 10 ** digits);
+    return arithmetic();
   }
 
   const scaled = Math.round(Number(`${text}e${digits}`));
+  // Past 1e21 a double holds no digit at that decimal, so there is nothing left to round
+  if (String(scaled).includes("e")) {
+    return value;
+  }
 
   return Math.sign(value) * Number(`${scaled}e-${digits}`);
 }
