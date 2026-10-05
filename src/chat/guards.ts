@@ -34,22 +34,69 @@ export const TOOL_THEATER_SOURCE = String.raw`<(?:invoke|tool_result|available_t
 // A figure as written in an answer: digits with thousands, decimal, time or date separators
 export const FIGURE_SOURCE = String.raw`\d[\d.,:/]*`;
 
-// The numbering of a list item is layout, not a figure
-export const LIST_MARKER_SOURCE = String.raw`^\s*\d+[.)]\s`;
+// The numbering of a list item is layout, not a figure; two digits at most, so a year that opens
+// a line is still checked
+export const LIST_MARKER_SOURCE = String.raw`^\s*(?:\*\*)?\d{1,2}[.)](?:\*\*)?\s`;
 
 const TOOL_THEATER = new RegExp(TOOL_THEATER_SOURCE, "i");
 
+const MONTHS = [
+  "enero",
+  "febrero",
+  "marzo",
+  "abril",
+  "mayo",
+  "junio",
+  "julio",
+  "agosto",
+  "septiembre",
+  "octubre",
+  "noviembre",
+  "diciembre",
+];
+
 /**
- * Extracts the figures of a text, leaving out list numbering and trailing punctuation
+ * Writes ISO dates in the ways an answer usually quotes them
  *
- * @param   text  Answer text
+ * @param   isoDates  Dates the server itself gave the model
+ *
+ * @return  Every spelling, longest first, so a long one is removed before its parts
+ */
+export function dateSpellings(isoDates: readonly string[]): string[] {
+  const spellings = isoDates.flatMap((iso) => {
+    const [year, month, day] = iso.split("-");
+    const monthName = MONTHS[Number(month) - 1] ?? "";
+    const d = String(Number(day));
+    const m = String(Number(month));
+
+    return [
+      iso,
+      `${day}/${month}/${year}`,
+      `${d}/${m}/${year}`,
+      `${d} de ${monthName} de ${year}`,
+      `${d} de ${monthName}`,
+    ];
+  });
+
+  return [...new Set(spellings)].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Extracts the figures of a text, leaving out list numbering, given dates and trailing punctuation
+ *
+ * @param   text       Answer text
+ * @param   knownDates Exact spellings of dates the server gave the model
  *
  * @return  The figures in order
  */
-export function figuresIn(text: string): string[] {
-  const withoutNumbering = text.replace(new RegExp(LIST_MARKER_SOURCE, "gm"), "");
+export function figuresIn(text: string, knownDates: readonly string[] = []): string[] {
+  let remaining = text.replace(new RegExp(LIST_MARKER_SOURCE, "gm"), "");
 
-  return (withoutNumbering.match(new RegExp(FIGURE_SOURCE, "g")) ?? []).map((figure) =>
+  for (const date of knownDates) {
+    remaining = remaining.split(date).join(" ");
+  }
+
+  return (remaining.match(new RegExp(FIGURE_SOURCE, "g")) ?? []).map((figure) =>
     figure.replace(/[.,:/]+$/, ""),
   );
 }
@@ -91,8 +138,9 @@ export function isToolTheater(text: string): boolean {
  * Tells whether an answer states figures that no tool and no earlier message provided
  *
  * @param   answer         Text about to be delivered
- * @param   known          Question, instructions and earlier messages of the conversation
+ * @param   known          Question and earlier messages of the conversation
  * @param   toolsExecuted  Tools run in the turn
+ * @param   knownDates     Exact spellings of dates the server gave the model
  *
  * @return  Whether the answer has a figure without a source
  */
@@ -100,12 +148,17 @@ export function claimsUnsourcedFigures(
   answer: string,
   known: string,
   toolsExecuted: number,
+  knownDates: readonly string[] = [],
 ): boolean {
   if (toolsExecuted > 0) {
     return false;
   }
 
-  return figuresIn(answer).some((figure) => !known.includes(figure));
+  // Whole figures, separators aside: 1,240 matches 1240, but 20 never hides inside 2026
+  const digits = (figure: string) => figure.replace(/\D/g, "");
+  const knownFigures = new Set(figuresIn(known).map(digits));
+
+  return figuresIn(answer, knownDates).some((figure) => !knownFigures.has(digits(figure)));
 }
 
 /**
@@ -166,6 +219,7 @@ export function joinWithoutRepeats(blocks: readonly string[]): string {
 }
 
 export interface TurnEvent {
+  spentTokens?: number;
   text?: string;
   rejected?: true;
   toolResult?: { id: string; ok: boolean };

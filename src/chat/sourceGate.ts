@@ -5,9 +5,10 @@ import { FIGURE_SOURCE, LIST_MARKER_SOURCE, TOOL_THEATER_SOURCE } from "./guards
 
 // The CLI has no forced tool choice; a Stop hook that exits 2 keeps the model in the same turn.
 // It reads the trace, never the answer's claims: every figure must appear in the question, in a
-// tool call or result of this turn, in an earlier turn or in the workspace instructions. It blocks
-// once; the second time it lets the turn close and the outer guard decides. Plain CommonJS for node,
-// kept as a string so builds carry it; its patterns come from the guards so both judge alike.
+// tool result of this turn or in an earlier turn; only the exact dates the server handed the model
+// are exempt. The model's own tool arguments are not a source, or it could launder any number
+// through one. It blocks once; the second time it lets the turn close and the outer guard decides.
+// Plain CommonJS for node, kept as a string so builds carry it; its patterns come from the guards.
 export const SOURCE_GATE_SCRIPT = String.raw`#!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
@@ -26,8 +27,8 @@ process.stdin.on("end", () => {
   let tools = 0;
   let sources = "";
   const earlier = new Set();
-  // The dates and limits the server wrote into the instructions are not inventions
-  try { for (const run of fs.readFileSync(path.join(input.cwd || ".", "CLAUDE.md"), "utf8").match(/\d+/g) || []) earlier.add(run); } catch {}
+  let knownDates = [];
+  try { knownDates = JSON.parse(fs.readFileSync(path.join(input.cwd || ".", ".claude", "known-dates.json"), "utf8")); } catch {}
   for (const line of lines) {
     if (!line.trim()) continue;
     let event; try { event = JSON.parse(line); } catch { continue; }
@@ -41,7 +42,7 @@ process.stdin.on("end", () => {
       for (const block of message.content) if (block.type === "tool_result") sources += "\n" + JSON.stringify(block.content);
     }
     if (event.type === "assistant" && Array.isArray(message.content)) {
-      for (const block of message.content) if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith(PREFIX)) { tools++; sources += "\n" + JSON.stringify(block.input); }
+      for (const block of message.content) if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith(PREFIX)) tools++;
     }
   }
   const text = String(input.last_assistant_message || "");
@@ -49,7 +50,9 @@ process.stdin.on("end", () => {
   // A figure is backed when each digit run appears inside a run of the sources; earlier turns count whole runs only
   const sourceRuns = sources.match(/\d+/g) || [];
   const backed = (figure) => figure.split(/[.,:/]+/).filter(Boolean).every((run) => earlier.has(run) || sourceRuns.some((source) => source.includes(run)));
-  const figures = (text.replace(LIST_MARKER, "").match(FIGURE) || []).map((figure) => figure.replace(/[.,:/]+$/, ""));
+  let remaining = text.replace(LIST_MARKER, "");
+  for (const date of knownDates) remaining = remaining.split(date).join(" ");
+  const figures = (remaining.match(FIGURE) || []).map((figure) => figure.replace(/[.,:/]+$/, ""));
   const orphans = figures.filter((figure) => !backed(figure));
   if (!theater && orphans.length === 0) process.exit(0);
   const why = theater
@@ -74,14 +77,16 @@ process.stdin.on("end", () => {
 /**
  * Installs the source gate as a Stop hook in the workspace settings
  *
- * @param   workspace  CLI working directory
+ * @param   workspace   CLI working directory
+ * @param   knownDates  Exact spellings of the dates the server gives the model this turn
  */
-export function installSourceGate(workspace: string): void {
+export function installSourceGate(workspace: string, knownDates: readonly string[]): void {
   const dir = join(workspace, ".claude");
   mkdirSync(dir, { recursive: true });
 
   const script = join(dir, "source-gate.cjs");
   writeFileSync(script, SOURCE_GATE_SCRIPT);
+  writeFileSync(join(dir, "known-dates.json"), JSON.stringify(knownDates));
   writeFileSync(
     join(dir, "settings.json"),
     JSON.stringify({

@@ -1,18 +1,21 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { dateSpellings } from "../../src/chat/guards.js";
 import { SOURCE_GATE_SCRIPT } from "../../src/chat/sourceGate.js";
 
 const dir = mkdtempSync(join(tmpdir(), "source-gate-"));
 const script = join(dir, "gate.cjs");
 writeFileSync(script, SOURCE_GATE_SCRIPT);
-// The workspace instructions the server writes, with the dates it gives the model
+// What the server writes each turn: the exact dates it gave the model, and instructions full of numbers
+mkdirSync(join(dir, ".claude"));
 writeFileSync(
-  join(dir, "CLAUDE.md"),
-  "Fechas: hoy es 2026-10-04; esta semana va de 2026-09-28 a 2026-10-04.",
+  join(dir, ".claude", "known-dates.json"),
+  JSON.stringify(dateSpellings(["2026-10-04"])),
 );
+writeFileSync(join(dir, "CLAUDE.md"), "Regla 3: sé concisa, máximo 3 o 4 párrafos.");
 
 /**
  * Runs the hook against a transcript and a final message
@@ -113,32 +116,38 @@ describe("sourceGate", () => {
     ).toBe(0);
   });
 
-  it("accepts the dates the server wrote into the instructions", () => {
+  it("accepts the dates the server gave the model, in any usual spelling", () => {
+    // Performs the test.
+    const answer = "Hoy es 4 de octubre de 2026 (2026-10-04).";
+
     // Performs assertions.
-    expect(gate([question("¿qué fecha es?")], "Hoy es 2026-10-04.").code).toBe(0);
+    expect(gate([question("¿qué fecha es?")], answer).code).toBe(0);
   });
 
-  it("accepts a figure the model passed to the tool", () => {
+  it("does not take the numbers in the instructions as sources", () => {
+    // Performs the test.
+    const result = gate([question("¿cuántas facturas tengo?")], "Tienes 3 facturas vencidas.");
+
+    // Performs assertions.
+    expect(result.code).toBe(2);
+  });
+
+  it("blocks a figure laundered through the model's own tool argument", () => {
     // Performs the test.
     const call = {
       type: "assistant",
       message: {
         content: [
-          {
-            type: "tool_use",
-            name: "mcp__assistant__run_capability",
-            input: { since: "2026-07-01" },
-          },
+          { type: "tool_use", name: "mcp__assistant__run_capability", input: { limit: 500 } },
         ],
       },
     };
+    const result = gate(
+      [question("¿cuántos clientes hay?"), call, toolResult('{"rows":[]}')],
+      "Hay 500 clientes activos.",
+    );
 
     // Performs assertions.
-    expect(
-      gate(
-        [question("¿pedidos desde julio?"), call, toolResult('{"total":12}')],
-        "Desde 2026-07-01 hubo 12.",
-      ).code,
-    ).toBe(0);
+    expect(result.code).toBe(2);
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   claimsUnsourcedFigures,
   cutOffAnswer,
+  dateSpellings,
   figuresIn,
   finalAnswer,
   isHookRejection,
@@ -160,5 +161,35 @@ describe("figures", () => {
     expect(
       claimsUnsourcedFigures("Puedo:\n1. Buscar pedidos\n2. Ver rutas", "¿qué puedes hacer?", 0),
     ).toBe(false);
+  });
+});
+
+describe("figure matching", () => {
+  it("never lets a small figure hide inside a longer known one", () => {
+    // Performs assertions.
+    expect(claimsUnsourcedFigures("Hubo 20 ventas.", "¿qué pasó el 2026-10-01?", 0)).toBe(true);
+  });
+
+  it("matches a known figure written with other separators", () => {
+    // Performs assertions.
+    expect(claimsUnsourcedFigures("Fueron 1,240.", "¿se despacharon 1240 cajas?", 0)).toBe(false);
+  });
+
+  it("exempts only the dates the server gave, in their usual spellings", () => {
+    // Performs the test.
+    const dates = dateSpellings(["2026-10-04"]);
+
+    // Performs assertions.
+    expect(claimsUnsourcedFigures("Hoy es 4 de octubre de 2026.", "¿qué día?", 0, dates)).toBe(
+      false,
+    );
+    expect(claimsUnsourcedFigures("Hoy es 04/10/2026.", "¿qué día?", 0, dates)).toBe(false);
+    expect(claimsUnsourcedFigures("Mañana es 5 de octubre.", "¿qué día?", 0, dates)).toBe(true);
+  });
+
+  it("strips short list numbering, bold or not, but checks a year that opens a line", () => {
+    // Performs assertions.
+    expect(figuresIn("**1.** Ventas\n2) Rutas")).toEqual([]);
+    expect(figuresIn("2025. Fue el año con más ventas")).toEqual(["2025"]);
   });
 });
