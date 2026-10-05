@@ -81,6 +81,15 @@ export class Solr {
   }
 
   /**
+   * Discards the writes sent since the last commit
+   *
+   * @param   core  Core to roll back
+   */
+  async rollback(core: string): Promise<void> {
+    await this.send(`${core}/update`, { rollback: {} });
+  }
+
+  /**
    * Posts JSON to a core endpoint and checks the answer
    *
    * @param   path  Path under /solr/
