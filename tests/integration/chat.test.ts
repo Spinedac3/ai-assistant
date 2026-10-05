@@ -7,6 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
 import { NO_ANSWER, NO_DATA, RETRY_DIRECTIVE } from "../../src/chat/guards.js";
+import { refundMessage, reserveMessage } from "../../src/chat/rateLimit.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { messages, rateLimits, roles, users } from "../../src/db/schema.js";
 import { testSigner } from "../support/keys.js";
@@ -28,6 +29,7 @@ interface Run {
   subtype?: string;
   error?: boolean;
   noResult?: boolean;
+  sameReply?: boolean;
 }
 
 /**
@@ -409,6 +411,47 @@ describe("chat", () => {
 
     // Performs assertions.
     expect(hour?.tokensUsed).toBe(1000);
+  });
+
+  it("charges a reply once even when the CLI repeats it on every content block", async () => {
+    // Performs the test.
+    script({
+      steps: [{ text: "Primer bloque." }, { text: "Segundo bloque." }],
+      noResult: true,
+      sameReply: true,
+      context: 1000,
+    });
+    await send("hola");
+    const [hour] = await database.db
+      .select({ tokensUsed: rateLimits.tokensUsed })
+      .from(rateLimits)
+      .where(eq(rateLimits.windowType, "hour"));
+
+    // Performs assertions.
+    expect(hour?.tokensUsed).toBe(1000);
+  });
+
+  it("gives a message back to the hour it was charged to, even after a new hour began", async () => {
+    // Performs the test.
+    const reservation = await reserveMessage(
+      database.db,
+      1,
+      { msgsPerHour: 100, msgsPerDay: 100, tokensPerDay: 1_000_000 },
+      "UTC",
+    );
+    const nextHour = new Date((reservation.hour?.getTime() ?? 0) + 3_600_000);
+    await database.db
+      .insert(rateLimits)
+      .values({ userId: 1, windowType: "hour", windowStart: nextHour, msgCount: 5 });
+    await refundMessage(database.db, 1, reservation);
+    const hours = await database.db
+      .select({ windowStart: rateLimits.windowStart, msgCount: rateLimits.msgCount })
+      .from(rateLimits)
+      .where(eq(rateLimits.windowType, "hour"))
+      .orderBy(rateLimits.windowStart);
+
+    // Performs assertions.
+    expect(hours.map((hour) => hour.msgCount)).toEqual([0, 5]);
   });
 
   it("does not spend hourly quota on a message the daily quota rejects", async () => {

@@ -47,7 +47,7 @@ function windowStart(window: "hour" | "day", timeZone: string) {
  * @param   db              Own database
  * @param   userId          Person
  * @param   timeZone        Application time zone
- * @param   messages        Messages to add, negative to give one back
+ * @param   messages        Messages to add
  * @param   tokens          Tokens to add
  * @param   costMillionths  Cost to add
  *
@@ -68,7 +68,7 @@ async function bump(
         userId,
         windowType: window,
         windowStart: windowStart(window, timeZone),
-        msgCount: Math.max(messages, 0),
+        msgCount: messages,
         tokensUsed: tokens,
         costMillionths,
       })),
@@ -76,17 +76,30 @@ async function bump(
     .onConflictDoUpdate({
       target: [rateLimits.userId, rateLimits.windowType, rateLimits.windowStart],
       set: {
-        msgCount: sql`greatest(${rateLimits.msgCount} + ${messages}, 0)`,
+        msgCount: sql`${rateLimits.msgCount} + ${messages}`,
         tokensUsed: sql`${rateLimits.tokensUsed} + ${tokens}`,
         costMillionths: sql`${rateLimits.costMillionths} + ${costMillionths}`,
       },
     })
-    .returning({ windowType: rateLimits.windowType, msgCount: rateLimits.msgCount });
+    .returning({
+      windowType: rateLimits.windowType,
+      windowStart: rateLimits.windowStart,
+      msgCount: rateLimits.msgCount,
+    });
+  const hour = rows.find((row) => row.windowType === "hour");
+  const day = rows.find((row) => row.windowType === "day");
 
   return {
-    hour: rows.find((row) => row.windowType === "hour")?.msgCount ?? 0,
-    day: rows.find((row) => row.windowType === "day")?.msgCount ?? 0,
+    hour: hour?.msgCount ?? 0,
+    day: day?.msgCount ?? 0,
+    reservation: { hour: hour?.windowStart ?? null, day: day?.windowStart ?? null },
   };
+}
+
+// The exact windows a message was charged to, so giving it back never lands in a later one
+export interface Reservation {
+  hour: Date | null;
+  day: Date | null;
 }
 
 /**
@@ -100,6 +113,8 @@ async function bump(
  * @param   limits    Quotas
  * @param   timeZone  Application time zone
  *
+ * @return  The windows the message was charged to
+ *
  * @throws  RateLimitExceededError
  */
 export async function reserveMessage(
@@ -107,7 +122,7 @@ export async function reserveMessage(
   userId: number,
   limits: RateLimits,
   timeZone: string,
-): Promise<void> {
+): Promise<Reservation> {
   const current = await db
     .select({
       windowType: rateLimits.windowType,
@@ -151,20 +166,44 @@ export async function reserveMessage(
 
   if (over) {
     // Another message took the last unit between the check and the count
-    await bump(db, userId, timeZone, -1, 0, 0);
+    await refundMessage(db, userId, after.reservation);
     throw new RateLimitExceededError(over, "messages");
   }
+
+  return after.reservation;
 }
 
 /**
- * Gives back a message the server failed to answer
+ * Gives back a message to the windows it was charged to
  *
- * @param   db        Own database
- * @param   userId    Person who sent it
- * @param   timeZone  Application time zone
+ * @param   db           Own database
+ * @param   userId       Person who sent it
+ * @param   reservation  Windows returned when the message was counted
  */
-export async function refundMessage(db: Database, userId: number, timeZone: string): Promise<void> {
-  await bump(db, userId, timeZone, -1, 0, 0);
+export async function refundMessage(
+  db: Database,
+  userId: number,
+  reservation: Reservation,
+): Promise<void> {
+  for (const [window, start] of [
+    ["hour", reservation.hour],
+    ["day", reservation.day],
+  ] as const) {
+    if (start === null) {
+      continue;
+    }
+
+    await db
+      .update(rateLimits)
+      .set({ msgCount: sql`greatest(${rateLimits.msgCount} - 1, 0)` })
+      .where(
+        and(
+          eq(rateLimits.userId, userId),
+          eq(rateLimits.windowType, window),
+          eq(rateLimits.windowStart, start),
+        ),
+      );
+  }
 }
 
 /**
