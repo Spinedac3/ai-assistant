@@ -12,6 +12,7 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
+import type { TraceEntry } from "../chat/trace.js";
 import type { BaseColumn } from "../creator/columns.js";
 import type { ToolDefinitionSpec } from "../creator/definition.js";
 
@@ -145,6 +146,8 @@ export const conversations = pgTable(
       .default("open"),
     msgCount: integer("msg_count").notNull().default(0),
     lastMessageAt: timestamptz("last_message_at").notNull().defaultNow(),
+    // A trial of a tool being built; the chat never lists or resumes these
+    toolName: varchar("tool_name", { length: 64 }),
     ...auditFields(),
   },
   (t) => [index("conversations_user_last_idx").on(t.userId, t.lastMessageAt)],
@@ -165,6 +168,8 @@ export const messages = pgTable(
     // The model that really answered, which an alias can move without notice
     model: varchar("model", { length: 60 }),
     finishReason: varchar("finish_reason", { length: 40 }),
+    // In a trial, what each tool call of the answer received and returned
+    trace: jsonb("trace").$type<TraceEntry[]>(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [index("messages_conversation_idx").on(t.conversationId, t.id)],

@@ -36,6 +36,7 @@ import {
   toolsRunAfter,
 } from "./repository.js";
 import { installSourceGate } from "./sourceGate.js";
+import { type TraceEntry, traceCall, traceResult } from "./trace.js";
 
 // Enough to find a capability, run it and answer
 const MAX_TURNS = 12;
@@ -60,6 +61,8 @@ export interface ChatDependencies {
     userId: number,
     conversationId: number,
   ) => Promise<() => Promise<void>>;
+  // A trial of a tool being built: its own conversations, the tools it may call, and a trace
+  trial?: { toolName: string; allowedTools: string };
 }
 
 export interface ChatUser {
@@ -135,6 +138,7 @@ async function* runCli(
   prompt: string,
   continueSession: boolean,
   abortSignal?: AbortSignal,
+  trace?: TraceEntry[],
 ): AsyncGenerator<TurnEvent, CliOutcome> {
   const cli = launchCli(
     deps.cli,
@@ -143,8 +147,8 @@ async function* runCli(
       maxTurns: MAX_TURNS,
       continueSession,
       mcpConfigPath: join(workspace, ".mcp.json"),
-      // With tools, the CLI may call only what the chat catalog offers
-      ...(deps.mcpConfig ? { allowedTools: CHAT_CLI_ALLOWED } : {}),
+      // With tools, the CLI may call only what the chat catalog, or the trial, offers
+      ...(deps.mcpConfig ? { allowedTools: deps.trial?.allowedTools ?? CHAT_CLI_ALLOWED } : {}),
       disallowedTools: DISALLOWED_CLI_TOOLS,
     }),
     prompt,
@@ -213,6 +217,7 @@ async function* runCli(
             String(block.name ?? ""),
             (block.input ?? {}) as Record<string, unknown>,
           );
+          trace?.push(traceCall(block.id, name, block.input));
           yield { toolPending: { id: block.id, name } };
         }
       }
@@ -227,6 +232,9 @@ async function* runCli(
         Record<string, unknown>
       >) {
         if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+          if (trace) {
+            traceResult(trace, block.tool_use_id, block.content, block.is_error !== true);
+          }
           yield { toolResult: { id: block.tool_use_id, ok: block.is_error !== true } };
         }
       }
@@ -289,8 +297,13 @@ export async function* chatTurn(
   const reservation = await reserveMessage(db, user.id, deps.limits, timeZone);
 
   const content = redactSecrets(rawContent);
-  const owned = conversationId ? await findConversation(db, conversationId, user.id) : null;
-  const conversation = owned?.id ?? (await createConversation(db, user.id));
+  const toolName = deps.trial?.toolName ?? null;
+  const owned = conversationId
+    ? await findConversation(db, conversationId, user.id, toolName)
+    : null;
+  const conversation = owned?.id ?? (await createConversation(db, user.id, toolName));
+  // A trial keeps what each call received and returned, to show it to whoever builds the tool
+  const trace: TraceEntry[] | undefined = deps.trial ? [] : undefined;
   const releaseTurn = await holdTurn(String(conversation), abortSignal);
 
   if (!releaseTurn) {
@@ -376,7 +389,7 @@ export async function* chatTurn(
       ]);
       // Sources are what ran in this attempt; a discarded attempt's tools must not be credited
       const callsBefore = await lastToolCallId(db, conversation);
-      const run = runCli(deps, model, workspace, prompt, resume, attemptSignal);
+      const run = runCli(deps, model, workspace, prompt, resume, attemptSignal, trace);
       let step = await run.next();
 
       while (!step.done) {
@@ -462,6 +475,7 @@ export async function* chatTurn(
           costMillionths: spent.measured ? spent.costMillionths : null,
           model: outcome.model,
           finishReason: outcome.ok ? "stop" : "error",
+          trace: trace ?? null,
         });
 
         yield {
