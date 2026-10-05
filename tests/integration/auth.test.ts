@@ -107,7 +107,7 @@ describe("auth", () => {
     expect(response.statusCode).toBe(200);
     expect(me.statusCode).toBe(200);
     expect(me.json().data.email).toBe("ana@example.com");
-    expect(me.json().data.scopes).toEqual(["chat.use"]);
+    expect(me.json().data.scopes).toEqual(["chat.use", "docs.general.read"]);
   });
 
   it("answers the same for a wrong password and an unknown email", async () => {
@@ -170,6 +170,8 @@ describe("auth", () => {
     expect(me.json().data.role).toBe("admin");
     expect([...me.json().data.scopes].sort()).toEqual([
       "chat.use",
+      "docs.general.read",
+      "docs.manage",
       "settings.manage",
       "usage.read",
       "users.manage",
