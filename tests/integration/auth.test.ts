@@ -168,7 +168,11 @@ describe("auth", () => {
 
     // Performs assertions.
     expect(me.json().data.role).toBe("admin");
-    expect(me.json().data.scopes).toEqual(["chat.use", "users.manage"]);
+    expect([...me.json().data.scopes].sort()).toEqual([
+      "chat.use",
+      "settings.manage",
+      "users.manage",
+    ]);
   });
 
   it("renews a token that entered the last third of its life", async () => {
