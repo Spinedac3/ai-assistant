@@ -262,7 +262,11 @@ export class ToolRegistry {
       truncated: result.truncated === true || capped.truncated,
     });
 
-    return { ok: true, text, structured: JSON.parse(text) as Record<string, unknown> };
+    // A cut result may no longer match its declared shape; then only the text goes out
+    const outsideContract =
+      capped.truncated && validators?.output !== undefined && !validators.output(capped.data);
+
+    return { ok: true, text, structured: outsideContract ? undefined : capped.data };
   }
 
   /**

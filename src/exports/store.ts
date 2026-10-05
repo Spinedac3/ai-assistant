@@ -75,11 +75,11 @@ export class ExportStore {
     const id = randomUUID();
     const data = workbook(sheets);
     const expiresAt = new Date(Date.now() + RETENTION_DAYS * DAY_MS);
-    const fileName = `${owner.toolName}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+    // Only safe characters reach the download header, whatever a tool is named
+    const safeName = owner.toolName.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 100);
+    const fileName = `${safeName}-${new Date().toISOString().slice(0, 10)}.xlsx`;
 
-    await this.client.putObject(this.storage.bucket, objectKey(id), data, data.length, {
-      "Content-Type": XLSX_CONTENT_TYPE,
-    });
+    // The row goes first, so a file is never stored without the record that purges it
     await this.db.insert(exportFiles).values({
       id,
       userId: owner.userId,
@@ -88,6 +88,9 @@ export class ExportStore {
       rows: sheets[0]?.rows.length ?? 0,
       bytes: data.length,
       expiresAt,
+    });
+    await this.client.putObject(this.storage.bucket, objectKey(id), data, data.length, {
+      "Content-Type": XLSX_CONTENT_TYPE,
     });
 
     const expires = Math.floor(expiresAt.getTime() / 1000);
@@ -139,7 +142,7 @@ export class ExportStore {
   }
 
   /**
-   * Deletes the exports whose time ran out, files first so a row never outlives its file
+   * Deletes the exports whose time ran out, files first so no file outlives its row
    *
    * @return  How many were deleted
    */
@@ -152,17 +155,23 @@ export class ExportStore {
       return 0;
     }
 
-    await this.client.removeObjects(
+    // The client reports objects it could not remove instead of throwing; their rows stay for
+    // the next sweep
+    const failures = await this.client.removeObjects(
       this.storage.bucket,
       expired.map((row) => objectKey(row.id)),
     );
-    await this.db.delete(exportFiles).where(
-      inArray(
-        exportFiles.id,
-        expired.map((row) => row.id),
-      ),
-    );
+    const failed = new Set(failures.map((item) => item?.Error?.Key).filter(Boolean));
+    const removed = expired.filter((row) => !failed.has(objectKey(row.id)));
+    if (removed.length > 0) {
+      await this.db.delete(exportFiles).where(
+        inArray(
+          exportFiles.id,
+          removed.map((row) => row.id),
+        ),
+      );
+    }
 
-    return expired.length;
+    return removed.length;
   }
 }

@@ -3,6 +3,9 @@ import { crc32, deflateRawSync } from "node:zlib";
 export const XLSX_CONTENT_TYPE =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
+// Excel refuses longer text in one cell and repairs the file
+const MAX_CELL_CHARS = 32_767;
+
 export interface Sheet {
   name: string;
   columns: string[];
@@ -53,7 +56,7 @@ function columnName(index: number): string {
 }
 
 /**
- * Writes one cell: finite numbers as numbers, everything else as text
+ * Writes one cell, keeping booleans and numbers, numeric text included, as such
  *
  * @param   value  Value
  * @param   ref    Cell reference
@@ -65,15 +68,69 @@ function cell(value: unknown, ref: string): string {
     return "";
   }
 
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return `<c r="${ref}"><v>${value}</v></c>`;
+  if (typeof value === "boolean") {
+    return `<c r="${ref}" t="b"><v>${value ? 1 : 0}</v></c>`;
   }
 
-  const text = typeof value === "object" ? JSON.stringify(value) : String(value);
-  // A leading = would be read as a formula by whoever opens the file
-  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+  // Engines hand exact decimals over as text; a number of up to 15 digits is safe in Excel
+  const number =
+    typeof value === "number" ? value : typeof value === "string" ? numeric(value) : null;
+  if (number !== null && Number.isFinite(number)) {
+    return `<c r="${ref}"><v>${number}</v></c>`;
+  }
 
-  return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xml(safe)}</t></is></c>`;
+  // Inline text is never evaluated, so a leading = stays text without any prefix
+  const text = (typeof value === "object" ? JSON.stringify(value) : String(value)).slice(
+    0,
+    MAX_CELL_CHARS,
+  );
+
+  return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xml(text)}</t></is></c>`;
+}
+
+/**
+ * Reads text that is plainly a number, as an engine writes a decimal
+ *
+ * @param   text  Text
+ *
+ * @return  The number, or null when it is anything else, a code with leading zeros included
+ */
+function numeric(text: string): number | null {
+  if (!/^-?(0|[1-9]\d*)(\.\d+)?$/.test(text)) {
+    return null;
+  }
+
+  // Excel keeps 15 significant digits; a longer number would come back changed
+  const digits = text.replace(/\D/g, "").replace(/^0+/, "");
+
+  return digits.length <= 15 ? Number(text) : null;
+}
+
+/**
+ * Names the sheets as Excel accepts them: no reserved characters, up to 31, never repeated
+ *
+ * @param   sheets  Sheets in order
+ *
+ * @return  One valid, unique name per sheet
+ */
+function sheetNames(sheets: Sheet[]): string[] {
+  const taken = new Set<string>();
+
+  return sheets.map((sheet, index) => {
+    const clean = sheet.name
+      .replace(/[\\/?*[\]:]/g, " ")
+      .trim()
+      .replace(/^'+|'+$/g, "")
+      .slice(0, 31);
+    const base = clean || `Hoja${index + 1}`;
+    let name = base;
+    for (let copy = 2; taken.has(name.toLowerCase()); copy++) {
+      name = `${base.slice(0, 31 - String(copy).length - 1)}~${copy}`;
+    }
+    taken.add(name.toLowerCase());
+
+    return name;
+  });
 }
 
 /**
@@ -155,9 +212,7 @@ function zip(files: Array<{ path: string; data: Buffer }>): Buffer {
  * @return  The .xlsx file
  */
 export function workbook(sheets: Sheet[]): Buffer {
-  const names = sheets.map((sheet, index) =>
-    (sheet.name.replace(/[\\/?*[\]:]/g, " ").slice(0, 31) || `Hoja${index + 1}`).trim(),
-  );
+  const names = sheetNames(sheets);
   const file = (path: string, content: string) => ({ path, data: Buffer.from(content, "utf8") });
   const head = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 

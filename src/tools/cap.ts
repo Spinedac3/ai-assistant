@@ -4,10 +4,10 @@ import type { Sheet } from "../exports/xlsx.js";
 export const CHAT_MAX_BYTES = 40_000;
 // External clients take larger results; past this, rows stop helping a model that reads them all
 export const EXTERNAL_MAX_BYTES = 250_000;
-// Lists this small ride along in full; only heavier ones are worth their own sheet
+// Lists this small are summaries; they are the last thing to give way
 const SMALL_LIST_BYTES = 1_000;
 // What one sheet keeps; Excel holds about a million, nobody reads that from a chat link
-const MAX_SHEET_ROWS = 100_000;
+export const MAX_SHEET_ROWS = 100_000;
 
 export interface Archive {
   save(sheets: Sheet[]): Promise<{ url: string; expiresInDays: number } | null>;
@@ -29,28 +29,26 @@ function size(value: unknown): number {
 }
 
 /**
- * Turns a list into a sheet: columns in the order the keys first appear
+ * Turns a list into a sheet: columns in the order the keys first appear; plain values go to a
+ * column of their own
  *
  * @param   name  Sheet name
  * @param   list  Rows
  *
  * @return  The sheet
  */
-function sheetOf(name: string, list: unknown[]): Sheet {
+export function sheetOf(name: string, list: unknown[]): Sheet {
   const rows = list.slice(0, MAX_SHEET_ROWS);
-  const columns = [
-    ...new Set(
-      rows.flatMap((row) => (row && typeof row === "object" ? Object.keys(row) : ["valor"])),
-    ),
-  ];
+  const isRecord = (row: unknown): row is Record<string, unknown> =>
+    row !== null && typeof row === "object" && !Array.isArray(row);
+  const keys = [...new Set(rows.flatMap((row) => (isRecord(row) ? Object.keys(row) : [])))];
+  const plain = rows.some((row) => !isRecord(row));
 
   return {
     name,
-    columns,
+    columns: plain ? [...keys, "valor"] : keys,
     rows: rows.map((row) =>
-      row && typeof row === "object"
-        ? columns.map((column) => (row as Record<string, unknown>)[column])
-        : [row],
+      isRecord(row) ? keys.map((key) => row[key]) : [...keys.map(() => undefined), row],
     ),
   };
 }
@@ -58,9 +56,10 @@ function sheetOf(name: string, list: unknown[]): Sheet {
 /**
  * Fits a tool result under the size its reader takes
  *
- * The totals stay intact: they are numbers outside the lists. The lists are cut, the heaviest
- * last, and when there is an archive every heavy list goes whole into an Excel whose link leads
- * the result, so the model hands over the file instead of rebuilding it call by call.
+ * The totals stay intact: they are values outside the lists. The heavy lists go whole into an
+ * Excel whose link leads the result, so the model hands over the file instead of rebuilding it
+ * call by call. Then the result shrinks until it fits: secondary heavy lists first, the main
+ * list as little as possible, and the small summary lists only as a last resort.
  *
  * @param   data      Tool result
  * @param   maxBytes  Size limit
@@ -79,8 +78,9 @@ export async function capResult(
 
   const lists = Object.entries(data)
     .filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]))
-    .sort((a, b) => size(b[1]) - size(a[1]));
-  const [main] = lists;
+    .map(([name, list]) => ({ name, list, bytes: size(list) }))
+    .sort((a, b) => b.bytes - a.bytes);
+  const main = lists[0];
   if (!main) {
     return {
       ok: false,
@@ -90,25 +90,80 @@ export async function capResult(
     };
   }
 
-  const heavy = lists.filter(([, list]) => size(list) > SMALL_LIST_BYTES);
-  const saved = archive
-    ? await archive.save(heavy.map(([name, list]) => sheetOf(name, list)))
-    : null;
+  const heavy = lists.filter((entry) => entry.bytes > SMALL_LIST_BYTES);
+  const saved =
+    archive && heavy.length > 0
+      ? await archive.save(heavy.map((entry) => sheetOf(entry.name, entry.list)))
+      : null;
+  const archivedRows = Math.min(main.list.length, MAX_SHEET_ROWS);
+  const keep = new Map(lists.map((entry) => [entry.name, entry.list.length]));
 
-  // Lighter lists give way first, down to nothing; the main one keeps as much as fits
-  const result: Record<string, unknown> = { ...data };
-  const omitted: Record<string, number> = {};
-  // The note and the archive entry are measured with room to spare, so the final result fits
-  const fits = () => size({ ...result, archivo: saved, nota: "x".repeat(800) }) <= maxBytes;
-
-  for (const [name, list] of [...lists].reverse()) {
-    let keep = list.length;
-    while (!fits() && keep > 0) {
-      keep = name === main[0] ? Math.floor(keep / 2) : 0;
-      result[name] = list.slice(0, keep);
+  // The exact result for the current cut, so what is measured is what is returned
+  const build = (): Record<string, unknown> => {
+    const result: Record<string, unknown> = { ...data };
+    const omitted: Record<string, number> = {};
+    for (const entry of lists) {
+      const kept = keep.get(entry.name) ?? 0;
+      result[entry.name] = entry.list.slice(0, kept);
+      if (kept < entry.list.length) {
+        omitted[entry.name] = entry.list.length - kept;
+      }
     }
-    if (keep < list.length) {
-      omitted[name] = list.length - keep;
+
+    const cut = Object.entries(omitted)
+      .map(([name, count]) => {
+        const kept = keep.get(name) ?? 0;
+        return `${name}: ves ${kept} de ${kept + count}`;
+      })
+      .join("; ");
+    const partial = archivedRows < main.list.length ? ` (las primeras ${archivedRows})` : "";
+
+    return {
+      ...result,
+      ...(saved
+        ? {
+            archivo: {
+              url: saved.url,
+              filas: archivedRows,
+              ...(partial ? { filas_fuera_del_archivo: main.list.length - archivedRows } : {}),
+              vence_en_dias: saved.expiresInDays,
+            },
+          }
+        : {}),
+      filas_omitidas: omitted,
+      nota: saved
+        ? `Comparte PRIMERO este link de Excel con las filas de ${main.name}${partial}, vence en ` +
+          `${saved.expiresInDays} días: ${saved.url}. Recortado aquí: ${cut}. Los totales están ` +
+          "completos. No vuelvas a llamar para reconstruir las filas que faltan."
+        : `Resultado recortado: ${cut}. Los totales están completos. No completes lo que falta; ` +
+          "si hace falta el detalle, pide filtros más angostos.",
+    };
+  };
+  const fits = () => size(build()) <= maxBytes;
+
+  // Secondary heavy lists give way first, then the main one keeps all it can, found by halves
+  for (const entry of heavy.slice(1)) {
+    if (!fits()) {
+      keep.set(entry.name, 0);
+    }
+  }
+  if (!fits()) {
+    let low = 0;
+    let high = main.list.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      keep.set(main.name, middle);
+      if (fits()) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
+    }
+    keep.set(main.name, low);
+  }
+  for (const entry of lists.filter((item) => item.bytes <= SMALL_LIST_BYTES)) {
+    if (!fits()) {
+      keep.set(entry.name, 0);
     }
   }
 
@@ -121,25 +176,5 @@ export async function capResult(
     };
   }
 
-  const shown = (result[main[0]] as unknown[]).length;
-  const nota = saved
-    ? `Comparte PRIMERO este link de Excel con el detalle completo (${main[1].length} filas de ` +
-      `${main[0]}, vence en ${saved.expiresInDays} días): ${saved.url}. Aquí ves solo ${shown}. ` +
-      "Los totales están completos. No vuelvas a llamar para reconstruir las filas que faltan."
-    : `El detalle se recortó: ves ${shown} de ${main[1].length} filas de ${main[0]}. Los totales ` +
-      "están completos. No completes lo que falta; si hace falta el detalle, pide filtros más " +
-      "angostos.";
-
-  return {
-    ok: true,
-    truncated: true,
-    data: {
-      ...result,
-      ...(saved
-        ? { archivo: { url: saved.url, filas: main[1].length, vence_en_dias: saved.expiresInDays } }
-        : {}),
-      filas_omitidas: omitted,
-      nota,
-    },
-  };
+  return { ok: true, truncated: true, data: build() };
 }
