@@ -19,11 +19,13 @@ pnpm install
 cp .env.example .env
 docker compose up -d            # postgres, solr, embed, minio y demo-db
 pnpm keys:generate              # llave RS256 en secrets/, nunca en variables
+pnpm kek:generate               # llave maestra de las contraseñas de las fuentes
 pnpm db:migrate
 pnpm admin:create --email tu@empresa.com --name "Tu Nombre"
 pnpm dev                        # http://localhost:3000/health
 pnpm check                      # typecheck + lint + tests unitarios
-pnpm test:integration           # también los que usan Postgres, Solr y MinIO
+pnpm demo:seed                  # base demo de la distribuidora
+pnpm test:integration           # también los que usan Postgres, Solr, MinIO y las bases demo
 ```
 
 ## Entrar
@@ -190,6 +192,58 @@ preguntas sobre los documentos demo sale entre los tres primeros (hoy 30 de 30).
 El esquema de Solr vive en `docker/solr/docs/conf/`. Los cores se crean con él la primera vez;
 para aplicar un cambio de esquema hay que recrearlos (`docker compose down -v` borra los datos) y
 volver a cargar los documentos.
+
+## Fuentes de datos
+
+Las tools leen bases de datos de la organización: SQL Server, MySQL o Postgres. Cada una se
+registra una vez en `POST /admin/sources` (permiso `sources.manage`):
+
+```json
+{ "code": "erp", "name": "ERP", "engine": "mssql", "host": "erp.interno", "port": 1433,
+  "database": "ventas", "username": "lector", "password": "…", "timeZone": "America/Guatemala",
+  "tls": true }
+```
+
+- **Solo lectura**: al registrarla se revisa qué puede hacer el usuario, y si puede escribir
+  (insertar, borrar, crear tablas, ser dueño de la base…) se rechaza con la lista de lo que
+  puede. Además, en Postgres y MySQL cada consulta corre en una transacción de solo lectura.
+- **Contraseña**: se guarda cifrada (AES-256-GCM, una llave por contraseña, cifrada a su vez con
+  la llave maestra). La llave maestra es un archivo (`pnpm kek:generate` la crea en
+  `secrets/kek.key`, `SECRETS_KEK_FILE`), nunca la base ni una variable de entorno: respáldala
+  aparte, sin ella las contraseñas guardadas no se pueden leer. La API nunca devuelve una
+  contraseña.
+- **Zona horaria**: las fechas que la fuente guarda sin zona se leen tal cual y se interpretan
+  con `timeZone` de la fuente, o con `APP_TIMEZONE` si no tiene.
+- Registrar de nuevo un código existente lo reemplaza, verificándolo otra vez.
+
+| Ruta | Para qué |
+|---|---|
+| `GET /admin/sources` | Las fuentes, sin contraseñas |
+| `POST /admin/sources` | Registra o reemplaza una fuente, verificada |
+| `POST /admin/sources/:code/test` | Vuelve a verificar conexión y solo lectura |
+| `DELETE /admin/sources/:code` | La borra |
+
+### Resultados grandes
+
+Lo que devuelve una tool tiene un tope: 40 KB en el chat y las corridas de agentes, 250 KB para
+clientes externos. Si no cabe, los totales quedan intactos, las listas se recortan y el detalle
+completo va a un Excel con un link firmado que vence a los 7 días (no pide login; quien reciba
+el link reenviado puede bajarlo mientras no venza). El Excel lo escribe el código, nunca el
+modelo.
+
+**Lo que devuelven las tools viaja al proveedor del modelo** (Anthropic, o el del cliente MCP)
+como parte de la conversación. Registra solo fuentes cuyos datos puedan salir de tu red en esas
+condiciones.
+
+### Base demo
+
+Una distribuidora inventada (clientes, productos, pedidos, detalle, entregas) igual en los tres
+motores, con un usuario `demo_reader` de solo lectura:
+
+```bash
+docker compose --profile engines up -d demo-mysql demo-mssql   # demo-db (Postgres) ya está arriba
+pnpm demo:seed                                                  # o solo: pnpm demo:seed postgres
+```
 
 ## Licencia
 
