@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
 import { chatMcpConfig } from "../chat/mcpConfig.js";
+import { RateLimitExceededError, reserveMessage } from "../chat/rateLimit.js";
 import { findConversation } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
@@ -115,13 +116,6 @@ export default async function toolsRoutes(
     return found;
   };
 
-  /**
-   * Runs the checks of a stored definition against its source
-   *
-   * @param   tool  Stored definition
-   *
-   * @return  The results, or why the source could not be reached
-   */
   /**
    * Builds the runner that reads a stored tool's source as the tool would
    *
@@ -329,17 +323,31 @@ export default async function toolsRoutes(
 
     const tool = found.tool;
     try {
-      const samples = await oneAtATime(`checks:${tool.sourceCode}`, async () => {
-        const found: Record<string, unknown[]> = {};
-        for (const column of tool.columns) {
-          const rows = await runner.sample([column.name]);
-          found[column.name] = [...new Set(rows.map((row) => row[column.name]))].slice(
-            0,
-            GUIDE_SAMPLES,
-          );
-        }
-        return found;
-      });
+      // A call to the model counts as a message of the person, like a chat turn
+      const limits = options.trial?.chat.limits;
+      if (limits && request.authUser) {
+        await reserveMessage(db, request.authUser.id, limits, options.appTimeZone);
+      }
+      // One read of a few rows, whatever the number of columns, so the source is not held long
+      const rows = await oneAtATime(`checks:${tool.sourceCode}`, () =>
+        runner.sample(
+          tool.columns.map((column) => column.name),
+          false,
+        ),
+      );
+      const samples = Object.fromEntries(
+        tool.columns.map((column) => [
+          column.name,
+          [
+            ...new Set(
+              rows
+                .map((row) => row[column.name])
+                .filter((value) => value != null)
+                .map(String),
+            ),
+          ].slice(0, GUIDE_SAMPLES),
+        ]),
+      );
       const input = {
         spec: tool.spec,
         columns: tool.columns,
@@ -347,8 +355,16 @@ export default async function toolsRoutes(
         question: body.data.question,
       };
 
-      return { ok: true, data: readGuide(await ask(guidePrompt(input)), input) };
+      const read = readGuide(await ask(guidePrompt(input)), input);
+      if (read.dropped > 0) {
+        request.log.info({ tool: tool.name, dropped: read.dropped }, "guide chips dropped");
+      }
+
+      return { ok: true, data: read };
     } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
+      }
       request.log.warn({ err: error, tool: tool.name }, "tool guide failed");
       return reply.code(502).send({
         ok: false,
@@ -375,9 +391,31 @@ export default async function toolsRoutes(
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: "invalid_body" });
     }
+    const conversationId = body.data.conversation_id ?? null;
+    // A trial goes on only in a conversation of this tool and this person
+    if (
+      conversationId !== null &&
+      !(await findConversation(db, conversationId, user.id, found.tool.name))
+    ) {
+      return reply.code(404).send({ ok: false, error: "conversation_not_found" });
+    }
+    const readable = await runnerOf(found.tool);
+    if (typeof readable === "string") {
+      return reply.code(400).send({ ok: false, error: "source_unreadable", message: readable });
+    }
 
     const { tool, zone } = found;
-    const tools = trial.registry.with(toolFrom(shapeOf(tool), options, zone));
+    let tools: ToolRegistry;
+    try {
+      tools = trial.registry.with(toolFrom(shapeOf(tool), options, zone));
+    } catch (error) {
+      request.log.warn({ err: error, tool: tool.name }, "trial tool could not be built");
+      return reply.code(400).send({
+        ok: false,
+        error: "invalid_definition",
+        message: "La herramienta no se pudo armar; vuelve a guardarla",
+      });
+    }
     const only = body.data.scope === "tool";
     const deps: ChatDependencies = {
       ...trial.chat,
@@ -395,15 +433,36 @@ export default async function toolsRoutes(
     };
 
     let done: Extract<ChatEvent, { type: "done" }> | null = null;
-    for await (const event of chatTurn(
-      deps,
-      { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
-      body.data.message,
-      body.data.conversation_id ?? null,
-    )) {
-      if (event.type === "done") {
-        done = event;
+    // A person who leaves stops the CLI, as in the chat
+    const controller = new AbortController();
+    const onClose = () => {
+      if (!reply.raw.writableFinished) {
+        controller.abort();
       }
+    };
+    reply.raw.on("close", onClose);
+    try {
+      for await (const event of chatTurn(
+        deps,
+        { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
+        body.data.message,
+        conversationId,
+        controller.signal,
+      )) {
+        if (event.type === "done") {
+          done = event;
+        }
+      }
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
+      }
+      request.log.error({ err: error, tool: tool.name }, "trial chat failed");
+      return reply
+        .code(502)
+        .send({ ok: false, error: "trial_failed", message: "El chat de prueba no respondió" });
+    } finally {
+      reply.raw.off("close", onClose);
     }
     if (!done) {
       return reply
@@ -456,7 +515,11 @@ export default async function toolsRoutes(
     if (!found) {
       return reply;
     }
-    const { id } = trialParams.parse(request.params);
+    const params = trialParams.safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ ok: false, error: "invalid_id" });
+    }
+    const { id } = params.data;
     const conversation = await findConversation(db, id, request.authUser?.id ?? 0, found.tool.name);
     if (!conversation) {
       return reply.code(404).send({ ok: false, error: "conversation_not_found" });

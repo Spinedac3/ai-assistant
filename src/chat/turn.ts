@@ -376,6 +376,8 @@ export async function* chatTurn(
     }
 
     for (let attempt = 0; attempt < 2; attempt++) {
+      // A discarded attempt's calls are not what answered; only the last attempt's are shown
+      trace?.splice(0);
       // Both retries start a new session: a silent turn means the resumed one went bad
       const resume = attempt === 0 && !freshSession && !resetByContext;
       const names = new Map<string, string>();

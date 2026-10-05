@@ -11,7 +11,7 @@ import { hashPassword } from "../../src/auth/password.js";
 import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
 import { CreatedTools } from "../../src/creator/store.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { conversations, roles, toolCalls, users } from "../../src/db/schema.js";
+import { conversations, rateLimits, roles, toolCalls, users } from "../../src/db/schema.js";
 import { saveSource } from "../../src/sources/registry.js";
 import { calculateTool } from "../../src/tools/native/calculate.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
@@ -246,5 +246,27 @@ describe("trial chat", () => {
     ]);
     expect(read.body.data[1].trace[0].tool).toBe("entregas_prueba");
     expect(stored?.toolName).toBe("entregas_prueba");
+  });
+
+  it("goes on only in a conversation of this tool, and stops at the person's quota", async () => {
+    // Performs the test.
+    await api("PUT", "/admin/tools/otra_prueba", { source: "demo", definition: deliveries });
+    script([{ steps: [{ text: "Hola." }], result: "Hola." }]);
+    const other = await api("POST", "/admin/tools/otra_prueba/chat", { message: "Hola" });
+    const crossed = await api("POST", "/admin/tools/entregas_prueba/chat", {
+      message: "Sigo",
+      conversation_id: other.body.data.conversation_id,
+    });
+    const badId = await api("GET", "/admin/tools/entregas_prueba/chats/abc");
+    // Every message of the hour already spent
+    await database.db.update(rateLimits).set({ msgCount: 10_000 });
+    const limited = await api("POST", "/admin/tools/entregas_prueba/chat", { message: "Otra" });
+    await database.db.update(rateLimits).set({ msgCount: 0 });
+
+    // Performs assertions.
+    expect(other.status).toBe(200);
+    expect(crossed).toMatchObject({ status: 404, body: { error: "conversation_not_found" } });
+    expect(badId.status).toBe(400);
+    expect(limited).toMatchObject({ status: 429, body: { error: "rate_limited" } });
   });
 });

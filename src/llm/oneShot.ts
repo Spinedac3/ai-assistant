@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type CliCommand, cliArgs, DISALLOWED_CLI_TOOLS, launchCli } from "./cli.js";
 
@@ -21,6 +21,8 @@ const ONE_SHOT_TIMEOUT_MS = 120_000;
  * @return  The text of the answer
  */
 export async function askOnce(deps: OneShotDependencies, prompt: string): Promise<string> {
+  // The chat creates this folder on its first turn; a call may come before any
+  await mkdir(deps.workspacesDir, { recursive: true });
   const workspace = await mkdtemp(join(deps.workspacesDir, "one-shot-"));
   try {
     // No server at all: the model can only answer

@@ -226,14 +226,15 @@ export function buildQuery(
 }
 
 /**
- * Builds a query that reads a few rows of some columns of the base, all of them with a value, to
- * try the filters with
+ * Builds a query that reads a few rows of some columns of the base, to try the filters with or to
+ * show the guide what each column holds
  *
  * @param   base     Base of the definition
  * @param   engine   Engine
  * @param   pasted   Checked pasted query, when the base is one
  * @param   columns  Columns to read
  * @param   rows     How many rows
+ * @param   filled   Whether every column must have a value, or any row will do
  *
  * @return  The query
  */
@@ -243,11 +244,14 @@ export function sampleQuery(
   pasted: string | null,
   columns: string[],
   rows: number,
+  filled = true,
 ): string {
   const quoted = columns.map((column) => quote(column, engine));
-  const filled = quoted.map((column) => `${column} IS NOT NULL`).join(" AND ");
-  const from = `FROM ${fromClause(base, engine, pasted)} AS base
-WHERE ${filled}`;
+  const where = filled
+    ? `
+WHERE ${quoted.map((column) => `${column} IS NOT NULL`).join(" AND ")}`
+    : "";
+  const from = `FROM ${fromClause(base, engine, pasted)} AS base${where}`;
 
   return engine === "mssql"
     ? `SELECT TOP ${rows} ${quoted.join(", ")}

@@ -103,9 +103,9 @@ const app = await buildApp({
     ask: async (prompt) =>
       askOnce(
         {
-          cli: { bin: env.CLAUDE_BIN },
+          cli: chat.cli,
           model: (await readSetting(database.db, "chat.model")) ?? env.CHAT_MODEL,
-          workspacesDir: env.CHAT_WORKSPACES_DIR ?? join(tmpdir(), "ai-assistant-chat"),
+          workspacesDir: chat.workspacesDir,
         },
         prompt,
       ),

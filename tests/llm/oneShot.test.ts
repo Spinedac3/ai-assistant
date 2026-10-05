@@ -68,4 +68,22 @@ describe("one-shot call", () => {
     await expect(ask(failing)).rejects.toThrow("El modelo no respondió");
     await expect(ask(silent)).rejects.toThrow("El modelo no respondió");
   });
+
+  it("creates the folder of its calls when nothing has made it yet", async () => {
+    // Performs the test.
+    const { scenario, workspacesDir } = await scripted([{ result: "listo" }]);
+    const missing = join(workspacesDir, "aun-no-existe");
+    const answer = await askOnce(
+      {
+        cli: { bin: process.execPath, binArgs: [fakeCli, scenario] },
+        model: "sonnet",
+        workspacesDir: missing,
+      },
+      "hola",
+    );
+
+    // Performs assertions.
+    expect(answer).toBe("listo");
+    expect(await readdir(missing)).toEqual([]);
+  });
 });

@@ -33,6 +33,7 @@ export const DISALLOWED_CLI_TOOLS = [
   "Read Edit Write Glob Grep NotebookEdit",
   "Skill Workflow ReportFindings ScheduleWakeup SendMessage PushNotification",
   "RemoteTrigger EnterWorktree ExitWorktree",
+  "PowerShell LSP TodoWrite NotebookRead ExitPlanMode",
   "CronCreate CronDelete CronList",
   "TaskCreate TaskGet TaskList TaskOutput TaskStop TaskUpdate",
 ].join(" ");
