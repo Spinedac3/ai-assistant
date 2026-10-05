@@ -124,6 +124,8 @@ export function launchCli(
     stdio: ["pipe", "pipe", stderr],
   });
   closeSync(stderr);
+  // A CLI that dies before reading breaks the pipe; unhandled, that error kills the whole server
+  child.stdin?.on("error", () => undefined);
   child.stdin?.end(prompt);
 
   const onAbort = () => child.kill("SIGTERM");

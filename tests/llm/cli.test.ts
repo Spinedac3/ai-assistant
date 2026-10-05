@@ -1,6 +1,9 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { redactSecrets } from "../../src/chat/redact.js";
-import { childEnv, cliArgs } from "../../src/llm/cli.js";
+import { childEnv, cliArgs, launchCli } from "../../src/llm/cli.js";
 
 describe("cli", () => {
   it("never passes server secrets to the CLI child", () => {
@@ -73,5 +76,35 @@ describe("redact", () => {
     expect(text).toBe(
       "mi llave es [REDACTED:anthropic-key] y el token [REDACTED:bearer] y [REDACTED:github-token]",
     );
+  });
+});
+
+describe("launchCli", () => {
+  it("fails the turn without taking the server down when the binary is missing", async () => {
+    // Performs the test.
+    const workspace = mkdtempSync(join(tmpdir(), "cli-missing-"));
+    const cli = launchCli({ bin: join(workspace, "no-such-cli") }, ["-p"], "hola", workspace);
+    const events: unknown[] = [];
+    for await (const event of cli.events) {
+      events.push(event);
+    }
+
+    // Performs assertions.
+    await expect(cli.closed).rejects.toThrow();
+    expect(events).toEqual([]);
+  });
+
+  it("survives a CLI that exits before reading the prompt", async () => {
+    // Performs the test.
+    const workspace = mkdtempSync(join(tmpdir(), "cli-early-exit-"));
+    const cli = launchCli(
+      { bin: process.execPath, binArgs: ["-e", "process.exit(0)"] },
+      [],
+      "x".repeat(2_000_000),
+      workspace,
+    );
+
+    // Performs assertions.
+    expect(await cli.closed).toBe(0);
   });
 });
