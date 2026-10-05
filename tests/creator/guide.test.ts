@@ -179,7 +179,7 @@ describe("tool guide", () => {
     // Performs assertions.
     expect(prompt.match(/SAMPLES>>>/g)).toHaveLength(1);
     expect(prompt.match(/<<<SAMPLES/g)).toHaveLength(1);
-    expect(prompt).not.toMatch(/[\u202e\u{E0101}]/u);
+    expect(prompt).not.toMatch(/\u202e|\u{E0101}/u);
   });
 
   it("takes the JSON that is an answer, not another one shown first, and ignores braces after it", () => {
