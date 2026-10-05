@@ -149,12 +149,16 @@ export class DocumentStorage {
   }
 
   /**
-   * Removes both originals of a document; a missing one is not an error
+   * Removes originals of a document; a missing one is not an error
    *
    * @param   docCode  Document code
+   * @param   kinds    Which originals, both by default
    */
-  async remove(docCode: string): Promise<void> {
-    await this.client.removeObjects(this.config.bucket, [key(docCode, "md"), key(docCode, "pdf")]);
+  async remove(docCode: string, kinds: OriginalKind[] = ["md", "pdf"]): Promise<void> {
+    await this.client.removeObjects(
+      this.config.bucket,
+      kinds.map((kind) => key(docCode, kind)),
+    );
   }
 }
 

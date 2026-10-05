@@ -28,7 +28,7 @@ const jobParams = z.object({ id: z.coerce.number().int().positive() });
 const originalQuery = z.object({ kind: z.enum(["md", "pdf"]).default("md") });
 
 /**
- * Reads an uploaded file into memory, giving up as soon as it passes a size
+ * Reads an uploaded file into memory, keeping nothing once it passes a size
  *
  * @param   part      Uploaded file
  * @param   maxBytes  Size limit
@@ -39,17 +39,16 @@ async function readCapped(part: MultipartFile, maxBytes: number): Promise<Buffer
   const pieces: Buffer[] = [];
   let size = 0;
 
+  // Read to the end even past the limit: leaving the stream would stall the rest of the request
+  // and the connection with it
   for await (const piece of part.file) {
     size += (piece as Buffer).length;
-    if (size > maxBytes) {
-      part.file.resume();
-      return null;
+    if (size <= maxBytes) {
+      pieces.push(piece as Buffer);
     }
-
-    pieces.push(piece as Buffer);
   }
 
-  return part.file.truncated ? null : Buffer.concat(pieces);
+  return size > maxBytes || part.file.truncated ? null : Buffer.concat(pieces);
 }
 
 /**
@@ -147,11 +146,13 @@ export default async function docsRoutes(
       });
     }
 
-    // Both originals are replaced, so an old PDF never stays next to a new markdown
-    await storage.remove(code);
+    // Each save replaces the object in one step, so a failure never leaves the document without
+    // its markdown; an old PDF never stays next to a new markdown
     await storage.save(code, "md", markdown, scope);
     if (original) {
       await storage.save(code, "pdf", original, scope);
+    } else {
+      await storage.remove(code, ["pdf"]);
     }
 
     const userId = request.authUser?.id ?? 0;

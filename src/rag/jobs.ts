@@ -3,7 +3,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
 import { documentJobs } from "../db/schema.js";
 import { parseDocument } from "./document.js";
-import { type Index, ingestDocument } from "./ingest.js";
+import { type Index, ingestDocument, removeDocument } from "./ingest.js";
 import type { DocumentStorage } from "./storage.js";
 
 export type JobKind = "upload" | "reindex";
@@ -129,6 +129,12 @@ export async function runJob(deps: Omit<WorkerDependencies, "pollMs">, job: Job)
   try {
     const parsed = parseDocument(await deps.storage.readMarkdown(job.docCode));
     const result = await ingestDocument(deps.index, parsed);
+    // Deleted while it was being indexed: the delete wins, or it would come back without originals
+    if (!(await deps.storage.exists(job.docCode, "md"))) {
+      await removeDocument(deps.index, job.docCode);
+      throw new Error("El documento se borró mientras se indexaba");
+    }
+
     await finish(deps.db, job.id, { chunks: result.chunks });
     deps.logger.info({ job: job.id, doc: job.docCode, ...result }, "document indexed");
   } catch (error) {
