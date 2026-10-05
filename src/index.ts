@@ -59,7 +59,7 @@ const app = await buildApp({
     },
   },
   logger: true,
-  trustProxyHops: env.TRUST_PROXY_HOPS,
+  trustProxy: env.TRUST_PROXY,
 });
 
 // Tool failures, broken contracts and audit errors must reach the server log
