@@ -1,0 +1,21 @@
+# Dependencies and build
+node_modules/
+dist/
+coverage/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Tests
+tests/_reports/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Working files of the SDD flow (run logs, drafts)
+_local/

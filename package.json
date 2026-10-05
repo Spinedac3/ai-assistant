@@ -1,0 +1,37 @@
+{
+  "name": "ai-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generic AI assistant: chat, RAG and a declarative SQL tool builder, served over MCP",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Spinedac3/ai-assistant.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@12.9.1",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "pnpm typecheck && pnpm lint && pnpm test"
+  },
+  "dependencies": {
+    "fastify": "^5.11.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
+    "@types/node": "^22.20.1",
+    "tsx": "^4.23.4",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}
