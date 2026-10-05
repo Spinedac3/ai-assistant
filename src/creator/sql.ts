@@ -226,14 +226,14 @@ export function buildQuery(
 }
 
 /**
- * Builds a query that reads a few values of one column of the base, skipping empty ones, to try
- * the filters with
+ * Builds a query that reads a few rows of some columns of the base, all of them with a value, to
+ * try the filters with
  *
- * @param   base    Base of the definition
- * @param   engine  Engine
- * @param   pasted  Checked pasted query, when the base is one
- * @param   column  Column to read
- * @param   rows    How many values
+ * @param   base     Base of the definition
+ * @param   engine   Engine
+ * @param   pasted   Checked pasted query, when the base is one
+ * @param   columns  Columns to read
+ * @param   rows     How many rows
  *
  * @return  The query
  */
@@ -241,17 +241,18 @@ export function sampleQuery(
   base: ToolDefinitionSpec["base"],
   engine: EngineName,
   pasted: string | null,
-  column: string,
+  columns: string[],
   rows: number,
 ): string {
-  const quoted = quote(column, engine);
+  const quoted = columns.map((column) => quote(column, engine));
+  const filled = quoted.map((column) => `${column} IS NOT NULL`).join(" AND ");
   const from = `FROM ${fromClause(base, engine, pasted)} AS base
-WHERE ${quoted} IS NOT NULL`;
+WHERE ${filled}`;
 
   return engine === "mssql"
-    ? `SELECT TOP ${rows} ${quoted}
+    ? `SELECT TOP ${rows} ${quoted.join(", ")}
 ${from}`
-    : `SELECT ${quoted}
+    : `SELECT ${quoted.join(", ")}
 ${from}
 LIMIT ${rows}`;
 }

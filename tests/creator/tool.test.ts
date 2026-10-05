@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { normalizeRows } from "../../src/creator/columns.js";
 import { definitionSchema } from "../../src/creator/definition.js";
 import {
   type CreatedTool,
@@ -115,5 +116,17 @@ describe("created tool", () => {
     expect(text).toContain("hora de America/Guatemala");
     expect(text).toContain("También se le dice: despachos.");
     expect(text).toContain("Ojo: Excluye devoluciones.");
+  });
+
+  it("gives a one-bit MySQL field and 0/1 flags as booleans, and exact decimals as numbers", () => {
+    // Performs the test.
+    const rows = normalizeRows({
+      columns: ["activo", "flag", "monto"],
+      kinds: { activo: "boolean", flag: "boolean", monto: "number" },
+      rows: [{ activo: Buffer.from([1]), flag: 0, monto: "12.50" }],
+    });
+
+    // Performs assertions.
+    expect(rows).toEqual([{ activo: true, flag: false, monto: 12.5 }]);
   });
 });

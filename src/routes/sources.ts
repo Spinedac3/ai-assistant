@@ -79,7 +79,7 @@ export default async function sourcesRoutes(
         message: `Ya existe un permiso ${sourceScope(parsed.data.code)}; usa otro código para la fuente`,
       });
     }
-    await options.onSaved?.(parsed.data.code, saved.retargeted);
+
     await logAudit(db, {
       userId,
       level: "info",
@@ -87,6 +87,16 @@ export default async function sourcesRoutes(
       message: `${parsed.data.code} (${parsed.data.engine} ${parsed.data.host}/${parsed.data.database})`,
       ip: request.ip,
     });
+
+    // The source is saved; tools that fail to follow it are logged and catch up on the next start
+    await options
+      .onSaved?.(parsed.data.code, saved.retargeted)
+      .catch((error) =>
+        request.log.error(
+          { err: error, source: parsed.data.code },
+          "tools did not follow the source",
+        ),
+      );
 
     return reply.code(201).send({ ok: true, data: { code: parsed.data.code } });
   });

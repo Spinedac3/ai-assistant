@@ -16,6 +16,7 @@ import { deleteSource, saveSource, sourceScope } from "../../src/sources/registr
 import { calculateTool } from "../../src/tools/native/calculate.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
 import { Secrets } from "../../src/vault/envelope.js";
+import { asDemoAdmin } from "../support/demoAdmin.js";
 import { freshDatabase } from "./support/database.js";
 
 const LIMITS = { timeoutMs: 10_000, maxRows: 10_000 };
@@ -511,5 +512,35 @@ describe("creator on the demo engines", () => {
     expect(moved).toEqual({ saved: true, retargeted: true });
     expect(after?.status).toBe("draft");
     expect(registry.has("movida_pedidos")).toBe(false);
+  });
+
+  it("reads strings the same way whatever the server's default for quotes and backslashes", async () => {
+    // Performs the test.
+    await asDemoAdmin("mysql", [
+      "SET GLOBAL sql_mode = CONCAT(@@GLOBAL.sql_mode, ',ANSI_QUOTES,NO_BACKSLASH_ESCAPES')",
+    ]);
+    await asDemoAdmin("postgres", ["ALTER DATABASE demo SET standard_conforming_strings = off"]);
+    const read = async (engine: "mysql" | "postgres", sql: string) => {
+      const checked = checkPasted(sql, engine);
+      if (!checked.ok) {
+        throw new Error(checked.message);
+      }
+      return (await runQuery(DEMO_ENGINES[engine].reader, checked.sql, [], LIMITS)).rows[0];
+    };
+    let mysqlRow: unknown;
+    let postgresRow: unknown;
+    try {
+      mysqlRow = await read("mysql", "select \"dos\" as texto, 'a\\'b' as escapado");
+      postgresRow = await read("postgres", "select 'c:\\ruta' as texto");
+    } finally {
+      await asDemoAdmin("mysql", [
+        "SET GLOBAL sql_mode = REPLACE(REPLACE(@@GLOBAL.sql_mode, 'ANSI_QUOTES', ''), 'NO_BACKSLASH_ESCAPES', '')",
+      ]);
+      await asDemoAdmin("postgres", ["ALTER DATABASE demo RESET standard_conforming_strings"]);
+    }
+
+    // Performs assertions.
+    expect(mysqlRow).toEqual({ texto: "dos", escapado: "a'b" });
+    expect(postgresRow).toEqual({ texto: "c:\\ruta" });
   });
 });

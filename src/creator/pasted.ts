@@ -39,8 +39,11 @@ const MSSQL_HINTS = new Set([
   "SNAPSHOT",
 ]);
 
-const WORD_START = /[A-Za-z_@#$]/;
-const WORD_PART = /[A-Za-z0-9_@#$]/;
+// Letters of any language name columns without quotes, as año does
+const WORD_START = /[\p{L}_@#$]/u;
+const WORD_PART = /[\p{L}\p{N}_@#$]/u;
+// The only spacing every engine reads as spacing; anything else outside a string is refused
+const SPACING = new Set([" ", "\t", "\n", "\r"]);
 
 /**
  * Splits a query into words and symbols the way its engine reads it: strings, quoted names and
@@ -65,9 +68,12 @@ function lex(sql: string, engine: EngineName): Lexed | string {
     const char = sql[index] as string;
     const next = sql[index + 1] ?? "";
 
-    if (/\s/.test(char)) {
+    if (SPACING.has(char)) {
       index += 1;
       continue;
+    }
+    if (/\s/.test(char) || char < " ") {
+      return "La consulta tiene un espacio o un carácter de control que no es un espacio común.";
     }
 
     // MySQL takes -- as a comment only when a space or a control character follows

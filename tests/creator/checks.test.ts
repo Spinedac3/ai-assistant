@@ -114,7 +114,7 @@ function evaluate(
  */
 function runner(fault?: Fault, data = rows): Runner {
   return {
-    sample: async (column) => data.map((row) => row[column]).filter((value) => value != null),
+    sample: async (columns) => data.filter((row) => columns.every((column) => row[column] != null)),
     run: async (spec, args) => evaluate(spec, args, data, fault),
   };
 }
@@ -162,7 +162,7 @@ describe("tool checks", () => {
     // One row sits exactly on the middle of 2.5 and 7, which both halves hold
     const data = [...rows, { ruta: "R-Centro-1", dia: "2026-03-12", cantidad: 4.75 }];
     const source: Runner = {
-      sample: async (column) => data.map((row) => row[column]),
+      sample: async () => data,
       run: async (spec, args) => {
         const range = args.cantidad as [number, number] | undefined;
         const kept = range
@@ -202,7 +202,7 @@ describe("tool checks", () => {
   it("catches a result outside its declared shape and a tool that does not run", async () => {
     // Performs the test.
     const misshaped = await runChecks(tool, {
-      sample: async (column) => rows.map((row) => row[column]),
+      sample: async () => rows,
       run: async (spec, args) =>
         spec.summary?.aggregates.some((aggregate) => aggregate.as === "filas")
           ? evaluate(spec, args, rows)
@@ -253,5 +253,70 @@ describe("tool checks", () => {
       "sum_adds_up",
       "range_splits",
     ]);
+  });
+
+  it("takes the values of the required filters from one same row", async () => {
+    // Performs the test.
+    const required: CreatedTool = {
+      ...tool,
+      spec: {
+        ...tool.spec,
+        filters: [
+          { column: "ruta", op: "=", required: true },
+          { column: "dia", op: "=", required: true },
+        ],
+      },
+    };
+    const asked: Record<string, unknown>[] = [];
+    const results = await runChecks(required, {
+      sample: async (columns) =>
+        columns.length > 1
+          ? [rows[2] as Row]
+          : // Per column, the first value of each would come from different rows
+            rows.map((row) => ({ [columns[0] as string]: row[columns[0] as string] })),
+      run: async (spec, args) => {
+        asked.push(args);
+        return evaluate(
+          spec,
+          { ruta: args.ruta },
+          rows.filter((row) => row.dia === args.dia),
+        );
+      },
+    });
+
+    // Performs assertions.
+    expect(asked[0]).toEqual({ ruta: "R-Sur-1", dia: "2026-03-20" });
+    expect(results[0]).toMatchObject({ name: "runs", ok: true });
+  });
+
+  it("splits a range of whole numbers on a whole number", async () => {
+    // Performs the test.
+    const whole: CreatedTool = {
+      ...tool,
+      columns: [...tool.columns.slice(0, 2), { name: "cantidad", kind: "number" }],
+      spec: { ...tool.spec, filters: [{ column: "cantidad", op: "between", required: false }] },
+    };
+    const data = [
+      { ruta: "A", dia: "2026-03-01", cantidad: 3 },
+      { ruta: "B", dia: "2026-03-02", cantidad: 4 },
+      { ruta: "C", dia: "2026-03-03", cantidad: 6 },
+    ];
+    const bounds: unknown[] = [];
+    await runChecks(whole, {
+      sample: async () => data,
+      run: async (spec, args) => {
+        const range = args.cantidad as [number, number] | undefined;
+        if (range) {
+          bounds.push(...range);
+        }
+        const kept = range
+          ? data.filter((row) => row.cantidad >= range[0] && row.cantidad <= range[1])
+          : data;
+        return evaluate(spec, {}, kept);
+      },
+    });
+
+    // Performs assertions.
+    expect(bounds.every((bound) => Number.isInteger(bound))).toBe(true);
   });
 });

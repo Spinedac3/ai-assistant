@@ -165,6 +165,8 @@ async function postgresQuery(
 
   try {
     await client.query("BEGIN READ ONLY");
+    // A backslash inside '' is plain text, whatever the server's default
+    await client.query("SET LOCAL standard_conforming_strings = on");
     if (limits.timeZone) {
       await client.query("SELECT set_config('TimeZone', $1, true)", [limits.timeZone]);
     }
@@ -259,6 +261,10 @@ async function mysqlQuery(
   try {
     // The client timeout only stops waiting; this one stops the query on the server too
     await run(`SET SESSION max_execution_time = ${Math.trunc(limits.timeoutMs)}`);
+    // "" is a string and a backslash escapes inside strings, whatever the server's default
+    await run(
+      "SET SESSION sql_mode = REPLACE(REPLACE(@@SESSION.sql_mode, 'ANSI_QUOTES', ''), 'NO_BACKSLASH_ESCAPES', '')",
+    );
     await run("START TRANSACTION READ ONLY");
     const rows: Array<Record<string, unknown>> = [];
     let columns: string[] = [];

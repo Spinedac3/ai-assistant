@@ -126,4 +126,12 @@ describe("pasted query", () => {
     expect(checked.ok).toBe(true);
     expect(Date.now() - started).toBeLessThan(1_000);
   });
+
+  it("takes names in any language and refuses spacing no engine reads as spacing", () => {
+    // Performs assertions.
+    expect(accepted("select año, niño from pedidos")).toContain("año");
+    expect(refusal("select 1\u00a0from pedidos")).toContain("espacio");
+    expect(refusal("select 1 from pedidos\u0000")).toContain("control");
+    expect(accepted("select 'año\u00a0nuevo' as nota from t")).toContain("nuevo");
+  });
 });

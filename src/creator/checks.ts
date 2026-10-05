@@ -22,8 +22,8 @@ export interface CheckResult {
 
 export interface Runner {
   run(spec: ToolDefinitionSpec, args: Record<string, unknown>): Promise<Row[]>;
-  // Values of a column, none of them empty
-  sample(column: string): Promise<unknown[]>;
+  // Rows with a value in every one of the columns
+  sample(columns: string[]): Promise<Row[]>;
 }
 
 // Enough values to find one for every filter without reading the whole base
@@ -54,10 +54,9 @@ export function runnerFor(
       const query = buildQuery(spec, info.engine, pasted, args, kinds);
       return normalizeRows(await runQuery(info, query.sql, query.params, limits));
     },
-    sample: async (column) => {
-      const sql = sampleQuery(base, info.engine, pasted, column, SAMPLE_ROWS);
-      const rows = normalizeRows(await runQuery(info, sql, [], limits));
-      return rows.map((row) => row[column]).filter((value) => value !== "");
+    sample: async (columns) => {
+      const sql = sampleQuery(base, info.engine, pasted, columns, SAMPLE_ROWS);
+      return normalizeRows(await runQuery(info, sql, [], limits));
     },
   };
 }
@@ -153,13 +152,19 @@ export async function runChecks(tool: CreatedTool, runner: Runner): Promise<Chec
   const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
 
   const values = new Map<string, unknown>();
+  const valuesOf = (rows: Row[], column: string) =>
+    rows.map((row) => row[column]).filter((value) => value !== null && value !== "");
   try {
+    // The required filters take their values from one same row, so together they match it
+    const required = spec.filters.filter((filter) => filter.required);
+    const together =
+      required.length > 0
+        ? (await runner.sample(required.map((filter) => filter.column))).slice(0, 1)
+        : [];
     for (const filter of spec.filters) {
       const kind = kinds.get(filter.column) ?? "text";
-      values.set(
-        filter.column,
-        sampleArgument(filter.op, kind, await runner.sample(filter.column)),
-      );
+      const rows = filter.required ? together : await runner.sample([filter.column]);
+      values.set(filter.column, sampleArgument(filter.op, kind, valuesOf(rows, filter.column)));
     }
   } catch (error) {
     return [
@@ -198,7 +203,14 @@ export async function runChecks(tool: CreatedTool, runner: Runner): Promise<Chec
     // A tool over no rows passes every property and proves nothing
     if ((await count(base)) === 0) {
       return [
-        { name: "runs", ok: false, detail: "La base no tiene filas con que probar la herramienta" },
+        {
+          name: "runs",
+          ok: false,
+          detail:
+            Object.keys(base).length > 0
+              ? "No hay filas con los valores de prueba de los filtros obligatorios"
+              : "La base no tiene filas con que probar la herramienta",
+        },
       ];
     }
   } catch (error) {
@@ -360,7 +372,10 @@ async function rangeSplits(
   const days = typeof low === "string" && DATE_ONLY.test(low);
   const middle = days
     ? addDays(low, Math.floor((Date.parse(String(high)) - Date.parse(low)) / DAY_MS / 2))
-    : ((low as number) + (high as number)) / 2;
+    : // Whole numbers split on a whole number, which an integer column takes as a parameter
+      Number.isInteger(low) && Number.isInteger(high)
+      ? Math.floor(((low as number) + (high as number)) / 2)
+      : ((low as number) + (high as number)) / 2;
   const name = paramName(range.column);
   const span = (from: unknown, to: unknown) => count({ ...base, [name]: [from, to] });
   const whole = await span(low, high);
