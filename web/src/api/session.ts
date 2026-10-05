@@ -69,18 +69,24 @@ export function getSession(): Session | null {
 }
 
 /**
+ * Listens to every change of the session
+ *
+ * @param   listener  Called after each change
+ *
+ * @return  A function that stops listening
+ */
+export function subscribeSession(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/**
  * Follows the session from a component
  *
  * @return  The session, or null
  */
 export function useSession(): Session | null {
-  return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    () => current,
-  );
+  return useSyncExternalStore(subscribeSession, () => current);
 }
 
 /**

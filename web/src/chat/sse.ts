@@ -17,29 +17,48 @@ export async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenera
   let buffer = "";
   for (;;) {
     const { value, done } = await reader.read();
-    if (done) {
-      return;
-    }
     // A character may be split between two chunks; stream mode keeps its first bytes for the next
-    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+    buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, "\n");
     let end = buffer.indexOf("\n\n");
     while (end >= 0) {
-      const block = buffer.slice(0, end);
+      const event = parseBlock(buffer.slice(0, end));
       buffer = buffer.slice(end + 2);
       end = buffer.indexOf("\n\n");
-
-      let event = "message";
-      const data: string[] = [];
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) {
-          event = line.slice(6).trim();
-        } else if (line.startsWith("data:")) {
-          data.push(line.slice(5).trimStart());
-        }
-      }
-      if (data.length > 0) {
-        yield { event, data: JSON.parse(data.join("\n")) };
+      if (event) {
+        yield event;
       }
     }
+    if (done) {
+      // A last event the server closed without its blank line still counts
+      const last = parseBlock(buffer);
+      if (last) {
+        yield last;
+      }
+      return;
+    }
   }
+}
+
+/**
+ * Reads one block of lines as an event
+ *
+ * @param   block  Lines of one event
+ *
+ * @return  The event, or null when it carries no data
+ */
+function parseBlock(block: string): StreamEvent | null {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of block.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      // The format allows one space after the colon, and only that one is not part of the data
+      const value = line.slice(5);
+      data.push(value.startsWith(" ") ? value.slice(1) : value);
+    }
+  }
+
+  return data.length > 0 ? { event, data: JSON.parse(data.join("\n")) } : null;
 }

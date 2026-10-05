@@ -64,12 +64,16 @@ export default async function panelRoutes(
   const page = async (reply: FastifyReply) => {
     const index = await fileOf(root, "index.html");
     if (!index) {
-      return reply.code(404).type("text/plain; charset=utf-8").send("El panel no está construido");
+      return reply
+        .code(404)
+        .headers(SECURITY_HEADERS)
+        .type("text/plain; charset=utf-8")
+        .send("El panel no está construido");
     }
     // Always the newest page, which names the files of the newest build
     return reply
       .headers({ ...SECURITY_HEADERS, "Cache-Control": "no-store" })
-      .type(TYPES[".html"] ?? "text/html")
+      .type("text/html; charset=utf-8")
       .send(index);
   };
 
@@ -91,7 +95,7 @@ export default async function panelRoutes(
     }
     // A missing file is a 404; any other path is a route of the panel itself
     if (extname(relative) !== "") {
-      return reply.code(404).send({ ok: false, error: "not_found" });
+      return reply.code(404).headers(SECURITY_HEADERS).send({ ok: false, error: "not_found" });
     }
 
     return page(reply);

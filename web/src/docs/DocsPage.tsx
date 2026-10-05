@@ -14,7 +14,7 @@ import {
   Text,
 } from "@chakra-ui/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FiDownload, FiRefreshCw, FiTrash2, FiUpload } from "react-icons/fi";
 import { ApiError, api, request } from "../api/http";
 import { can, useSession } from "../api/session";
@@ -58,17 +58,24 @@ export function DocsPage() {
 
   const download = async (code: string) => {
     setError(null);
-    const response = await request(`/docs/${encodeURIComponent(code)}/original`);
-    if (!response.ok) {
-      setError("Ese documento no tiene original guardado, o ya no puedes leerlo");
-      return;
+    try {
+      const response = await request(`/docs/${encodeURIComponent(code)}/original`);
+      if (!response.ok) {
+        setError("Ese documento no tiene original guardado, o ya no puedes leerlo");
+        return;
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${code}${extensionOf(response.headers.get("content-type"))}`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      // Some browsers start the download after the click returns; the file must still be there
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      setError("No se pudo descargar; vuelve a intentarlo");
     }
-    const url = URL.createObjectURL(await response.blob());
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${code}${extensionOf(response.headers.get("content-type"))}`;
-    link.click();
-    URL.revokeObjectURL(url);
   };
 
   const act = async (action: () => Promise<unknown>) => {
@@ -318,19 +325,31 @@ function UploadButton({ onQueued }: { onQueued: (job: number) => void }) {
  * @return  A status line
  */
 function JobStatus({ id, onSettled }: { id: number; onSettled: () => void }) {
+  const queries = useQueryClient();
   const job = useQuery({
     queryKey: ["job", id],
     queryFn: () => api<Job>(`/docs/jobs/${id}`),
+    // It stops once the job ends, or when it can no longer be read
     refetchInterval: (query) =>
-      query.state.data?.status === "done" || query.state.data?.status === "failed" ? false : 2_000,
+      query.state.status === "error" ||
+      query.state.data?.status === "done" ||
+      query.state.data?.status === "failed"
+        ? false
+        : 2_000,
   });
-  const status = job.data?.status;
+  const status = job.isError ? "failed" : job.data?.status;
   const [dismissed, setDismissed] = useState(false);
+  const finished = status === "done" || status === "failed";
+  // The list shows the new document as soon as it is indexed, not when the notice is closed
+  useEffect(() => {
+    if (status === "done") {
+      void queries.invalidateQueries({ queryKey: ["docs"] });
+    }
+  }, [status, queries]);
 
   if (dismissed) {
     return null;
   }
-  const finished = status === "done" || status === "failed";
 
   return (
     <HStack
@@ -348,7 +367,9 @@ function JobStatus({ id, onSettled }: { id: number; onSettled: () => void }) {
           {status === "done"
             ? `${job.data?.docCode} quedó indexado y ya se puede buscar.`
             : status === "failed"
-              ? `${job.data?.docCode} no se pudo indexar: ${job.data?.error ?? "error desconocido"}`
+              ? job.isError
+                ? "No se pudo seguir el trabajo; revisa la lista en un momento."
+                : `${job.data?.docCode} no se pudo indexar: ${job.data?.error ?? "error desconocido"}`
               : `Indexando ${job.data?.docCode ?? "el documento"}; tarda menos de un minuto.`}
         </Text>
       </HStack>
@@ -377,9 +398,10 @@ function JobStatus({ id, onSettled }: { id: number; onSettled: () => void }) {
  */
 function DeleteButton({ code, onDelete }: { code: string; onDelete: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
 
   return (
-    <Dialog.Root role="alertdialog">
+    <Dialog.Root role="alertdialog" open={open} onOpenChange={(details) => setOpen(details.open)}>
       <Dialog.Trigger asChild>
         <IconButton aria-label="Borrar" size="xs" variant="ghost" colorPalette="red">
           <FiTrash2 />
@@ -402,19 +424,19 @@ function DeleteButton({ code, onDelete }: { code: string; onDelete: () => Promis
               <Dialog.ActionTrigger asChild>
                 <Button variant="outline">Cancelar</Button>
               </Dialog.ActionTrigger>
-              <Dialog.ActionTrigger asChild>
-                <Button
-                  colorPalette="red"
-                  loading={busy}
-                  onClick={async () => {
-                    setBusy(true);
-                    await onDelete();
-                    setBusy(false);
-                  }}
-                >
-                  Borrar
-                </Button>
-              </Dialog.ActionTrigger>
+              {/* It closes once the document is gone, so the wait shows on the button */}
+              <Button
+                colorPalette="red"
+                loading={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  await onDelete();
+                  setBusy(false);
+                  setOpen(false);
+                }}
+              >
+                Borrar
+              </Button>
             </Dialog.Footer>
           </Dialog.Content>
         </Dialog.Positioner>

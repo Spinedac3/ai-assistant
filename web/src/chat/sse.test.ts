@@ -61,4 +61,22 @@ describe("server-sent events", () => {
     // Performs assertions.
     expect(events).toEqual([{ event: "delta", data: { text: "año" } }]);
   });
+
+  it("joins data spread over several lines, and keeps a last event that lost its blank line", async () => {
+    // Performs the test.
+    const events = [];
+    for await (const event of readEvents(
+      body([
+        'event: done\ndata: {"text":\ndata: "fin"}\n\nevent: error\ndata: {"message":"corte"}',
+      ]),
+    )) {
+      events.push(event);
+    }
+
+    // Performs assertions.
+    expect(events).toEqual([
+      { event: "done", data: { text: "fin" } },
+      { event: "error", data: { message: "corte" } },
+    ]);
+  });
 });

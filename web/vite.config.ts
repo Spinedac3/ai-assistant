@@ -13,5 +13,6 @@ export default defineConfig({
     ),
   },
   // The component library alone is most of the bundle; an internal panel loads it once
-  build: { outDir: "dist", emptyOutDir: true, chunkSizeWarningLimit: 900 },
+  // Nothing inlined as data: URLs, so the panel's strict CSP holds for every font and image
+  build: { outDir: "dist", emptyOutDir: true, chunkSizeWarningLimit: 900, assetsInlineLimit: 0 },
 });

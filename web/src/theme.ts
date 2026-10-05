@@ -154,9 +154,10 @@ const config = defineConfig({
           solid: { value: { base: "{colors.brand.500}", _dark: "{colors.brand.400}" } },
           contrast: { value: "white" },
           fg: { value: { base: "{colors.brand.600}", _dark: "{colors.brand.300}" } },
-          muted: { value: { base: "{colors.brand.100}", _dark: "rgba(124, 92, 228, 0.24)" } },
-          subtle: { value: { base: "{colors.brand.50}", _dark: "rgba(124, 92, 228, 0.16)" } },
-          emphasized: { value: { base: "{colors.brand.200}", _dark: "rgba(124, 92, 228, 0.32)" } },
+          // In the dark, the deep end of the same ramp, so a configured brand changes these too
+          muted: { value: { base: "{colors.brand.100}", _dark: "{colors.brand.800}" } },
+          subtle: { value: { base: "{colors.brand.50}", _dark: "{colors.brand.900}" } },
+          emphasized: { value: { base: "{colors.brand.200}", _dark: "{colors.brand.700}" } },
           focusRing: { value: "{colors.brand.500}" },
         },
         // Three layers: the canvas, the surfaces on it and the fields inside them

@@ -10,10 +10,12 @@ interface Stored extends Upload {
   expiresAt: number;
 }
 
-// A file is read within the conversation that brought it; past this it is gone
+// A file is read within the conversation that brought it; past this long unused, it is gone
 const TTL_MS = 30 * 60_000;
 // Uploads live in memory, so all of them together stay under this
 const TOTAL_BYTES = 100 * 1024 * 1024;
+// And one person never takes more than this of it, so no one fills it for everybody
+export const PERSON_BYTES = 30 * 1024 * 1024;
 
 /**
  * Files a person attaches to the chat, kept in memory for a while and only for that person
@@ -24,6 +26,26 @@ export class Uploads {
   constructor(private readonly now: () => number = Date.now) {}
 
   /**
+   * Tells whether a file of a size would fit, before it is read
+   *
+   * @param   userId  Owner
+   * @param   bytes   Size of the file, or the most it may be
+   *
+   * @return  Whether there is room for it
+   */
+  accepts(userId: number, bytes: number): boolean {
+    this.sweep();
+    let total = 0;
+    let own = 0;
+    for (const file of this.files.values()) {
+      total += file.bytes.length;
+      own += file.userId === userId ? file.bytes.length : 0;
+    }
+
+    return total + bytes <= TOTAL_BYTES && own + bytes <= PERSON_BYTES;
+  }
+
+  /**
    * Keeps a file for its owner
    *
    * @param   userId  Owner
@@ -32,9 +54,7 @@ export class Uploads {
    * @return  Its id, or null when there is no room left
    */
   put(userId: number, upload: Upload): string | null {
-    this.sweep();
-    const used = [...this.files.values()].reduce((sum, file) => sum + file.bytes.length, 0);
-    if (used + upload.bytes.length > TOTAL_BYTES) {
+    if (!this.accepts(userId, upload.bytes.length)) {
       return null;
     }
     const id = randomUUID();
@@ -44,7 +64,7 @@ export class Uploads {
   }
 
   /**
-   * Gives a file back only to its owner, and only while it lives
+   * Gives a file back only to its owner, and only while it lives; each use keeps it longer
    *
    * @param   userId  Who asks
    * @param   id      Id of the file
@@ -54,8 +74,12 @@ export class Uploads {
   get(userId: number, id: string): Upload | null {
     this.sweep();
     const file = this.files.get(id);
+    if (!file || file.userId !== userId) {
+      return null;
+    }
+    file.expiresAt = this.now() + TTL_MS;
 
-    return file && file.userId === userId ? { name: file.name, bytes: file.bytes } : null;
+    return { name: file.name, bytes: file.bytes };
   }
 
   /**

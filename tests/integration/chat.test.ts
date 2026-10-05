@@ -8,7 +8,7 @@ import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
 import { NO_ANSWER, NO_DATA, RETRY_DIRECTIVE } from "../../src/chat/guards.js";
 import { refundMessage, reserveMessage } from "../../src/chat/rateLimit.js";
-import { Uploads } from "../../src/chat/uploads.js";
+import { PERSON_BYTES, Uploads } from "../../src/chat/uploads.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { messages, rateLimits, roles, users } from "../../src/db/schema.js";
 import { testSigner } from "../support/keys.js";
@@ -524,6 +524,16 @@ describe("chat", () => {
     const fake = await send("factura.pdf", Buffer.from("MZ ejecutable"));
     const huge = await send("grande.pdf", Buffer.concat([pdf, Buffer.alloc(10 * 1024 * 1024)]));
     const anonymous = await app.inject({ method: "POST", url: "/chat/upload" });
+    // Once a person holds a full share, the next upload is refused before it is read
+    const [owner] = await database.db
+      .select()
+      .from(users)
+      .where(eq(users.email, "ana@example.com"));
+    uploads.put(owner?.id ?? 0, {
+      name: "grande.pdf",
+      bytes: Buffer.alloc(PERSON_BYTES - pdf.length),
+    });
+    const full = await send("otra.pdf", pdf);
     const data = sent.json().data;
     const [ana] = await database.db.select().from(users).where(eq(users.email, "ana@example.com"));
     const [beto] = await database.db
@@ -538,5 +548,7 @@ describe("chat", () => {
     expect(fake.json()).toMatchObject({ error: "not_pdf" });
     expect(huge.json()).toMatchObject({ error: "file_too_large" });
     expect(anonymous.statusCode).toBe(401);
+    expect(full).toMatchObject({ statusCode: 429 });
+    expect(full.json()).toMatchObject({ error: "uploads_full" });
   });
 });

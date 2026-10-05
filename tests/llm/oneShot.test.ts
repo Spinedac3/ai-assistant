@@ -111,6 +111,8 @@ describe("one-shot call", () => {
     expect(call.files).toContain("document.pdf");
     expect(value("--tools")).toBe("Read");
     expect(value("--allowedTools")).toBe("Read(./document.pdf)");
+    expect(value("--permission-mode")).toBe("dontAsk");
+    expect(value("--setting-sources")).toBe("project,local");
     expect(value("--disallowedTools").split(" ")).not.toContain("Read");
     expect(value("--disallowedTools").split(" ")).toContain("Bash");
     expect(await readdir(workspacesDir)).toEqual([]);

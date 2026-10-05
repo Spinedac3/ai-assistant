@@ -12,6 +12,7 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { FiCheck, FiPaperclip, FiPlus, FiSend, FiSquare, FiStar, FiX } from "react-icons/fi";
+import type { Components } from "react-markdown";
 import Markdown from "react-markdown";
 import { NavLink, useNavigate, useParams } from "react-router";
 import remarkGfm from "remark-gfm";
@@ -30,17 +31,37 @@ interface Draft {
   tools: ToolStep[];
 }
 
+interface Conversation {
+  id: number;
+  title: string | null;
+  messages: ChatMessage[];
+}
+
 const PULSE = "pulse 1.5s ease-in-out infinite";
+
+// The note a message carries so the model finds the PDF; shown to the person as a chip instead
+const ATTACHMENT_NOTE = /\n\n\[PDF adjunto «(.+?)», file_id: [0-9a-f-]+\. Léelo con read_pdf\.\]$/;
+
+/**
+ * Opens the chat on its conversation, a fresh page for each one, so a turn in flight never draws
+ * into another conversation
+ *
+ * @return  The page
+ */
+export function ChatRoute() {
+  const { id } = useParams();
+  return <ChatPage key={id ?? "new"} conversationId={id ? Number(id) : null} />;
+}
 
 /**
  * The internal chat: a person's conversations on the left and the open one on the right, with
  * the tools the assistant uses shown while they run
  *
+ * @param   props  The open conversation, or null for a new one
+ *
  * @return  The page
  */
-export function ChatPage() {
-  const { id } = useParams();
-  const conversationId = id ? Number(id) : null;
+function ChatPage({ conversationId }: { conversationId: number | null }) {
   const navigate = useNavigate();
   const queries = useQueryClient();
   const [input, setInput] = useState("");
@@ -49,6 +70,29 @@ export function ChatPage() {
   const [attached, setAttached] = useState<{ fileId: string; name: string } | null>(null);
   const [uploading, setUploading] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
+  const stop = useRef<AbortController | null>(null);
+  const bottom = useRef<HTMLDivElement>(null);
+
+  // Leaving the page stops the turn that was answering on it
+  useEffect(() => () => stop.current?.abort(), []);
+
+  const list = useQuery({
+    queryKey: ["conversations"],
+    queryFn: () => api<ConversationSummary[]>("/chat/conversations"),
+  });
+  const open = useQuery({
+    queryKey: ["conversation", conversationId],
+    queryFn: () => api<Conversation>(`/chat/conversations/${conversationId}`),
+    enabled: conversationId !== null,
+  });
+
+  const messages = conversationId ? (open.data?.messages ?? []) : [];
+  const shown = `${messages.length}:${draft?.text.length ?? 0}:${draft?.tools.length ?? 0}`;
+  useEffect(() => {
+    if (shown) {
+      bottom.current?.scrollIntoView({ block: "end" });
+    }
+  }, [shown]);
 
   const attach = async (file: File | undefined) => {
     if (!file) {
@@ -71,29 +115,6 @@ export function ChatPage() {
       }
     }
   };
-  const stop = useRef<AbortController | null>(null);
-  const bottom = useRef<HTMLDivElement>(null);
-
-  const list = useQuery({
-    queryKey: ["conversations"],
-    queryFn: () => api<ConversationSummary[]>("/chat/conversations"),
-  });
-  const open = useQuery({
-    queryKey: ["conversation", conversationId],
-    queryFn: () =>
-      api<{ id: number; title: string | null; messages: ChatMessage[] }>(
-        `/chat/conversations/${conversationId}`,
-      ),
-    enabled: conversationId !== null,
-  });
-
-  const messages = conversationId ? (open.data?.messages ?? []) : [];
-  const shown = `${messages.length}:${draft?.text.length ?? 0}:${draft?.tools.length ?? 0}`;
-  useEffect(() => {
-    if (shown) {
-      bottom.current?.scrollIntoView({ block: "end" });
-    }
-  }, [shown]);
 
   const update = (change: (current: Draft) => Draft) =>
     setDraft((current) => (current ? change(current) : current));
@@ -102,9 +123,7 @@ export function ChatPage() {
     const typed = input.trim();
     // The model learns the file from the message itself, and reads it with read_pdf
     const question = attached
-      ? `${typed || "¿Qué dice este documento?"}
-
-[PDF adjunto «${attached.name}», file_id: ${attached.fileId}. Léelo con read_pdf.]`
+      ? `${typed || "¿Qué dice este documento?"}\n\n[PDF adjunto «${attached.name}», file_id: ${attached.fileId}. Léelo con read_pdf.]`
       : typed;
     if (!question || draft) {
       return;
@@ -116,6 +135,7 @@ export function ChatPage() {
     const controller = new AbortController();
     stop.current = controller;
     let target = conversationId;
+    let finished = false;
     try {
       for await (const event of streamTurn(question, conversationId, controller.signal)) {
         if (event.type === "start") {
@@ -134,9 +154,17 @@ export function ChatPage() {
               tool.id === event.id ? { ...tool, state: event.ok ? "ok" : "failed" } : tool,
             ),
           }));
+        } else if (event.type === "done") {
+          finished = true;
+          // The server may have answered on a second attempt; its final text is the one that counts
+          update((current) => ({ ...current, text: event.text }));
         } else if (event.type === "error") {
+          finished = true;
           setError(event.message);
         }
+      }
+      if (!finished && !controller.signal.aborted) {
+        setError("Se cortó la conexión antes de terminar la respuesta; vuelve a intentarlo");
       }
     } catch (failure) {
       if (!controller.signal.aborted) {
@@ -148,19 +176,31 @@ export function ChatPage() {
       }
     } finally {
       stop.current = null;
-      await queries.invalidateQueries({ queryKey: ["conversations"] });
-      if (target) {
-        await queries.invalidateQueries({ queryKey: ["conversation", target] });
-        if (target !== conversationId) {
-          navigate(`/chat/${target}`);
-        }
-      }
-      setDraft(null);
     }
+    if (controller.signal.aborted) {
+      return;
+    }
+
+    // The stored conversation replaces the draft only once it is loaded, so nothing flickers
+    await queries.invalidateQueries({ queryKey: ["conversations"] });
+    if (target) {
+      await queries
+        .query({
+          queryKey: ["conversation", target],
+          queryFn: () => api<Conversation>(`/chat/conversations/${target}`),
+        })
+        .catch(() => undefined);
+      if (target !== conversationId) {
+        navigate(`/chat/${target}`);
+        return;
+      }
+    }
+    setDraft(null);
   };
 
   const onKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Enter" && !event.shiftKey) {
+    // Enter while an input method is composing a character belongs to that composition
+    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       void send();
     }
@@ -244,11 +284,10 @@ export function ChatPage() {
                   </HStack>
                 ))}
                 {draft.text ? (
-                  <Box className="markdown" fontSize="sm">
-                    <Markdown remarkPlugins={[remarkGfm]}>{draft.text}</Markdown>
-                  </Box>
+                  <Answer text={draft.text} />
                 ) : (
-                  draft.tools.length === 0 && (
+                  draft.tools.length === 0 &&
+                  !error && (
                     <Text fontSize="sm" color="fg.subtle" animation={PULSE}>
                       Pensando…
                     </Text>
@@ -329,6 +368,38 @@ export function ChatPage() {
   );
 }
 
+// Links of an answer open apart, and one to another site says which site it is before anyone
+// follows it: the text of an answer may come from data or a document no one checked
+const LINKS: Components = {
+  a: ({ href, children }) => {
+    const target = href ? new URL(href, window.location.href) : null;
+    const foreign = target !== null && target.origin !== window.location.origin;
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer">
+        {children}
+        {foreign && ` (${target.host})`}
+      </a>
+    );
+  },
+};
+
+/**
+ * An answer of the assistant, rendered from its markdown
+ *
+ * @param   props  The text
+ *
+ * @return  The answer
+ */
+function Answer({ text }: { text: string }) {
+  return (
+    <Box className="markdown" fontSize="sm">
+      <Markdown remarkPlugins={[remarkGfm]} components={LINKS}>
+        {text}
+      </Markdown>
+    </Box>
+  );
+}
+
 /**
  * One message: the person's on the right, the assistant's as rendered markdown with its rating
  *
@@ -338,62 +409,100 @@ export function ChatPage() {
  */
 function Bubble({ message }: { message: ChatMessage }) {
   if (message.role === "user") {
+    const note = message.content.match(ATTACHMENT_NOTE);
     return (
-      <Box
-        alignSelf="flex-end"
-        maxW="75%"
-        bg="brand.subtle"
-        px={4}
-        py={2}
-        rounded="panel"
-        fontSize="sm"
-        whiteSpace="pre-wrap"
-      >
-        {message.content}
-      </Box>
+      <Stack alignSelf="flex-end" maxW="75%" align="flex-end" gap={1}>
+        {note && (
+          <HStack fontSize="xs" color="fg.muted" gap={1}>
+            <FiPaperclip />
+            <Text>{note[1]}</Text>
+          </HStack>
+        )}
+        <Box bg="brand.subtle" px={4} py={2} rounded="panel" fontSize="sm" whiteSpace="pre-wrap">
+          {note ? message.content.slice(0, note.index) : message.content}
+        </Box>
+      </Stack>
     );
   }
 
   return (
     <Stack gap={1}>
-      <Box className="markdown" fontSize="sm">
-        <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
-      </Box>
+      <Answer text={message.content} />
       {message.id > 0 && <Rating messageId={message.id} />}
     </Stack>
   );
 }
 
 /**
- * Lets the person rate an answer from one to five stars
+ * Lets the person rate an answer from one to five stars; a low one asks what went wrong, as the
+ * server requires
  *
  * @param   props  The answer
  *
- * @return  The stars
+ * @return  The stars, and the comment when it is asked for
  */
 function Rating({ messageId }: { messageId: number }) {
   const [stars, setStars] = useState(0);
-  const rate = async (value: number) => {
-    setStars(value);
-    await api(`/chat/messages/${messageId}/rate`, { method: "POST", body: { stars: value } }).catch(
-      () => setStars(0),
-    );
+  const [pending, setPending] = useState<number | null>(null);
+  const [comment, setComment] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const rate = async (value: number, text?: string) => {
+    setError(null);
+    try {
+      await api(`/chat/messages/${messageId}/rate`, {
+        method: "POST",
+        body: { stars: value, ...(text ? { comment: text } : {}) },
+      });
+      setStars(value);
+      setPending(null);
+      setComment("");
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : "No se pudo guardar la nota");
+    }
   };
 
   return (
-    <HStack gap={0}>
-      {[1, 2, 3, 4, 5].map((value) => (
-        <IconButton
-          key={value}
-          aria-label={`${value} de 5`}
-          size="2xs"
-          variant="ghost"
-          color={value <= stars ? "brand.solid" : "fg.subtle"}
-          onClick={() => void rate(value)}
-        >
-          <FiStar fill={value <= stars ? "currentColor" : "none"} />
-        </IconButton>
-      ))}
-    </HStack>
+    <Stack gap={1}>
+      <HStack gap={0}>
+        {[1, 2, 3, 4, 5].map((value) => (
+          <IconButton
+            key={value}
+            aria-label={`${value} de 5`}
+            size="2xs"
+            variant="ghost"
+            color={value <= (pending ?? stars) ? "brand.solid" : "fg.subtle"}
+            onClick={() => (value <= 2 ? setPending(value) : void rate(value))}
+          >
+            <FiStar fill={value <= (pending ?? stars) ? "currentColor" : "none"} />
+          </IconButton>
+        ))}
+      </HStack>
+      {pending !== null && (
+        <HStack maxW="lg" align="end">
+          <Textarea
+            size="sm"
+            bg="bg.field"
+            rows={2}
+            placeholder="¿Qué estuvo mal en la respuesta?"
+            value={comment}
+            onChange={(event) => setComment(event.target.value)}
+          />
+          <Button
+            size="sm"
+            colorPalette="brand"
+            disabled={!comment.trim()}
+            onClick={() => void rate(pending, comment.trim())}
+          >
+            Enviar
+          </Button>
+        </HStack>
+      )}
+      {error && (
+        <Text role="alert" fontSize="xs" color="fg.error">
+          {error}
+        </Text>
+      )}
+    </Stack>
   );
 }

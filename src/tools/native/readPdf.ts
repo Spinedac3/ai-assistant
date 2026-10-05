@@ -1,4 +1,5 @@
 import type { Uploads } from "../../chat/uploads.js";
+import { removeHidden } from "../../lib/hiddenText.js";
 import { ATTACHMENT_NAME } from "../../llm/oneShot.js";
 import type { Tool } from "../contract.js";
 
@@ -70,7 +71,8 @@ export function readPdfTool(deps: ReadPdfDependencies): Tool {
       ].join("\n");
       const answer = await deps.ask(prompt, upload.bytes);
 
-      return { ok: true, data: { file: upload.name, answer } };
+      // The answer may carry what the PDF hid from people
+      return { ok: true, data: { file: upload.name, answer: removeHidden(answer) } };
     },
   };
 }

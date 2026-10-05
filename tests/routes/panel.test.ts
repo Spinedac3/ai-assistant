@@ -5,13 +5,15 @@ import Fastify from "fastify";
 import { afterAll, describe, expect, it } from "vitest";
 import panelRoutes from "../../src/routes/panel.js";
 
-const built = mkdtempSync(join(tmpdir(), "panel-"));
+// The build, with a file right beside it, one level up, that a crafted path must never reach
+const beside = mkdtempSync(join(tmpdir(), "panel-parent-"));
+const built = join(beside, "dist");
+mkdirSync(built);
+writeFileSync(join(beside, "secreto-panel.txt"), "secreto");
 mkdirSync(join(built, "assets"));
 writeFileSync(join(built, "index.html"), "<html>panel</html>");
 writeFileSync(join(built, "assets", "app-abc123.js"), "console.log(1)");
 writeFileSync(join(built, "favicon.svg"), "<svg/>");
-// A file beside the build that a crafted path must never reach
-writeFileSync(join(tmpdir(), "secreto-panel.txt"), "secreto");
 
 /**
  * Builds an app that serves a panel folder
@@ -29,8 +31,7 @@ async function appWith(dir: string) {
 
 describe("panel", () => {
   afterAll(() => {
-    rmSync(built, { recursive: true, force: true });
-    rmSync(join(tmpdir(), "secreto-panel.txt"), { force: true });
+    rmSync(beside, { recursive: true, force: true });
   });
 
   it("serves its files, its page for any route of its own, and nothing outside its folder", async () => {
@@ -41,7 +42,8 @@ describe("panel", () => {
     const route = await app.inject({ url: "/panel/chat/42" });
     const bare = await app.inject({ url: "/panel" });
     const missing = await app.inject({ url: "/panel/assets/nada.js" });
-    const outside = await app.inject({ url: "/panel/..%2f..%2fsecreto-panel.txt" });
+    const outside = await app.inject({ url: "/panel/..%2fsecreto-panel.txt" });
+    const backslash = await app.inject({ url: "/panel/..%5csecreto-panel.txt" });
     const notBuilt = await (await appWith(join(built, "no-existe"))).inject({ url: "/panel/" });
 
     // Performs assertions.
@@ -54,7 +56,10 @@ describe("panel", () => {
     expect(route.headers["x-frame-options"]).toBe("DENY");
     expect(bare.statusCode).toBe(302);
     expect(missing.statusCode).toBe(404);
+    expect(outside.statusCode).toBe(404);
     expect(outside.body).not.toContain("secreto");
+    expect(backslash.body).not.toContain("secreto");
+    expect(missing.headers["content-security-policy"]).toContain("default-src 'self'");
     expect(notBuilt.statusCode).toBe(404);
   });
 });

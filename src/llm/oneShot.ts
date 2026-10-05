@@ -15,8 +15,9 @@ const ONE_SHOT_TIMEOUT_MS = 120_000;
 export const ATTACHMENT_NAME = "document.pdf";
 // Reading a long PDF takes several reads of up to twenty pages each, then the answer
 const ATTACHMENT_TURNS = 12;
-// Reading a long PDF also takes longer than a plain answer
-const ATTACHMENT_TIMEOUT_MS = 300_000;
+// Reading a long PDF takes longer than a plain answer, yet well within the chat attempt that asked
+// for it, so the attempt still has time to answer with what was read
+const ATTACHMENT_TIMEOUT_MS = 180_000;
 
 /**
  * Asks the model one question and returns its answer. With no attachment it has no tools at
@@ -49,11 +50,15 @@ export async function askOnce(
       mcpConfigPath,
       // Read stays blocked unless there is a file, and then it reaches that file alone
       disallowedTools: attachment
-        ? DISALLOWED_CLI_TOOLS.replace(/(^| )Read( |$)/, "$1")
+        ? DISALLOWED_CLI_TOOLS.split(" ")
+            .filter((tool) => tool !== "Read")
+            .join(" ")
         : DISALLOWED_CLI_TOOLS,
       ...(attachment ? { allowedTools: `Read(./${ATTACHMENT_NAME})` } : {}),
       // A list of what is allowed, so a tool a newer CLI adds is not left open
       tools: attachment ? "Read" : "",
+      // Anything beyond that one read is denied, whatever the machine allows elsewhere
+      permissionMode: "dontAsk",
     });
     const run = launchCli(
       deps.cli,
