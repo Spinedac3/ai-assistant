@@ -403,3 +403,21 @@ export const notices = pgTable(
     index("notices_recipient_idx").on(t.recipientUserId, t.createdAt),
   ],
 );
+
+// One-time links an administrator sends so a person sets a new password; only the hash is kept
+export const passwordResets = pgTable(
+  "password_resets",
+  {
+    id: idPk(),
+    userId: integer("user_id").notNull(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    expiresAt: timestamptz("expires_at").notNull(),
+    usedAt: timestamptz("used_at"),
+    createdBy: integer("created_by").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("password_resets_token_unique").on(t.tokenHash),
+    index("password_resets_user_idx").on(t.userId),
+  ],
+);

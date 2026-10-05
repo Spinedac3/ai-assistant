@@ -172,6 +172,7 @@ describe("auth", () => {
       "chat.use",
       "docs.general.read",
       "docs.manage",
+      "notices.send",
       "settings.manage",
       "sources.manage",
       "tools.manage",
