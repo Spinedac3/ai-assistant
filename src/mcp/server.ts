@@ -45,7 +45,10 @@ export interface McpSettings {
  * @return  The marked text
  */
 export function asUntrustedData(name: string, text: string): string {
-  return `<tool_result name="${name}" trusted="false">\n${text}\n</tool_result>`;
+  // The text is JSON, where < means the same "<"; a value can then never close the wrapper
+  const escaped = text.replace(/</g, "\\u003c");
+
+  return `<tool_result name="${name}" trusted="false">\n${escaped}\n</tool_result>`;
 }
 
 /**
