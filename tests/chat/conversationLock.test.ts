@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { holdTurn, openTurns } from "../../src/chat/conversationLock.js";
+import { holdTurn } from "../../src/chat/conversationLock.js";
 
 describe("conversationLock", () => {
   it("makes the second turn of a conversation wait for the first", async () => {
@@ -8,15 +8,14 @@ describe("conversationLock", () => {
     const releaseFirst = await holdTurn("c1");
     const second = holdTurn("c1").then((release) => {
       order.push("second starts");
-      release();
+      release?.();
     });
     order.push("first ends");
-    releaseFirst();
+    releaseFirst?.();
     await second;
 
     // Performs assertions.
     expect(order).toEqual(["first ends", "second starts"]);
-    expect(openTurns()).toBe(0);
   });
 
   it("lets other conversations run at the same time", async () => {
@@ -25,19 +24,31 @@ describe("conversationLock", () => {
     const releaseB = await holdTurn("b");
 
     // Performs assertions.
-    expect(openTurns()).toBe(2);
-    releaseA();
-    releaseB();
+    expect(releaseA).toEqual(expect.any(Function));
+    expect(releaseB).toEqual(expect.any(Function));
+    releaseA?.();
+    releaseB?.();
   });
 
-  it("stops waiting for a hung turn after the limit", async () => {
+  it("gives up the place of a client that left, without letting the next one jump the queue", async () => {
     // Performs the test.
-    await holdTurn("hung");
-    const started = Date.now();
-    const release = await holdTurn("hung", 50);
+    const order: string[] = [];
+    const releaseFirst = await holdTurn("c2");
+    const leaving = new AbortController();
+    const second = holdTurn("c2", leaving.signal);
+    const third = holdTurn("c2").then((release) => {
+      order.push("third starts");
+      release?.();
+    });
+    leaving.abort();
+    const secondResult = await second;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    order.push("first ends");
+    releaseFirst?.();
+    await third;
 
     // Performs assertions.
-    expect(Date.now() - started).toBeGreaterThanOrEqual(45);
-    release();
+    expect(secondResult).toBeNull();
+    expect(order).toEqual(["first ends", "third starts"]);
   });
 });

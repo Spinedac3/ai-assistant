@@ -1,21 +1,22 @@
-// A hung turn must not silence the conversation: past this the next one runs anyway
-export const MAX_WAIT_MS = 180_000;
-
 const queues = new Map<string, Promise<void>>();
 
 /**
  * Waits until no earlier turn of the same conversation is running, then holds the turn
  *
  * Two turns resuming the same CLI session at once would interleave its transcript, so the second
- * waits and then runs seeing the first one's answer. The queue lives in this process; more than one
- * server instance would need a lock in the database.
+ * waits and then runs seeing the first one's answer. Turns end on their own time limit, so the wait
+ * needs none. The queue lives in this process; more than one server instance would need a lock in
+ * the database.
  *
- * @param   key        Conversation key
- * @param   maxWaitMs  Longest wait for the turn ahead
+ * @param   key          Conversation key
+ * @param   abortSignal  Gives up the place in the queue when the client leaves
  *
- * @return  The function that releases the turn
+ * @return  The function that releases the turn, or null when the client left while waiting
  */
-export async function holdTurn(key: string, maxWaitMs: number = MAX_WAIT_MS): Promise<() => void> {
+export async function holdTurn(
+  key: string,
+  abortSignal?: AbortSignal,
+): Promise<(() => void) | null> {
   const ahead = queues.get(key) ?? Promise.resolve();
   let release = () => {};
   const mine = new Promise<void>((resolve) => {
@@ -23,26 +24,26 @@ export async function holdTurn(key: string, maxWaitMs: number = MAX_WAIT_MS): Pr
   });
   queues.set(key, mine);
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  await Promise.race([
-    ahead,
-    new Promise<void>((resolve) => (timer = setTimeout(resolve, maxWaitMs))),
-  ]);
-  clearTimeout(timer);
-
-  return () => {
+  const done = () => {
     release();
     if (queues.get(key) === mine) {
       queues.delete(key);
     }
   };
-}
 
-/**
- * Counts conversations with a turn running or waiting
- *
- * @return  The number of open turns
- */
-export function openTurns(): number {
-  return queues.size;
+  const left = new Promise<"left">((resolve) => {
+    if (abortSignal?.aborted) {
+      resolve("left");
+    }
+    abortSignal?.addEventListener("abort", () => resolve("left"), { once: true });
+  });
+
+  if ((await Promise.race([ahead, left])) === "left") {
+    // Whoever queued behind must still wait for the turn ahead, not for this one that never ran
+    void ahead.then(done);
+
+    return null;
+  }
+
+  return done;
 }
