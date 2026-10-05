@@ -205,3 +205,29 @@ export function buildQuery(
 
   return { sql: lines.join("\n"), params };
 }
+
+/**
+ * Builds a query that reads a few rows of some columns of the base, to take sample values from
+ *
+ * @param   base     Base of the definition
+ * @param   engine   Engine
+ * @param   pasted   Checked pasted query, when the base is one
+ * @param   columns  Columns to read
+ * @param   rows     How many rows
+ *
+ * @return  The query
+ */
+export function sampleQuery(
+  base: ToolDefinitionSpec["base"],
+  engine: EngineName,
+  pasted: string | null,
+  columns: string[],
+  rows: number,
+): string {
+  const list = columns.map((column) => quote(column, engine)).join(", ");
+  const from = `FROM ${fromClause(base, engine, pasted)} AS base`;
+
+  return engine === "mssql"
+    ? `SELECT TOP ${rows} ${list}\n${from}`
+    : `SELECT ${list}\n${from}\nLIMIT ${rows}`;
+}

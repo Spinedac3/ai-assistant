@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
+import { runChecks, runnerFor } from "../../src/creator/checks.js";
 import { describeBase, normalizeRows } from "../../src/creator/columns.js";
 import { definitionSchema } from "../../src/creator/definition.js";
 import { checkPasted } from "../../src/creator/pasted.js";
@@ -312,5 +313,69 @@ describe("creator on the demo engines", () => {
     expect(created.isNative("calculate")).toBe(true);
     expect(registry.has("calculate")).toBe(true);
     expect(registry.has("pedidos_sync")).toBe(false);
+  });
+
+  it("passes its metamorphic checks on every engine, with a table and with a pasted query", async () => {
+    // Performs the test.
+    const definitions = [
+      {
+        base: { kind: "table", name: "entregas" },
+        columns: [{ name: "ruta" }, { name: "entregado_en" }, { name: "a_tiempo" }],
+      },
+      {
+        base: {
+          kind: "query",
+          sql: "select e.ruta, e.entregado_en, e.a_tiempo, p.total from entregas e join pedidos p on p.id = e.pedido_id",
+        },
+        columns: [
+          { name: "ruta" },
+          { name: "entregado_en" },
+          { name: "a_tiempo" },
+          { name: "total" },
+        ],
+      },
+    ];
+    const outcomes: Record<string, unknown> = {};
+    for (const engine of available) {
+      for (const [index, definition] of definitions.entries()) {
+        const spec = definitionSchema.parse({
+          ...definition,
+          filters: [
+            { column: "ruta", op: "=" },
+            { column: "entregado_en", op: "between" },
+            { column: "a_tiempo", op: "=" },
+          ],
+          summary: {
+            group_by: ["ruta"],
+            aggregates: [{ fn: "count", as: "entregas" }],
+          },
+          meaning,
+        });
+        const info = DEMO_ENGINES[engine].reader;
+        const pasted = spec.base.kind === "query" ? checkPasted(spec.base.sql, engine) : null;
+        const sql = pasted?.ok ? pasted.sql : null;
+        const columns = await describeBase(info, spec.base, sql, LIMITS);
+        const results = await runChecks(
+          { name: "entregas", sourceCode: `demo-${engine}`, spec, columns },
+          runnerFor(info, spec.base, sql, LIMITS),
+        );
+        outcomes[`${engine} ${index}`] = results.map((result) => [
+          result.name,
+          result.ok,
+          result.skipped ?? false,
+        ]);
+      }
+    }
+
+    // Performs assertions.
+    for (const outcome of Object.values(outcomes)) {
+      expect(outcome).toEqual([
+        ["runs", true, false],
+        ["shape", true, false],
+        ["filter_shrinks", true, false],
+        ["sum_adds_up", true, false],
+        ["range_splits", true, false],
+      ]);
+    }
   });
 });
