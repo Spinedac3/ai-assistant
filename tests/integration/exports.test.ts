@@ -254,4 +254,68 @@ describe("exports", () => {
     expect(outcome.structured).toBeUndefined();
     expect(JSON.parse(outcome.text).nota).toBeDefined();
   });
+
+  it("filters every row before the cut, and the tool never sees the filter", async () => {
+    // Performs the test.
+    const seen: Record<string, unknown>[] = [];
+    registry.register({
+      definition: {
+        name: "pedidos_estrictos",
+        description: "Every order of the year, with arguments checked strictly.",
+        inputSchema: {
+          type: "object",
+          properties: { anio: { type: "number" } },
+          additionalProperties: false,
+        },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async (args) => {
+        seen.push(args);
+        return {
+          ok: true,
+          data: {
+            pedidos: Array.from({ length: 3000 }, (_, id) => ({
+              id,
+              cliente: `Cliente ${id % 40}`,
+              total: id * 1.5,
+            })),
+          },
+        };
+      },
+    });
+    const run = (args: Record<string, unknown>) =>
+      registry.execute("pedidos_estrictos", args, caller, { origin: "chat", timeZone: "UTC" });
+    const cut = JSON.parse((await run({ anio: 2026 })).text);
+    const one = JSON.parse(
+      (
+        await run({
+          anio: 2026,
+          filter_rows: JSON.stringify({
+            where: [{ field: "cliente", op: "=", value: "Cliente 7" }],
+            sum: ["total"],
+          }),
+        })
+      ).text,
+    );
+    const bad = JSON.parse(
+      (await run({ filter_rows: { where: [{ field: "x", op: "like" }] } })).text,
+    );
+    const unknown = JSON.parse(
+      (await run({ filter_rows: { where: [{ field: "zona", op: "empty" }] } })).text,
+    );
+
+    // Performs assertions.
+    expect(seen.every((args) => !("filter_rows" in args))).toBe(true);
+    expect(cut.nota).toContain("filter_rows");
+    expect(cut.nota).toContain("Columnas: id, cliente, total.");
+    expect(one.filtro_filas).toMatchObject({ filas_antes: 3000, filas_despues: 75 });
+    expect(one.pedidos).toHaveLength(75);
+    expect(one.filtro_filas.sumas.total).toBe(
+      Array.from({ length: 75 }, (_, index) => (7 + index * 40) * 1.5).reduce((a, b) => a + b, 0),
+    );
+    expect(bad.error).toBe("invalid_filter");
+    expect(unknown.error).toBe("invalid_filter");
+    expect(unknown.message).toContain("cliente");
+  });
 });

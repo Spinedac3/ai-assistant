@@ -13,6 +13,7 @@ import {
   withCapFields,
 } from "./cap.js";
 import type { Tool, ToolDefinition, ToolOrigin } from "./contract.js";
+import { applyFilter, filterable, filterHint, takeFilter } from "./filter.js";
 
 // A failure of one tool is not a lack of capability; one reasoned alternative, never a sweep
 export const FAILED_ROUTE_NOTE =
@@ -165,7 +166,7 @@ export class ToolRegistry {
 
   /**
    * Runs a tool through the one door every path shares: scope gate, input and output contracts,
-   * hidden-text removal, the size cap of its channel and the metadata audit
+   * hidden-text removal, the row filter, the size cap of its channel and the metadata audit
    *
    * @param   name     Tool to run
    * @param   args     Arguments from the model
@@ -200,15 +201,21 @@ export class ToolRegistry {
       return this.fail(name, args, caller, context, started, "missing_scope", "Sin permiso");
     }
 
+    // The row filter belongs to the registry, so every tool with a list gets it without knowing
+    const request = takeFilter(args);
+    if ("error" in request) {
+      return this.fail(name, args, caller, context, started, "invalid_filter", request.error);
+    }
+
     const validators = this.validators.get(name);
-    if (validators && !validators.input(args)) {
+    if (validators && !validators.input(request.args)) {
       const detail = this.ajv.errorsText(validators.input.errors, { dataVar: "argumentos" });
       return this.fail(name, args, caller, context, started, "invalid_arguments", detail);
     }
 
     let result: Awaited<ReturnType<Tool["execute"]>>;
     try {
-      result = await tool.execute(args, {
+      result = await tool.execute(request.args, {
         userId: caller.userId,
         userEmail: caller.email,
         scopes: caller.scopes,
@@ -250,10 +257,19 @@ export class ToolRegistry {
 
     // Cleaned before the size cap, so the Excel carries the same clean data the model reads
     const clean = JSON.parse(hidden > 0 ? removeHidden(raw) : raw) as Record<string, unknown>;
+
+    // Filtered over every row before the cut, so what is counted is the whole list, not a sample
+    const filtered = request.filter ? applyFilter(clean, request.filter) : null;
+    if (filtered && !filtered.ok) {
+      return this.fail(name, args, caller, context, started, "invalid_filter", filtered.message);
+    }
+
+    const target = filtered ? null : filterable(clean);
     const capped = await capResult(
-      clean,
+      filtered ? filtered.data : clean,
       context.origin === "mcp" ? EXTERNAL_MAX_BYTES : CHAT_MAX_BYTES,
       this.archiveFor(name, caller),
+      target ? filterHint(target) : "",
     );
     if (!capped.ok) {
       return this.fail(name, args, caller, context, started, "result_too_large", capped.message);
