@@ -195,17 +195,27 @@ export class DocumentStorage {
   }
 
   /**
-   * Lists the part numbers already received of a document
+   * Lists the part numbers received of a document since a moment, dropping older ones: those are
+   * of an upload left unfinished, and must not join a new one
    *
    * @param   owner    Who sends it
    * @param   docCode  Document code
+   * @param   since    Parts saved before this moment no longer count
    *
    * @return  The numbers
    */
-  async partsReceived(owner: number, docCode: string): Promise<number[]> {
+  async partsReceived(owner: number, docCode: string, since = new Date(0)): Promise<number[]> {
     const names = await this.list(partKey(owner, docCode));
+    const stale = names.filter((item) => item.lastModified < since);
+    if (stale.length > 0) {
+      await this.client.removeObjects(
+        this.config.bucket,
+        stale.map(({ name }) => name),
+      );
+    }
 
     return names
+      .filter((item) => item.lastModified >= since)
       .map(({ name }) => Number(name.split("/").pop()?.replace(".md", "")))
       .sort((a, b) => a - b);
   }

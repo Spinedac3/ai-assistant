@@ -20,6 +20,8 @@ type Mode = (typeof MODES)[number];
 // A procedure fits in one call; a long manual goes in parts, so no argument grows unbounded
 const MAX_MARKDOWN_CHARS = 400_000;
 const MAX_PARTS = 30;
+// An upload sends its parts within minutes; a part older than this is of one left unfinished
+export const PART_LIFETIME_MS = 3_600_000;
 
 const REQUIRED = [
   {
@@ -158,8 +160,9 @@ async function gather(
   parts: number,
   text: string,
 ): Promise<{ body: string } | { pending: number[] }> {
+  const since = new Date(Date.now() - PART_LIFETIME_MS);
   await deps.storage.savePart(owner, code, part, text);
-  const received = new Set(await deps.storage.partsReceived(owner, code));
+  const received = new Set(await deps.storage.partsReceived(owner, code, since));
   const pending = Array.from({ length: parts }, (_, index) => index + 1).filter(
     (number) => !received.has(number),
   );

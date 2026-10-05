@@ -257,21 +257,22 @@ describe("row filter", () => {
   it("groups and filters a long list in linear time", () => {
     // Performs the test.
     const many = {
-      filas: Array.from({ length: 100_000 }, (_, index) => ({
-        id: index,
-        estado: `E${index % 3}`,
-      })),
+      // One large group: copying it per row would take minutes
+      filas: Array.from({ length: 200_000 }, (_, index) => ({ id: index, estado: "abierto" })),
     };
     const started = Date.now();
-    const outcome = applyFilter(many, {
+    const picked = applyFilter(many, {
       where: [
         { field: "id", op: "in", value: Array.from({ length: 500 }, (_, index) => index * 2) },
       ],
-      count_by: ["estado"],
     });
+    const grouped = applyFilter(many, { count_by: ["estado"] });
 
     // Performs assertions.
-    expect(outcome.ok && (outcome.data.filas as unknown[]).length).toBe(500);
+    expect(picked.ok && (picked.data.filas as unknown[]).length).toBe(500);
+    expect(grouped.ok && grouped.data.resumen_filtro).toEqual([
+      { estado: "abierto", filas: 200_000 },
+    ]);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 });

@@ -16,7 +16,7 @@ import { indexFrom, s3Config, storageFrom } from "./rag/services.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
-import { ingestTool } from "./tools/native/ingest.js";
+import { ingestTool, PART_LIFETIME_MS } from "./tools/native/ingest.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { Secrets } from "./vault/envelope.js";
 
@@ -100,12 +100,12 @@ const purgeTimer = setInterval(purge, 6 * 3_600_000);
 purgeTimer.unref();
 
 // Exported files live seven days; an hourly sweep keeps them from outliving that by much. The same
-// sweep drops the parts of documents whose upload was left unfinished a day ago
+// sweep drops the parts of documents whose upload was left unfinished
 const purgeExports = () =>
   Promise.all([
     exports.purge().catch((error) => app.log.error({ err: error }, "export purge failed")),
     storage
-      .purgeParts(new Date(Date.now() - 86_400_000))
+      .purgeParts(new Date(Date.now() - PART_LIFETIME_MS))
       .catch((error) => app.log.error({ err: error }, "document part purge failed")),
   ]);
 void purgeExports();

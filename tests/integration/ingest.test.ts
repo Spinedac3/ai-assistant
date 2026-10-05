@@ -148,6 +148,9 @@ describe("ingest_document", () => {
   it("gathers a document sent in parts, in any order, and leaves no part behind", async () => {
     // Performs the test.
     const code = "MANUAL-RUTAS-V001";
+    // The bucket outlives a test run; parts left by an earlier one must not join this one
+    await storage.removeParts(manager.userId, code);
+    await storage.removeParts(outsider.userId, code);
     const send = (part: number, text: string, caller = manager) =>
       call({ mode: "ingest", doc_code: code, ...fields, markdown: text, part, parts: 3 }, caller);
     const second = await send(2, "# Dos\n\nborrador");
@@ -173,6 +176,7 @@ describe("ingest_document", () => {
   it("drops the parts of a refused upload and refuses one past the size of an upload", async () => {
     // Performs the test.
     const code = "ENORME-V001";
+    await storage.removeParts(manager.userId, code);
     // Each part within the limit of a call, all six past the limit of a document
     const piece = "x".repeat(390_000);
     const send = (part: number) =>
@@ -184,6 +188,21 @@ describe("ingest_document", () => {
 
     // Performs assertions.
     expect(tooLarge.error).toBe("too_large");
+    expect(await storage.partsReceived(manager.userId, code)).toEqual([]);
+  });
+
+  it("forgets the parts of an upload left unfinished", async () => {
+    // Performs the test.
+    const code = "OLVIDADO-V001";
+    await storage.removeParts(manager.userId, code);
+    await storage.savePart(manager.userId, code, 1, "# Uno");
+    const later = new Date(Date.now() + 60_000);
+    const fresh = await storage.partsReceived(manager.userId, code);
+    const afterLifetime = await storage.partsReceived(manager.userId, code, later);
+
+    // Performs assertions.
+    expect(fresh).toEqual([1]);
+    expect(afterLifetime).toEqual([]);
     expect(await storage.partsReceived(manager.userId, code)).toEqual([]);
   });
 
@@ -200,12 +219,19 @@ describe("ingest_document", () => {
       { mode: "reclassify", doc_code: "SALARIOS-V001", area: "general" },
       outsider,
     );
+    await call({ mode: "ingest", doc_code: "AVISOS-V001", ...fields, markdown: body });
+    await drainQueue();
+    const moveInto = await call(
+      { mode: "reclassify", doc_code: "AVISOS-V001", area: "rrhh" },
+      outsider,
+    );
     const described = await call({ mode: "validate", doc_code: "SALARIOS-V002" }, outsider);
     const seen = await call({ mode: "validate", doc_code: "SALARIOS-V002" });
 
     // Performs assertions.
     expect(publish.error).toBe("area_not_readable");
     expect(move.error).toBe("area_not_readable");
+    expect(moveInto.error).toBe("area_not_readable");
     expect(described.current_version).toBeNull();
     expect(seen.current_version).toMatchObject({ doc_code: "SALARIOS-V001" });
   });
