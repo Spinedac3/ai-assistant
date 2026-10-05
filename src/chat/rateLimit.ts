@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import type { Database } from "../db/client.js";
 import { rateLimits } from "../db/schema.js";
 
@@ -42,55 +42,58 @@ function windowStart(window: "hour" | "day", timeZone: string) {
 }
 
 /**
- * Adds to the user's counters of one window and returns them
+ * Adds to the user's hour and day counters in one statement and returns them
  *
  * @param   db              Own database
  * @param   userId          Person
- * @param   window          Hour or day
  * @param   timeZone        Application time zone
- * @param   messages        Messages to add
+ * @param   messages        Messages to add, negative to give one back
  * @param   tokens          Tokens to add
  * @param   costMillionths  Cost to add
  *
- * @return  The counters after adding
+ * @return  The counters of each window after adding
  */
 async function bump(
   db: Database,
   userId: number,
-  window: "hour" | "day",
   timeZone: string,
   messages: number,
   tokens: number,
   costMillionths: number,
 ) {
-  const [row] = await db
+  const rows = await db
     .insert(rateLimits)
-    .values({
-      userId,
-      windowType: window,
-      windowStart: windowStart(window, timeZone),
-      msgCount: messages,
-      tokensUsed: tokens,
-      costMillionths,
-    })
+    .values(
+      (["hour", "day"] as const).map((window) => ({
+        userId,
+        windowType: window,
+        windowStart: windowStart(window, timeZone),
+        msgCount: Math.max(messages, 0),
+        tokensUsed: tokens,
+        costMillionths,
+      })),
+    )
     .onConflictDoUpdate({
       target: [rateLimits.userId, rateLimits.windowType, rateLimits.windowStart],
       set: {
-        msgCount: sql`${rateLimits.msgCount} + ${messages}`,
+        msgCount: sql`greatest(${rateLimits.msgCount} + ${messages}, 0)`,
         tokensUsed: sql`${rateLimits.tokensUsed} + ${tokens}`,
         costMillionths: sql`${rateLimits.costMillionths} + ${costMillionths}`,
       },
     })
-    .returning({ msgCount: rateLimits.msgCount, tokensUsed: rateLimits.tokensUsed });
+    .returning({ windowType: rateLimits.windowType, msgCount: rateLimits.msgCount });
 
-  return row ?? { msgCount: 0, tokensUsed: 0 };
+  return {
+    hour: rows.find((row) => row.windowType === "hour")?.msgCount ?? 0,
+    day: rows.find((row) => row.windowType === "day")?.msgCount ?? 0,
+  };
 }
 
 /**
- * Counts a new message and rejects it when it goes over a quota
+ * Counts a new message, rejecting it without counting when the user is already over a quota
  *
- * Counting first and checking after is one atomic step per window, so parallel messages cannot
- * all slip through on the same remaining unit.
+ * The check before counting keeps rejected messages out of the counters; the check after counting
+ * is atomic, so parallel messages cannot all take the same last unit.
  *
  * @param   db        Own database
  * @param   userId    Person sending
@@ -105,30 +108,63 @@ export async function reserveMessage(
   limits: RateLimits,
   timeZone: string,
 ): Promise<void> {
-  const [today] = await db
-    .select({ tokensUsed: rateLimits.tokensUsed })
+  const current = await db
+    .select({
+      windowType: rateLimits.windowType,
+      msgCount: rateLimits.msgCount,
+      tokensUsed: rateLimits.tokensUsed,
+    })
     .from(rateLimits)
     .where(
       and(
         eq(rateLimits.userId, userId),
-        eq(rateLimits.windowType, "day"),
-        eq(rateLimits.windowStart, windowStart("day", timeZone)),
+        or(
+          and(
+            eq(rateLimits.windowType, "hour"),
+            eq(rateLimits.windowStart, windowStart("hour", timeZone)),
+          ),
+          and(
+            eq(rateLimits.windowType, "day"),
+            eq(rateLimits.windowStart, windowStart("day", timeZone)),
+          ),
+        ),
       ),
     );
+  const hour = current.find((row) => row.windowType === "hour");
+  const day = current.find((row) => row.windowType === "day");
 
-  if ((today?.tokensUsed ?? 0) >= limits.tokensPerDay) {
+  if ((day?.tokensUsed ?? 0) >= limits.tokensPerDay) {
     throw new RateLimitExceededError("day", "tokens");
   }
 
-  const hour = await bump(db, userId, "hour", timeZone, 1, 0, 0);
-  if (hour.msgCount > limits.msgsPerHour) {
+  if ((hour?.msgCount ?? 0) >= limits.msgsPerHour) {
     throw new RateLimitExceededError("hour", "messages");
   }
 
-  const day = await bump(db, userId, "day", timeZone, 1, 0, 0);
-  if (day.msgCount > limits.msgsPerDay) {
+  if ((day?.msgCount ?? 0) >= limits.msgsPerDay) {
     throw new RateLimitExceededError("day", "messages");
   }
+
+  const after = await bump(db, userId, timeZone, 1, 0, 0);
+  const over =
+    after.hour > limits.msgsPerHour ? "hour" : after.day > limits.msgsPerDay ? "day" : null;
+
+  if (over) {
+    // Another message took the last unit between the check and the count
+    await bump(db, userId, timeZone, -1, 0, 0);
+    throw new RateLimitExceededError(over, "messages");
+  }
+}
+
+/**
+ * Gives back a message the server failed to answer
+ *
+ * @param   db        Own database
+ * @param   userId    Person who sent it
+ * @param   timeZone  Application time zone
+ */
+export async function refundMessage(db: Database, userId: number, timeZone: string): Promise<void> {
+  await bump(db, userId, timeZone, -1, 0, 0);
 }
 
 /**
@@ -147,7 +183,9 @@ export async function recordTokens(
   costMillionths: number,
   timeZone: string,
 ): Promise<void> {
-  for (const window of ["hour", "day"] as const) {
-    await bump(db, userId, window, timeZone, 0, tokens, costMillionths);
+  if (tokens === 0 && costMillionths === 0) {
+    return;
   }
+
+  await bump(db, userId, timeZone, 0, tokens, costMillionths);
 }
