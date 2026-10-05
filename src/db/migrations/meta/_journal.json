@@ -50,6 +50,13 @@
       "when": 1791176608922,
       "tag": "0006_sources",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791208724612,
+      "tag": "0007_tool_definitions",
+      "breakpoints": true
     }
   ]
 }
