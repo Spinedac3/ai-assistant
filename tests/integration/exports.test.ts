@@ -1,0 +1,161 @@
+import { randomBytes } from "node:crypto";
+import { sql } from "drizzle-orm";
+import type { FastifyInstance } from "fastify";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildApp } from "../../src/app.js";
+import type { DatabaseHandle } from "../../src/db/client.js";
+import { exportFiles, toolCalls } from "../../src/db/schema.js";
+import { ExportStore } from "../../src/exports/store.js";
+import { ToolRegistry } from "../../src/tools/registry.js";
+import { testSigner } from "../support/keys.js";
+import { freshDatabase } from "./support/database.js";
+
+const BASE = "https://assistant.example.com";
+const caller = { userId: 7, email: "ana@example.com", scopes: new Set(["chat.use"]) };
+
+let database: DatabaseHandle;
+let app: FastifyInstance;
+let store: ExportStore;
+let registry: ToolRegistry;
+
+/**
+ * Runs the big tool on a channel
+ *
+ * @param   origin  Channel
+ *
+ * @return  The parsed result
+ */
+async function runBig(origin: "chat" | "mcp") {
+  const outcome = await registry.execute("pedidos_del_anio", {}, caller, {
+    origin,
+    timeZone: "UTC",
+  });
+
+  return JSON.parse(outcome.text) as Record<string, unknown>;
+}
+
+/**
+ * Downloads a link through the app, as a browser would
+ *
+ * @param   url  Link from a result
+ *
+ * @return  The response
+ */
+function download(url: string) {
+  return app.inject({ url: url.replace(BASE, "") });
+}
+
+describe("exports", () => {
+  beforeAll(async () => {
+    database = await freshDatabase();
+    store = new ExportStore(
+      database.db,
+      {
+        endpoint: process.env.S3_ENDPOINT ?? "http://localhost:9000",
+        accessKey: process.env.S3_ACCESS_KEY ?? "assistant",
+        secretKey: process.env.S3_SECRET_KEY ?? "assistant-secret",
+        bucket: "documents-test",
+      },
+      randomBytes(32),
+      BASE,
+    );
+    registry = new ToolRegistry(database.db);
+    registry.useExports(store);
+    registry.register({
+      definition: {
+        name: "pedidos_del_anio",
+        description: "Every order of the year with its customer.",
+        inputSchema: { type: "object" },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({
+        ok: true,
+        data: {
+          total_pedidos: 3000,
+          monto_total: 1234567.89,
+          pedidos: Array.from({ length: 3000 }, (_, id) => ({
+            id,
+            cliente: `Cliente ${id % 40}`,
+            total: id * 1.5,
+          })),
+        },
+      }),
+    });
+    app = await buildApp({
+      db: database.db,
+      signer: testSigner(),
+      systems: new Map(),
+      exports: { exports: store },
+    });
+  });
+
+  afterAll(async () => {
+    await app.close();
+    await database.close();
+  });
+
+  it("keeps the chat result small, totals intact, with a link to every row", async () => {
+    // Performs the test.
+    const result = await runBig("chat");
+    const archived = result.archivo as { url: string; filas: number };
+    const file = await download(archived.url);
+    const [audit] = await database.db.select().from(toolCalls);
+
+    // Performs assertions.
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(40_000);
+    expect(result.total_pedidos).toBe(3000);
+    expect(result.monto_total).toBe(1234567.89);
+    expect(archived.filas).toBe(3000);
+    expect(String(result.nota)).toContain(archived.url);
+    expect(file.statusCode).toBe(200);
+    expect(file.headers["content-disposition"]).toMatch(/^attachment; filename="pedidos_del_anio-/);
+    expect(file.rawPayload.subarray(0, 2).toString()).toBe("PK");
+    expect(audit?.truncated).toBe(true);
+  });
+
+  it("gives external clients more room before cutting", async () => {
+    // Performs the test.
+    const chat = await runBig("chat");
+    const external = await runBig("mcp");
+
+    // Performs assertions.
+    expect((external.pedidos as unknown[]).length).toBeGreaterThan(
+      (chat.pedidos as unknown[]).length,
+    );
+  });
+
+  it("refuses a link with a changed signature, expiry or id", async () => {
+    // Performs the test.
+    const { url } = (await runBig("chat")).archivo as { url: string };
+    const link = new URL(url);
+    const id = link.pathname.split("/").pop() ?? "";
+    const exp = Number(link.searchParams.get("exp"));
+    const forged = [
+      `/exports/${id}?exp=${exp}&sig=${"A".repeat(43)}`,
+      `/exports/${id}?exp=${exp + 86_400}&sig=${link.searchParams.get("sig")}`,
+      `/exports/00000000-0000-4000-8000-000000000000?exp=${exp}&sig=${link.searchParams.get("sig")}`,
+      `/exports/${id}`,
+    ];
+    const statuses = await Promise.all(
+      forged.map(async (path) => (await app.inject({ url: path })).statusCode),
+    );
+
+    // Performs assertions.
+    expect(statuses).toEqual([404, 404, 404, 404]);
+  });
+
+  it("stops serving and deletes a file once it expires", async () => {
+    // Performs the test.
+    const { url } = (await runBig("chat")).archivo as { url: string };
+    await database.db.update(exportFiles).set({ expiresAt: sql`now() - interval '1 second'` });
+    const expired = await download(url);
+    const purged = await store.purge();
+    const left = await database.db.select().from(exportFiles);
+
+    // Performs assertions.
+    expect(expired.statusCode).toBe(404);
+    expect(purged).toBeGreaterThan(0);
+    expect(left).toHaveLength(0);
+  });
+});

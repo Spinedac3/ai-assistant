@@ -13,11 +13,11 @@ import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
 import { startWorker } from "./rag/jobs.js";
 import { indexFrom, storageFrom } from "./rag/services.js";
-import { Secrets } from "./vault/envelope.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
 import { ToolRegistry } from "./tools/registry.js";
+import { Secrets } from "./vault/envelope.js";
 
 const env = loadEnv();
 const database = connectDatabase(env.DATABASE_URL);

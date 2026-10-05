@@ -37,10 +37,15 @@ const PG_TEXT_TYPES = new Set([1082, 1114, 1184]);
  *
  * @param   value  Value from the driver
  *
- * @return  The value, with dates as YYYY-MM-DD HH:MM:SS.mmm
+ * @return  The value, dates as YYYY-MM-DD HH:MM:SS with milliseconds only when there are any
  */
 function plainValue(value: unknown): unknown {
-  return value instanceof Date ? value.toISOString().replace("T", " ").replace("Z", "") : value;
+  return value instanceof Date
+    ? value
+        .toISOString()
+        .replace("T", " ")
+        .replace(/\.000Z$|Z$/, "")
+    : value;
 }
 
 /**

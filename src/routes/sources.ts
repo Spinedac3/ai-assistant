@@ -2,7 +2,6 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
 import type { Database } from "../db/client.js";
-import type { Secrets } from "../vault/envelope.js";
 import {
   connectionFor,
   connectionOf,
@@ -12,6 +11,7 @@ import {
   sourceInput,
   verifySource,
 } from "../sources/registry.js";
+import type { Secrets } from "../vault/envelope.js";
 
 export interface SourcesRoutesOptions {
   db: Database;
