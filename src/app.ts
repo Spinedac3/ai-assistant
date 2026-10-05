@@ -8,6 +8,7 @@ import adminRoutes from "./routes/admin.js";
 import authRoutes from "./routes/auth.js";
 import chatRoutes, { type ChatRoutesOptions } from "./routes/chat.js";
 import mcpRoutes from "./routes/mcp.js";
+import oauthRoutes from "./routes/oauth.js";
 import type { ToolRegistry } from "./tools/registry.js";
 
 export interface AppDependencies {
@@ -16,7 +17,7 @@ export interface AppDependencies {
   systems: Map<string, ExternalSystem>;
   // Without it the chat routes are not mounted, which keeps auth-only tests light
   chat?: Omit<ChatRoutesOptions, "db">;
-  // Without it /mcp is not mounted
+  // Without it /mcp and the OAuth server that guards it are not mounted
   mcp?: { registry: ToolRegistry; settings: McpSettings; publicBaseUrl: string };
   logger?: boolean;
 }
@@ -43,6 +44,11 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   if (deps.mcp) {
     await app.register(mcpRoutes, { ...deps.mcp, db: deps.db });
+    await app.register(oauthRoutes, {
+      db: deps.db,
+      publicBaseUrl: deps.mcp.publicBaseUrl,
+      assistantName: deps.mcp.settings.assistantName,
+    });
   }
 
   return app;
