@@ -11,6 +11,11 @@ const SCOPES = [
     description: "Cambiar la configuración del asistente",
     sensitive: true,
   },
+  {
+    code: "usage.read",
+    description: "Ver el uso del asistente y lo que se pregunta",
+    sensitive: true,
+  },
 ];
 
 const ROLES = [

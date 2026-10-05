@@ -171,6 +171,7 @@ describe("auth", () => {
     expect([...me.json().data.scopes].sort()).toEqual([
       "chat.use",
       "settings.manage",
+      "usage.read",
       "users.manage",
     ]);
   });

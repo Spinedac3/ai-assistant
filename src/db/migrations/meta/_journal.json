@@ -22,6 +22,13 @@
       "when": 1791164431118,
       "tag": "0002_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791167022957,
+      "tag": "0003_mcp",
+      "breakpoints": true
     }
   ]
 }

@@ -3,12 +3,23 @@ import { join } from "node:path";
 import { buildApp } from "./app.js";
 import { loadExternalSystems } from "./auth/externalSystems.js";
 import { createTokenSigner, readPrivateKey } from "./auth/tokens.js";
+import { chatMcpConfig } from "./chat/mcpConfig.js";
 import { readOrganizationContext } from "./chat/prompt.js";
 import { loadEnv } from "./config/env.js";
 import { connectDatabase } from "./db/client.js";
+import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
+import { purgeIntents } from "./mcp/intents.js";
+import { readSetting } from "./settings.js";
+import { calculateTool } from "./tools/native/calculate.js";
+import { ToolRegistry } from "./tools/registry.js";
 
 const env = loadEnv();
 const database = connectDatabase(env.DATABASE_URL);
+const organizationContext = readOrganizationContext(env.ASSISTANT_CONTEXT_FILE);
+const publicBaseUrl = (env.PUBLIC_BASE_URL ?? `http://localhost:${env.PORT}`).replace(/\/+$/, "");
+
+const registry = new ToolRegistry(database.db);
+registry.register(calculateTool);
 
 const app = await buildApp({
   db: database.db,
@@ -26,18 +37,46 @@ const app = await buildApp({
     prompt: {
       assistantName: env.ASSISTANT_NAME,
       timeZone: env.APP_TIMEZONE,
-      organizationContext: readOrganizationContext(env.ASSISTANT_CONTEXT_FILE),
+      organizationContext,
     },
     limits: {
       msgsPerHour: env.RATE_LIMIT_MSGS_PER_HOUR,
       msgsPerDay: env.RATE_LIMIT_MSGS_PER_DAY,
       tokensPerDay: env.RATE_LIMIT_TOKENS_PER_DAY,
     },
+    // The CLI runs on this host, so it reaches /mcp locally rather than through the public address
+    mcpConfig: chatMcpConfig(database.db, `http://127.0.0.1:${env.PORT}/mcp`),
+  },
+  mcp: {
+    registry,
+    publicBaseUrl,
+    settings: {
+      assistantName: env.ASSISTANT_NAME,
+      organizationContext,
+      timeZone: env.APP_TIMEZONE,
+      accessContact: async () =>
+        (await readSetting(database.db, "access.contact")) ?? DEFAULT_ACCESS_CONTACT,
+    },
   },
   logger: true,
 });
 
-app.addHook("onClose", () => database.close());
+// Tool failures, broken contracts and audit errors must reach the server log
+registry.useLogger(app.log);
+
+// Questions from external clients are kept only for the retention period (D36)
+const purge = () =>
+  purgeIntents(database.db, env.MCP_INTENT_RETENTION_DAYS).catch((error) =>
+    app.log.error({ err: error }, "intent purge failed"),
+  );
+void purge();
+const purgeTimer = setInterval(purge, 6 * 3_600_000);
+purgeTimer.unref();
+
+app.addHook("onClose", async () => {
+  clearInterval(purgeTimer);
+  await database.close();
+});
 
 try {
   await app.listen({ port: env.PORT, host: "0.0.0.0" });

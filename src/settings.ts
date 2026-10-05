@@ -9,6 +9,8 @@ export const SETTINGS = {
     .string()
     .trim()
     .regex(/^(opus|sonnet|haiku|claude-[a-z0-9.-]+)(\[1m\])?$/, "Modelo de Claude no reconocido"),
+  // Who people should ask for access, named when a capability exists but they cannot use it
+  "access.contact": z.string().trim().min(3).max(200),
 } as const;
 
 export type SettingKey = keyof typeof SETTINGS;
