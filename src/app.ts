@@ -14,6 +14,7 @@ import oauthRoutes from "./routes/oauth.js";
 import passwordResetRoutes, { type PasswordResetRoutesOptions } from "./routes/passwordReset.js";
 import sourcesRoutes, { type SourcesRoutesOptions } from "./routes/sources.js";
 import toolsRoutes, { type ToolsRoutesOptions } from "./routes/tools.js";
+import usageRoutes, { type UsageRoutesOptions } from "./routes/usage.js";
 import type { ToolRegistry } from "./tools/registry.js";
 
 export interface AppDependencies {
@@ -32,6 +33,8 @@ export interface AppDependencies {
   tools?: Omit<ToolsRoutesOptions, "db">;
   // Without it the document routes are not mounted
   docs?: Omit<DocsRoutesOptions, "db">;
+  // Without it there is no usage report
+  usage?: Omit<UsageRoutesOptions, "db">;
   // Without it a password cannot be reset by mail
   passwordReset?: Omit<PasswordResetRoutesOptions, "db">;
   logger?: boolean;
@@ -54,6 +57,9 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   await app.register(authPlugin, { db: deps.db, signer: deps.signer });
   await app.register(authRoutes, { db: deps.db, signer: deps.signer, systems: deps.systems });
   await app.register(adminRoutes, { db: deps.db });
+  if (deps.usage) {
+    await app.register(usageRoutes, { ...deps.usage, db: deps.db });
+  }
   if (deps.passwordReset) {
     await app.register(passwordResetRoutes, { ...deps.passwordReset, db: deps.db });
   }

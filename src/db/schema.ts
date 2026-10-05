@@ -42,6 +42,8 @@ export const users = pgTable(
     passwordHash: text("password_hash"),
     primaryRoleId: integer("primary_role_id"),
     active: boolean("active").notNull().default(true),
+    // An account of a system, not a person: its activity is counted apart from people's
+    isService: boolean("is_service").notNull().default(false),
     failedLogins: integer("failed_logins").notNull().default(0),
     lockedUntil: timestamptz("locked_until"),
     // Tokens issued before this instant are rejected even if they have not expired
