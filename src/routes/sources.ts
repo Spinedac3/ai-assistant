@@ -7,6 +7,7 @@ import {
   connectionOf,
   deleteSource,
   listSources,
+  SOURCE_CODE,
   saveSource,
   sourceInput,
   verifySource,
@@ -18,7 +19,7 @@ export interface SourcesRoutesOptions {
   secrets: Secrets;
 }
 
-const codeParams = z.object({ code: z.string().regex(/^[a-z0-9_-]{2,50}$/) });
+const codeParams = z.object({ code: z.string().regex(SOURCE_CODE) });
 
 /**
  * Registers the administration of the databases the tools read
@@ -50,12 +51,19 @@ export default async function sourcesRoutes(
 
     const verification = await verifySource(connectionOf(parsed.data));
     if (!verification.ok) {
+      if (verification.error === "connection_failed") {
+        request.log.warn(
+          { source: parsed.data.code, detail: verification.detail },
+          "source connection failed",
+        );
+        return reply
+          .code(400)
+          .send({ ok: false, error: verification.error, message: verification.message });
+      }
+
       return reply.code(400).send({
         ...verification,
-        message:
-          verification.error === "not_read_only"
-            ? "El usuario de la base puede escribir; pide al DBA un usuario de solo lectura"
-            : `No se pudo conectar: ${verification.message}`,
+        message: "El usuario de la base puede escribir; pide al DBA un usuario de solo lectura",
       });
     }
 
@@ -79,7 +87,16 @@ export default async function sourcesRoutes(
       return reply.code(404).send({ ok: false, error: "source_not_found" });
     }
 
-    return { ok: true, data: await verifySource(source.info) };
+    const verification = await verifySource(source.info);
+    if (!verification.ok && verification.error === "connection_failed") {
+      request.log.warn({ source: code, detail: verification.detail }, "source connection failed");
+      return {
+        ok: true,
+        data: { ok: false, error: verification.error, message: verification.message },
+      };
+    }
+
+    return { ok: true, data: verification };
   });
 
   app.delete("/admin/sources/:code", guard, async (request, reply) => {

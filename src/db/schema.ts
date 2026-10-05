@@ -322,7 +322,6 @@ export const sources = pgTable(
     // Zone of the dates the source stores without one; null inherits the app's
     timeZone: varchar("time_zone", { length: 64 }),
     tls: boolean("tls").notNull().default(true),
-    active: boolean("active").notNull().default(true),
     createdBy: integer("created_by").notNull(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),

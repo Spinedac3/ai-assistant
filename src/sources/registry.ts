@@ -13,8 +13,10 @@ const zone = z
     message: "zona horaria IANA desconocida",
   });
 
+export const SOURCE_CODE = /^[a-z0-9_-]{2,50}$/;
+
 export const sourceInput = z.object({
-  code: z.string().regex(/^[a-z0-9_-]{2,50}$/, "minúsculas, números, guion y guion bajo"),
+  code: z.string().regex(SOURCE_CODE, "minúsculas, números, guion y guion bajo"),
   name: z.string().trim().min(1).max(200),
   engine: z.enum(["postgres", "mysql", "mssql"]),
   host: z.string().trim().min(1).max(255),
@@ -38,12 +40,11 @@ export interface SourceSummary {
   username: string;
   timeZone: string | null;
   tls: boolean;
-  active: boolean;
 }
 
 export type Verification =
   | { ok: true }
-  | { ok: false; error: "connection_failed"; message: string }
+  | { ok: false; error: "connection_failed"; message: string; detail: string }
   | { ok: false; error: "not_read_only"; abilities: string[] };
 
 /**
@@ -59,11 +60,54 @@ function redact(message: string, password: string): string {
 }
 
 /**
+ * Names what failed in a connection, without the driver's details: those reach the server log
+ * only, since they would map the internal network for whoever registers sources
+ *
+ * @param   error  Driver error
+ *
+ * @return  The problem, in Spanish
+ */
+export function connectionProblem(error: unknown): string {
+  const failure = error as { code?: unknown; message?: unknown };
+  const code = String(failure.code ?? "");
+  const message = String(failure.message ?? "");
+
+  if (
+    ["28P01", "28000", "ER_ACCESS_DENIED_ERROR"].includes(code) ||
+    /login failed/i.test(message)
+  ) {
+    return "Usuario o contraseña incorrectos";
+  }
+  if (["3D000", "ER_BAD_DB_ERROR"].includes(code) || /cannot open database/i.test(message)) {
+    return "La base no existe o el usuario no puede abrirla";
+  }
+  if (/certificate|ssl|tls/i.test(message)) {
+    return "Falló la conexión segura (TLS); revisa el certificado del servidor";
+  }
+  if (
+    [
+      "ECONNREFUSED",
+      "ETIMEDOUT",
+      "ENOTFOUND",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "ESOCKET",
+      "ETIMEOUT",
+    ].includes(code) ||
+    /timeout|refused|ENOTFOUND/i.test(message)
+  ) {
+    return "No se pudo alcanzar el servidor de la base";
+  }
+
+  return "No se pudo conectar a la base";
+}
+
+/**
  * Connects to a source and checks that its user can only read
  *
  * @param   info  Connection
  *
- * @return  Whether it can be used, and why not
+ * @return  Whether it can be used, and why not; the driver's own message comes apart, for the log
  */
 export async function verifySource(info: ConnectionInfo): Promise<Verification> {
   let abilities: string[];
@@ -73,7 +117,8 @@ export async function verifySource(info: ConnectionInfo): Promise<Verification> 
     return {
       ok: false,
       error: "connection_failed",
-      message: redact((error as Error).message, info.password),
+      message: connectionProblem(error),
+      detail: redact(String((error as Error).message), info.password),
     };
   }
 
@@ -131,7 +176,7 @@ export async function saveSource(
     .values({ ...values, code: input.code, createdBy: userId })
     .onConflictDoUpdate({
       target: sources.code,
-      set: { ...values, active: true, updatedAt: sql`now()` },
+      set: { ...values, updatedAt: sql`now()` },
     });
 }
 
@@ -154,20 +199,19 @@ export async function listSources(db: Database): Promise<SourceSummary[]> {
       username: sources.username,
       timeZone: sources.timeZone,
       tls: sources.tls,
-      active: sources.active,
     })
     .from(sources)
     .orderBy(sources.code);
 }
 
 /**
- * Opens the connection of an active source, with its password unsealed only now
+ * Opens the connection of a source, with its password unsealed only now
  *
  * @param   db       Own database
  * @param   secrets  Vault
  * @param   code     Source code
  *
- * @return  The connection and the zone of its dates, or null when there is no such active source
+ * @return  The connection and the zone of its dates, or null when there is no such source
  */
 export async function connectionFor(
   db: Database,
@@ -175,7 +219,7 @@ export async function connectionFor(
   code: string,
 ): Promise<{ info: ConnectionInfo; timeZone: string | null } | null> {
   const [row] = await db.select().from(sources).where(eq(sources.code, code)).limit(1);
-  if (!row?.active) {
+  if (!row) {
     return null;
   }
 
