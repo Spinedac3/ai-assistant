@@ -5,10 +5,16 @@ export type Channel = "chat" | "mcp" | "runs" | "trials" | "apps";
 
 export const CHANNELS: readonly Channel[] = ["chat", "mcp", "runs", "trials", "apps"];
 
+// A tool used by fewer people than this in the window is shown only in a shared row: with one or
+// two users its name alone would tell what a given person asked about
+export const MIN_PEOPLE_PER_TOOL = 3;
+
 export interface PeriodTotals {
+  // People with any activity of their own: chat, external client, runs or trials
   activePeople: number;
   questions: number;
   mcpCalls: number;
+  // Of people; what systems spend is under services
   costUsd: number;
   tokens: number;
 }
@@ -25,13 +31,32 @@ export interface UsageReport {
     role: string | null;
     questions: number;
     mcpCalls: number;
+    trials: number;
+    runs: number;
+    // Every call made for this person, whatever the path
     toolCalls: number;
     costUsd: number;
     tokens: number;
-    lastActivity: string;
+    lastActivity: string | null;
+  }[];
+  // Every account marked as a system, active or not, so the mark never hides anything
+  services: {
+    userId: number;
+    name: string;
+    email: string;
+    events: number;
+    costUsd: number;
+    tokens: number;
   }[];
   byRole: { role: string | null; activePeople: number; questions: number; mcpCalls: number }[];
-  byTool: { tool: string; calls: number; errors: number; avgMs: number; truncated: number }[];
+  // tool is null in the row that gathers the tools used by too few people
+  byTool: {
+    tool: string | null;
+    calls: number;
+    errors: number;
+    avgMs: number;
+    truncated: number;
+  }[];
   byDay: { day: string; questions: number; mcpCalls: number }[];
   inactive: { userId: number; name: string; email: string; role: string | null }[];
   ratings: { count: number; averageStars: number | null };
@@ -40,7 +65,8 @@ export interface UsageReport {
 /**
  * Every activity of the window as one row each: a question asked or a tool called, with the
  * channel it came through. Service accounts go to apps whatever the path, and a tool called while
- * answering a question is not a second activity
+ * answering a question is not a second activity. Deleted conversations count: deleting one does
+ * not undo its use
  *
  * @param   from  Start of the window
  * @param   to    End of the window
@@ -64,7 +90,8 @@ function eventsBetween(from: Date, to: Date) {
 }
 
 /**
- * What the answers of a window cost and how many tokens they took, per person; systems apart
+ * What the answers of a window cost and how many tokens they took, per account; cut by the time of
+ * the answer, which is when the cost happened
  *
  * @param   from  Start of the window
  * @param   to    End of the window
@@ -78,7 +105,6 @@ function spendBetween(from: Date, to: Date) {
       coalesce(sum(coalesce(m.tokens_in, 0) + coalesce(m.tokens_out, 0)), 0)::bigint as tokens
     from messages m
     join conversations c on c.id = m.conversation_id
-    join users u on u.id = c.user_id and not u.is_service
     where m.role = 'assistant' and m.created_at >= ${from} and m.created_at < ${to}
     group by c.user_id`;
 }
@@ -96,11 +122,11 @@ async function totalsBetween(db: Database, from: Date, to: Date): Promise<Period
   const result = await db.execute(sql`
     with events as (${eventsBetween(from, to)}), spend as (${spendBetween(from, to)})
     select
-      (select count(distinct user_id) from events where channel in ('chat', 'mcp'))::int as people,
+      (select count(distinct user_id) from events where channel <> 'apps')::int as people,
       (select count(*) from events where channel = 'chat')::int as questions,
       (select count(*) from events where channel = 'mcp')::int as mcp,
-      (select coalesce(sum(cost), 0) from spend)::bigint as cost,
-      (select coalesce(sum(tokens), 0) from spend)::bigint as tokens`);
+      (select coalesce(sum(s.cost), 0) from spend s join users u on u.id = s.user_id and not u.is_service)::bigint as cost,
+      (select coalesce(sum(s.tokens), 0) from spend s join users u on u.id = s.user_id and not u.is_service)::bigint as tokens`);
   const row = result.rows[0] as Record<string, unknown>;
 
   return {
@@ -114,6 +140,9 @@ async function totalsBetween(db: Database, from: Date, to: Date): Promise<Period
 
 /**
  * Builds the usage report of the last days: only counts, never what anyone asked
+ *
+ * The window is the last days counted back from now, so its first and last calendar days are
+ * partial
  *
  * @param   db        Own database
  * @param   days      Length of the window
@@ -132,16 +161,121 @@ export async function usageReport(
   const before = new Date(from.getTime() - days * 86_400_000);
   const events = eventsBetween(from, now);
   const spend = spendBetween(from, now);
-  // The role of each person, when it is still active
+  // People, with their role when it is still active
   const people = sql`
     select u.id, u.display_name, u.email, r.code as role
     from users u
     left join roles r on r.id = u.primary_role_id and r.active
     where not u.is_service`;
 
-  const channels = await db.execute(sql`
-    with events as (${events})
-    select channel, count(*)::int as total from events group by channel`);
+  const [totals, previous, channels, persons, services, roles, tools, daily, inactive, ratings] =
+    await Promise.all([
+      totalsBetween(db, from, now),
+      totalsBetween(db, before, from),
+      db.execute(sql`
+        with events as (${events})
+        select channel, count(*)::int as total from events group by channel`),
+      // Everyone who did something of their own or caused a cost, so the rows add up to the totals
+      db.execute(sql`
+        with events as (${events}), spend as (${spend}),
+        tools as (
+          select user_id, count(*)::int as calls from tool_calls
+          where created_at >= ${from} and created_at < ${now} group by user_id
+        ),
+        acts as (
+          select user_id,
+            count(*) filter (where channel = 'chat')::int as questions,
+            count(*) filter (where channel = 'mcp')::int as mcp,
+            count(*) filter (where channel = 'trials')::int as trials,
+            count(*) filter (where channel = 'runs')::int as runs,
+            max(created_at) as last
+          from events where channel <> 'apps' group by user_id
+        ),
+        people as (${people})
+        select p.id, p.display_name, p.email, p.role,
+          coalesce(a.questions, 0) as questions, coalesce(a.mcp, 0) as mcp,
+          coalesce(a.trials, 0) as trials, coalesce(a.runs, 0) as runs,
+          coalesce(t.calls, 0) as tools, coalesce(s.cost, 0)::bigint as cost,
+          coalesce(s.tokens, 0)::bigint as tokens, a.last
+        from people p
+        left join acts a on a.user_id = p.id
+        left join spend s on s.user_id = p.id
+        left join tools t on t.user_id = p.id
+        where a.user_id is not null or s.user_id is not null
+        order by coalesce(a.questions, 0) + coalesce(a.mcp, 0) desc, p.id`),
+      db.execute(sql`
+        with events as (${events}), spend as (${spend})
+        select u.id, u.display_name, u.email,
+          (select count(*) from events e where e.user_id = u.id)::int as events,
+          coalesce(s.cost, 0)::bigint as cost, coalesce(s.tokens, 0)::bigint as tokens
+        from users u
+        left join spend s on s.user_id = u.id
+        where u.is_service and u.deleted_at is null
+        order by u.display_name, u.id`),
+      db.execute(sql`
+        with events as (${events}), people as (${people})
+        select p.role,
+          count(distinct p.id)::int as people,
+          count(*) filter (where e.channel = 'chat')::int as questions,
+          count(*) filter (where e.channel = 'mcp')::int as mcp
+        from people p
+        join events e on e.user_id = p.id and e.channel <> 'apps'
+        group by p.role
+        order by people desc, p.role`),
+      db.execute(sql`
+        with calls as (
+          select * from tool_calls where created_at >= ${from} and created_at < ${now}
+        ),
+        used as (
+          select w.*, u.users from calls w
+          join (
+            select tool_name, count(distinct user_id) as users from calls group by tool_name
+          ) u using (tool_name)
+        )
+        select case when users >= ${MIN_PEOPLE_PER_TOOL} then tool_name end as tool,
+          count(*)::int as calls,
+          count(*) filter (where not success)::int as errors,
+          round(avg(duration_ms))::int as avg_ms,
+          count(*) filter (where truncated)::int as truncated
+        from used
+        group by 1
+        order by tool nulls last, calls desc`),
+      db.execute(sql`
+        with events as (${events})
+        select to_char(created_at at time zone ${timeZone}, 'YYYY-MM-DD') as day,
+          count(*) filter (where channel = 'chat')::int as questions,
+          count(*) filter (where channel = 'mcp')::int as mcp
+        from events
+        where channel in ('chat', 'mcp')
+        group by day
+        order by day`),
+      // People who may chat, by their role or an extra scope in force at the end of the window,
+      // and did nothing of their own in it
+      db.execute(sql`
+        with events as (${events}), people as (${people}),
+        allowed as (
+          select u.id from users u
+          join roles r on r.id = u.primary_role_id and r.active
+          join role_scopes rs on rs.role_id = r.id
+          join scopes s on s.id = rs.scope_id and s.code = 'chat.use' and s.deleted_at is null
+          union
+          select ue.user_id from user_extra_scopes ue
+          join scopes s on s.id = ue.scope_id and s.code = 'chat.use' and s.deleted_at is null
+          where ue.expires_at is null or ue.expires_at > ${now}
+        )
+        select p.id, p.display_name, p.email, p.role
+        from people p
+        join users u on u.id = p.id and u.active and u.deleted_at is null
+        where p.id in (select id from allowed)
+          and not exists (select 1 from events e where e.user_id = p.id and e.channel <> 'apps')
+        order by p.display_name, p.id`),
+      db.execute(sql`
+        select count(*)::int as total, avg(mr.stars)::float as average
+        from message_ratings mr
+        join users u on u.id = mr.user_id and not u.is_service
+        where mr.created_at >= ${from} and mr.created_at < ${now}`),
+    ]);
+
   const byChannel = Object.fromEntries(CHANNELS.map((channel) => [channel, 0])) as Record<
     Channel,
     number
@@ -149,88 +283,12 @@ export async function usageReport(
   for (const row of channels.rows as { channel: Channel; total: number }[]) {
     byChannel[row.channel] = row.total;
   }
-
-  const persons = await db.execute(sql`
-    with events as (${events}), spend as (${spend}),
-    tools as (
-      select user_id, count(*)::int as calls from tool_calls
-      where created_at >= ${from} and created_at < ${now} group by user_id
-    ),
-    people as (${people})
-    select p.id, p.display_name, p.email, p.role,
-      count(*) filter (where e.channel = 'chat')::int as questions,
-      count(*) filter (where e.channel = 'mcp')::int as mcp,
-      coalesce(max(t.calls), 0)::int as tools,
-      coalesce(max(s.cost), 0)::bigint as cost,
-      coalesce(max(s.tokens), 0)::bigint as tokens,
-      max(e.created_at) as last
-    from people p
-    join events e on e.user_id = p.id and e.channel in ('chat', 'mcp')
-    left join tools t on t.user_id = p.id
-    left join spend s on s.user_id = p.id
-    group by p.id, p.display_name, p.email, p.role
-    order by count(*) desc, p.id`);
-
-  const roles = await db.execute(sql`
-    with events as (${events}), people as (${people})
-    select p.role,
-      count(distinct p.id)::int as people,
-      count(*) filter (where e.channel = 'chat')::int as questions,
-      count(*) filter (where e.channel = 'mcp')::int as mcp
-    from people p
-    join events e on e.user_id = p.id and e.channel in ('chat', 'mcp')
-    group by p.role
-    order by people desc, p.role`);
-
-  const tools = await db.execute(sql`
-    select tool_name, count(*)::int as calls,
-      count(*) filter (where not success)::int as errors,
-      round(avg(duration_ms))::int as avg_ms,
-      count(*) filter (where truncated)::int as truncated
-    from tool_calls
-    where created_at >= ${from} and created_at < ${now}
-    group by tool_name
-    order by calls desc, tool_name`);
-
-  const daily = await db.execute(sql`
-    with events as (${events})
-    select to_char(created_at at time zone ${timeZone}, 'YYYY-MM-DD') as day,
-      count(*) filter (where channel = 'chat')::int as questions,
-      count(*) filter (where channel = 'mcp')::int as mcp
-    from events
-    group by day
-    order by day`);
-
-  // People who may chat, by their role or an extra scope still in force, and did nothing
-  const inactive = await db.execute(sql`
-    with events as (${events}), people as (${people}),
-    allowed as (
-      select u.id from users u
-      join roles r on r.id = u.primary_role_id and r.active
-      join role_scopes rs on rs.role_id = r.id
-      join scopes s on s.id = rs.scope_id and s.code = 'chat.use' and s.deleted_at is null
-      union
-      select ue.user_id from user_extra_scopes ue
-      join scopes s on s.id = ue.scope_id and s.code = 'chat.use' and s.deleted_at is null
-      where ue.expires_at is null or ue.expires_at > now()
-    )
-    select p.id, p.display_name, p.email, p.role
-    from people p
-    join users u on u.id = p.id and u.active and u.deleted_at is null
-    where p.id in (select id from allowed)
-      and not exists (select 1 from events e where e.user_id = p.id and e.channel in ('chat', 'mcp'))
-    order by p.display_name, p.id`);
-
-  const ratings = await db.execute(sql`
-    select count(*)::int as total, avg(stars)::float as average
-    from message_ratings
-    where created_at >= ${from} and created_at < ${now}`);
   const rated = ratings.rows[0] as { total: number; average: number | null };
 
   return {
     period: { from: from.toISOString(), to: now.toISOString(), days },
-    totals: await totalsBetween(db, from, now),
-    previous: await totalsBetween(db, before, from),
+    totals,
+    previous,
     byChannel,
     byPerson: (persons.rows as Record<string, unknown>[]).map((row) => ({
       userId: Number(row.id),
@@ -239,10 +297,20 @@ export async function usageReport(
       role: (row.role as string | null) ?? null,
       questions: Number(row.questions),
       mcpCalls: Number(row.mcp),
+      trials: Number(row.trials),
+      runs: Number(row.runs),
       toolCalls: Number(row.tools),
       costUsd: Number(row.cost) / 1_000_000,
       tokens: Number(row.tokens),
-      lastActivity: new Date(row.last as string).toISOString(),
+      lastActivity: row.last ? new Date(row.last as string).toISOString() : null,
+    })),
+    services: (services.rows as Record<string, unknown>[]).map((row) => ({
+      userId: Number(row.id),
+      name: String(row.display_name),
+      email: String(row.email),
+      events: Number(row.events),
+      costUsd: Number(row.cost) / 1_000_000,
+      tokens: Number(row.tokens),
     })),
     byRole: (roles.rows as Record<string, unknown>[]).map((row) => ({
       role: (row.role as string | null) ?? null,
@@ -251,7 +319,7 @@ export async function usageReport(
       mcpCalls: Number(row.mcp),
     })),
     byTool: (tools.rows as Record<string, unknown>[]).map((row) => ({
-      tool: String(row.tool_name),
+      tool: (row.tool as string | null) ?? null,
       calls: Number(row.calls),
       errors: Number(row.errors),
       avgMs: Number(row.avg_ms),

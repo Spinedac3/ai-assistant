@@ -174,7 +174,11 @@ export const messages = pgTable(
     trace: jsonb("trace").$type<TraceEntry[]>(),
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
-  (t) => [index("messages_conversation_idx").on(t.conversationId, t.id)],
+  (t) => [
+    index("messages_conversation_idx").on(t.conversationId, t.id),
+    // The usage report reads messages by time
+    index("messages_created_idx").on(t.createdAt),
+  ],
 );
 
 export const messageRatings = pgTable(
@@ -191,7 +195,10 @@ export const messageRatings = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (t) => [uniqueIndex("message_ratings_message_user_unique").on(t.messageId, t.userId)],
+  (t) => [
+    uniqueIndex("message_ratings_message_user_unique").on(t.messageId, t.userId),
+    index("message_ratings_created_idx").on(t.createdAt),
+  ],
 );
 
 export const rateLimits = pgTable(
@@ -238,6 +245,7 @@ export const toolCalls = pgTable(
   (t) => [
     index("tool_calls_user_created_idx").on(t.userId, t.createdAt),
     index("tool_calls_conversation_idx").on(t.conversationId, t.id),
+    index("tool_calls_created_idx").on(t.createdAt),
   ],
 );
 
