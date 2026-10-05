@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { paramName } from "./sql.js";
 
 // Also the name the model calls; lowercase so it reads the same on every client
 export const TOOL_NAME = /^[a-z][a-z0-9_]{2,63}$/;
@@ -107,6 +108,10 @@ export const definitionSchema = z
     const filtered = definition.filters.map((filter) => filter.column);
     if (new Set(filtered).size !== filtered.length) {
       issue("Cada columna lleva un solo filtro; para un rango usa between");
+    } else if (new Set(filtered.map(paramName)).size !== filtered.length) {
+      issue(
+        "Dos filtros darían el mismo nombre de parámetro; sus columnas solo difieren en tildes o signos",
+      );
     }
     if (new Set(columns).size !== columns.length) {
       issue("Hay columnas repetidas");
