@@ -5,7 +5,13 @@ import type { Database } from "../db/client.js";
 import { toolCalls } from "../db/schema.js";
 import type { ExportStore } from "../exports/store.js";
 import { countHidden, removeHidden } from "../lib/hiddenText.js";
-import { type Archive, CHAT_MAX_BYTES, capResult, EXTERNAL_MAX_BYTES } from "./cap.js";
+import {
+  type Archive,
+  CHAT_MAX_BYTES,
+  capResult,
+  EXTERNAL_MAX_BYTES,
+  withCapFields,
+} from "./cap.js";
 import type { Tool, ToolDefinition, ToolOrigin } from "./contract.js";
 
 // A failure of one tool is not a lack of capability; one reasoned alternative, never a sweep
@@ -133,7 +139,7 @@ export class ToolRegistry {
     this.tools.set(name, tool);
     this.validators.set(name, {
       input: this.ajv.compile(inputSchema),
-      output: outputSchema ? this.ajv.compile(outputSchema) : undefined,
+      output: outputSchema ? this.ajv.compile(withCapFields(outputSchema)) : undefined,
     });
   }
 

@@ -77,7 +77,10 @@ describe("result cap", () => {
       ["pedidos", 1000],
       ["detalle", 200],
     ]);
-    expect(result.archivo).toMatchObject({ filas: 1000, vence_en_dias: 7 });
+    expect(result.archivo).toMatchObject({
+      filas: { pedidos: 1000, detalle: 200 },
+      vence_en_dias: 7,
+    });
     expect(result.filas_omitidas).toMatchObject({ detalle: 200 });
     expect(String(result.nota)).toMatch(/^Comparte PRIMERO este link de Excel/);
     expect(String(result.nota)).toContain("detalle: ves 0 de 200");
@@ -125,21 +128,58 @@ describe("result cap", () => {
     expect(capped.ok && capped.data.archivo).toBeFalsy();
   });
 
-  it("says how many rows the Excel leaves out when a list passes the sheet limit", async () => {
+  it("says how many rows the Excel leaves out of every list past the sheet limit", async () => {
     // Performs the test.
     const { archive, saved } = recordingArchive();
-    const capped = await capResult({ filas: rows(MAX_SHEET_ROWS + 5, 5) }, 40_000, archive);
+    const capped = await capResult(
+      { filas: rows(MAX_SHEET_ROWS + 5, 5), otras: rows(MAX_SHEET_ROWS + 2, 1) },
+      40_000,
+      archive,
+    );
     if (!capped.ok) {
       throw new Error(capped.message);
     }
 
     // Performs assertions.
-    expect(saved[0]?.[0]?.rows).toHaveLength(MAX_SHEET_ROWS);
+    expect(saved[0]?.map((sheet) => sheet.rows.length)).toEqual([MAX_SHEET_ROWS, MAX_SHEET_ROWS]);
     expect(capped.data.archivo).toMatchObject({
-      filas: MAX_SHEET_ROWS,
-      filas_fuera_del_archivo: 5,
+      filas: { filas: MAX_SHEET_ROWS, otras: MAX_SHEET_ROWS },
+      filas_fuera_del_archivo: { filas: 5, otras: 2 },
     });
-    expect(String(capped.data.nota)).toContain(`las primeras ${MAX_SHEET_ROWS}`);
+    expect(String(capped.data.nota)).toContain(`cada lista hasta ${MAX_SHEET_ROWS} filas`);
+  });
+
+  it("keeps the small summaries while the heavy list is cut", async () => {
+    // Performs the test.
+    const summaries = Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => [`resumen${index}`, rows(2, 20)]),
+    );
+    const capped = await capResult({ pedidos: rows(2_000), ...summaries }, 40_000, null);
+    if (!capped.ok) {
+      throw new Error(capped.message);
+    }
+
+    // Performs assertions.
+    for (const name of Object.keys(summaries)) {
+      expect(capped.data[name]).toEqual(summaries[name]);
+    }
+    expect(capped.data.filas_omitidas).toEqual({
+      pedidos: 2_000 - (capped.data.pedidos as unknown[]).length,
+    });
+  });
+
+  it("writes no Excel for a result that cannot fit even without its lists", async () => {
+    // Performs the test.
+    const { archive, saved } = recordingArchive();
+    const capped = await capResult(
+      { texto: "x".repeat(50_000), filas: rows(1_000) },
+      40_000,
+      archive,
+    );
+
+    // Performs assertions.
+    expect(capped.ok).toBe(false);
+    expect(saved).toHaveLength(0);
   });
 
   it("refuses a result with nothing it can cut, or whose totals alone do not fit", async () => {

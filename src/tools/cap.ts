@@ -1,4 +1,5 @@
 import type { Sheet } from "../exports/xlsx.js";
+import type { JsonSchema } from "./contract.js";
 
 // Well under where the Claude CLI starts rejecting a tool result, and above any normal answer
 export const CHAT_MAX_BYTES = 40_000;
@@ -91,12 +92,16 @@ export async function capResult(
   }
 
   const heavy = lists.filter((entry) => entry.bytes > SMALL_LIST_BYTES);
-  const saved =
-    archive && heavy.length > 0
-      ? await archive.save(heavy.map((entry) => sheetOf(entry.name, entry.list)))
-      : null;
-  const archivedRows = Math.min(main.list.length, MAX_SHEET_ROWS);
+  // Rows of each archived list that do not fit in its sheet
+  const outOfFile = Object.fromEntries(
+    heavy
+      .filter((entry) => entry.list.length > MAX_SHEET_ROWS)
+      .map((entry) => [entry.name, entry.list.length - MAX_SHEET_ROWS]),
+  );
   const keep = new Map(lists.map((entry) => [entry.name, entry.list.length]));
+  // Room for the link while the cut is decided; the real one is measured again once saved
+  let saved: { url: string; expiresInDays: number } | null =
+    archive && heavy.length > 0 ? { url: "x".repeat(400), expiresInDays: 0 } : null;
 
   // The exact result for the current cut, so what is measured is what is returned
   const build = (): Record<string, unknown> => {
@@ -116,7 +121,8 @@ export async function capResult(
         return `${name}: ves ${kept} de ${kept + count}`;
       })
       .join("; ");
-    const partial = archivedRows < main.list.length ? ` (las primeras ${archivedRows})` : "";
+    const partial =
+      Object.keys(outOfFile).length > 0 ? ` (cada lista hasta ${MAX_SHEET_ROWS} filas)` : "";
 
     return {
       ...result,
@@ -124,49 +130,56 @@ export async function capResult(
         ? {
             archivo: {
               url: saved.url,
-              filas: archivedRows,
-              ...(partial ? { filas_fuera_del_archivo: main.list.length - archivedRows } : {}),
+              filas: Object.fromEntries(
+                heavy.map((entry) => [entry.name, Math.min(entry.list.length, MAX_SHEET_ROWS)]),
+              ),
+              ...(partial ? { filas_fuera_del_archivo: outOfFile } : {}),
               vence_en_dias: saved.expiresInDays,
             },
           }
         : {}),
       filas_omitidas: omitted,
       nota: saved
-        ? `Comparte PRIMERO este link de Excel con las filas de ${main.name}${partial}, vence en ` +
-          `${saved.expiresInDays} días: ${saved.url}. Recortado aquí: ${cut}. Los totales están ` +
-          "completos. No vuelvas a llamar para reconstruir las filas que faltan."
+        ? `Comparte PRIMERO este link de Excel con las filas de ${heavy.map((entry) => entry.name).join(", ")}${partial}, ` +
+          `vence en ${saved.expiresInDays} días: ${saved.url}. Recortado aquí: ${cut}. Los ` +
+          "totales están completos. No vuelvas a llamar para reconstruir las filas que faltan."
         : `Resultado recortado: ${cut}. Los totales están completos. No completes lo que falta; ` +
           "si hace falta el detalle, pide filtros más angostos.",
     };
   };
   const fits = () => size(build()) <= maxBytes;
 
-  // Secondary heavy lists give way first, then the main one keeps all it can, found by halves
-  for (const entry of heavy.slice(1)) {
-    if (!fits()) {
-      keep.set(entry.name, 0);
-    }
-  }
-  if (!fits()) {
-    let low = 0;
-    let high = main.list.length;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      keep.set(main.name, middle);
-      if (fits()) {
-        low = middle;
-      } else {
-        high = middle - 1;
+  // Secondary heavy lists give way first, then the main one keeps all it can, found by halves,
+  // and the small summary lists last
+  const shrink = () => {
+    for (const entry of heavy.slice(1)) {
+      if (!fits()) {
+        keep.set(entry.name, 0);
       }
     }
-    keep.set(main.name, low);
-  }
-  for (const entry of lists.filter((item) => item.bytes <= SMALL_LIST_BYTES)) {
     if (!fits()) {
-      keep.set(entry.name, 0);
+      let low = 0;
+      let high = keep.get(main.name) ?? 0;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        keep.set(main.name, middle);
+        if (fits()) {
+          low = middle;
+        } else {
+          high = middle - 1;
+        }
+      }
+      keep.set(main.name, low);
     }
-  }
+    for (const entry of lists.filter((item) => item.bytes <= SMALL_LIST_BYTES)) {
+      if (!fits()) {
+        keep.set(entry.name, 0);
+      }
+    }
+  };
 
+  shrink();
+  // Nothing is archived for a result that cannot fit even without its lists
   if (!fits()) {
     return {
       ok: false,
@@ -176,5 +189,29 @@ export async function capResult(
     };
   }
 
+  if (saved && archive) {
+    saved = await archive.save(heavy.map((entry) => sheetOf(entry.name, entry.list)));
+    shrink();
+  }
+
   return { ok: true, truncated: true, data: build() };
+}
+
+/**
+ * Adds to a declared result shape the fields the cap may add, so a cut result still matches it
+ *
+ * @param   schema  Declared output schema
+ *
+ * @return  The schema with the cap fields as optional properties
+ */
+export function withCapFields(schema: JsonSchema): JsonSchema {
+  return {
+    ...schema,
+    properties: {
+      ...((schema.properties as Record<string, unknown>) ?? {}),
+      archivo: { type: "object" },
+      filas_omitidas: { type: "object" },
+      nota: { type: "string" },
+    },
+  };
 }
