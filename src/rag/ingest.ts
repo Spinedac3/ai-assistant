@@ -53,6 +53,32 @@ export function versionOf(docCode: string): number {
   return Number(docCode.match(/-V(\d+)$/i)?.[1] ?? 0);
 }
 
+export interface CurrentDocument {
+  doc_code: string;
+  doc_title: string;
+  doc_version: string;
+  updated_at: string;
+}
+
+/**
+ * Lists the current documents of a code's family, newest version first
+ *
+ * @param   index    Solr and cores
+ * @param   docCode  Any code of the family
+ *
+ * @return  One entry per current document
+ */
+export async function currentOfFamily(index: Index, docCode: string): Promise<CurrentDocument[]> {
+  const found = await index.solr.query<CurrentDocument>(index.cores.current, {
+    query: `doc_family:${escapeTerm(docFamily(docCode))}`,
+    filter: ["chunk_index:0"],
+    fields: ["doc_code", "doc_title", "doc_version", "updated_at"],
+    limit: 1_000,
+  });
+
+  return found.sort((a, b) => versionOf(b.doc_code) - versionOf(a.doc_code));
+}
+
 /**
  * Finds a current version of the same family newer than a code, which must not be rolled back
  *
@@ -62,12 +88,7 @@ export function versionOf(docCode: string): number {
  * @return  The newer code, or null
  */
 export async function newerCurrent(index: Index, docCode: string): Promise<string | null> {
-  const others = await index.solr.query<{ doc_code: string }>(index.cores.current, {
-    query: `doc_family:${escapeTerm(docFamily(docCode))}`,
-    filter: [`-doc_code:${escapeTerm(docCode)}`, "chunk_index:0"],
-    fields: ["doc_code"],
-    limit: 1_000,
-  });
+  const others = await currentOfFamily(index, docCode);
 
   return others.find((other) => versionOf(other.doc_code) > versionOf(docCode))?.doc_code ?? null;
 }

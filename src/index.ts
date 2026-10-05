@@ -16,6 +16,7 @@ import { indexFrom, s3Config, storageFrom } from "./rag/services.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
+import { ingestTool } from "./tools/native/ingest.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { Secrets } from "./vault/envelope.js";
 
@@ -38,6 +39,7 @@ const registry = new ToolRegistry(database.db);
 registry.register(calculateTool);
 registry.register(searchTool(index));
 registry.register(fetchTool(index));
+registry.register(ingestTool({ db: database.db, index, storage }));
 
 const app = await buildApp({
   db: database.db,
