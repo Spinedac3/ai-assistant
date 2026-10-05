@@ -30,6 +30,9 @@ export interface McpCaller extends Caller {
   channel: Channel;
   runTools: string[];
   conversationId?: number;
+  // The registry of a trial token; the shared one otherwise
+  registry?: ToolRegistry;
+  trial?: boolean;
 }
 
 export interface McpSettings {
@@ -73,7 +76,11 @@ export function buildMcpServer(
   settings: McpSettings,
 ): Server {
   const surface = surfaceFor(registry, caller.scopes, caller.channel, caller.runTools);
-  const origin: ToolOrigin = caller.channel === "external" ? "mcp" : caller.channel;
+  const origin: ToolOrigin = caller.trial
+    ? "trial"
+    : caller.channel === "external"
+      ? "mcp"
+      : caller.channel;
   const withIntent = (name: string, schema: JsonSchema): JsonSchema =>
     caller.channel === "external" && !DOCUMENT_TOOLS.includes(name)
       ? {

@@ -142,6 +142,8 @@ async function resolveCaller(
     channel: run ? (run.tools === null ? "chat" : "run") : "external",
     runTools: run?.tools ?? [],
     conversationId: run?.conversationId,
+    registry: run?.registry,
+    trial: run?.trial,
   };
 }
 
@@ -179,7 +181,12 @@ export default async function mcpRoutes(
       return unauthorized(reply);
     }
 
-    const server = buildMcpServer(options.db, options.registry, caller, options.settings);
+    const server = buildMcpServer(
+      options.db,
+      caller.registry ?? options.registry,
+      caller,
+      options.settings,
+    );
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

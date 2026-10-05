@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { generateToken, hashToken } from "../auth/opaqueTokens.js";
 import type { Database } from "../db/client.js";
 import { accessTokens } from "../db/schema.js";
+import type { ToolRegistry } from "../tools/registry.js";
 
 export const RUN_CLIENT_ID = "internal-run";
 
@@ -9,6 +10,10 @@ export interface RunInfo {
   // Tools of an agent run, or null for a chat turn, which keeps the meta catalog
   tools: string[] | null;
   conversationId?: number;
+  // Tools of a trial, which include a draft no one else can reach; the shared registry otherwise
+  registry?: ToolRegistry;
+  // Calls of a trial are audited apart, so they never count as real use
+  trial?: boolean;
 }
 
 // In memory and keyed by the token, never by the person: deducing the run from the user once handed
@@ -43,6 +48,8 @@ export async function mintRunToken(
   runs.set(token, {
     tools: info.tools === null ? null : [...info.tools],
     conversationId: info.conversationId,
+    registry: info.registry,
+    trial: info.trial,
   });
 
   return token;
