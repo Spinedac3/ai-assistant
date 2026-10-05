@@ -26,11 +26,15 @@ appendFileSync(
 const run = runs[Math.min(index, runs.length - 1)];
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
+let reply = 0;
 for (const step of run.steps ?? []) {
+  // The real CLI repeats one reply id, with its usage, on every content block of that reply
+  reply += run.sameReply ? 0 : 1;
   if (step.text !== undefined) {
     emit({
       type: "assistant",
       message: {
+        id: `msg_${reply}`,
         model: "fake-model",
         content: [{ type: "text", text: step.text }],
         usage: { input_tokens: run.context ?? 1000 },

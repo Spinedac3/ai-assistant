@@ -163,6 +163,7 @@ async function* runCli(
     cachedIn: null,
     costMillionths: null,
   };
+  const countedReplies = new Set<string>();
   const count = (source: Record<string, unknown>, field: string) =>
     typeof source[field] === "number" ? (source[field] as number) : 0;
 
@@ -172,6 +173,7 @@ async function* runCli(
         content?: unknown[];
         usage?: Record<string, unknown>;
         model?: unknown;
+        id?: unknown;
       };
       if (typeof message?.model === "string" && message.model !== "") {
         outcome.model = message.model;
@@ -187,13 +189,20 @@ async function* runCli(
             count(usage, "cache_creation_input_tokens"),
         );
 
-        // A running estimate, so a turn cut before its result event is still charged
-        yield {
-          spentTokens:
-            count(usage, "input_tokens") +
-            count(usage, "output_tokens") +
-            count(usage, "cache_creation_input_tokens"),
-        };
+        // A running estimate, so a turn cut before its result event is still charged. The CLI
+        // repeats one reply's usage on every content block, so each reply counts once
+        const replyId = typeof message?.id === "string" ? message.id : null;
+        if (replyId === null || !countedReplies.has(replyId)) {
+          if (replyId !== null) {
+            countedReplies.add(replyId);
+          }
+          yield {
+            spentTokens:
+              count(usage, "input_tokens") +
+              count(usage, "output_tokens") +
+              count(usage, "cache_creation_input_tokens"),
+          };
+        }
       }
 
       for (const block of (message?.content ?? []) as Array<Record<string, unknown>>) {
@@ -277,7 +286,7 @@ export async function* chatTurn(
 ): AsyncGenerator<ChatEvent, void> {
   const { db, logger } = deps;
   const timeZone = deps.prompt.timeZone;
-  await reserveMessage(db, user.id, deps.limits, timeZone);
+  const reservation = await reserveMessage(db, user.id, deps.limits, timeZone);
 
   const content = redactSecrets(rawContent);
   const owned = conversationId ? await findConversation(db, conversationId, user.id) : null;
@@ -286,7 +295,7 @@ export async function* chatTurn(
 
   if (!releaseTurn) {
     // The client left while queued: nothing ran, so nothing is stored or charged
-    await refundMessage(db, user.id, timeZone).catch(() => undefined);
+    await refundMessage(db, user.id, reservation).catch(() => undefined);
     return;
   }
 
@@ -491,7 +500,7 @@ export async function* chatTurn(
 
     // A turn the server failed is not the person's message to lose; one they left is
     if (!answered && !abortSignal?.aborted) {
-      await refundMessage(db, user.id, timeZone).catch(() => undefined);
+      await refundMessage(db, user.id, reservation).catch(() => undefined);
     }
 
     await releaseMcp().catch(() => undefined);
