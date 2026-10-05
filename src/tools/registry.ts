@@ -3,7 +3,9 @@ import { Ajv, type ValidateFunction } from "ajv";
 import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
 import { toolCalls } from "../db/schema.js";
+import type { ExportStore } from "../exports/store.js";
 import { countHidden, removeHidden } from "../lib/hiddenText.js";
+import { type Archive, CHAT_MAX_BYTES, capResult, EXTERNAL_MAX_BYTES } from "./cap.js";
 import type { Tool, ToolDefinition, ToolOrigin } from "./contract.js";
 
 // A failure of one tool is not a lack of capability; one reasoned alternative, never a sweep
@@ -64,6 +66,7 @@ export class ToolRegistry {
   >();
   private readonly ajv = new Ajv({ strict: false, allErrors: false });
   private logger?: FastifyBaseLogger;
+  private exports?: ExportStore;
 
   /**
    * Builds an empty registry
@@ -79,6 +82,41 @@ export class ToolRegistry {
    */
   useLogger(logger: FastifyBaseLogger): void {
     this.logger = logger;
+  }
+
+  /**
+   * Sets where the detail that does not fit a result goes, once storage is ready
+   *
+   * @param   exports  Store of Excel files
+   */
+  useExports(exports: ExportStore): void {
+    this.exports = exports;
+  }
+
+  /**
+   * Builds the archive of one call; a storage failure only loses the file, never the answer
+   *
+   * @param   name    Tool name
+   * @param   caller  Who runs it
+   *
+   * @return  The archive, or null when there is no store
+   */
+  private archiveFor(name: string, caller: Caller): Archive | null {
+    const exports = this.exports;
+    if (!exports) {
+      return null;
+    }
+
+    return {
+      save: async (sheets) => {
+        try {
+          return await exports.save(sheets, { userId: caller.userId, toolName: name });
+        } catch (error) {
+          this.logger?.error({ err: error, tool: name }, "result export failed");
+          return null;
+        }
+      },
+    };
   }
 
   /**
@@ -121,7 +159,7 @@ export class ToolRegistry {
 
   /**
    * Runs a tool through the one door every path shares: scope gate, input and output contracts,
-   * hidden-text removal and the metadata audit
+   * hidden-text removal, the size cap of its channel and the metadata audit
    *
    * @param   name     Tool to run
    * @param   args     Arguments from the model
@@ -204,13 +242,24 @@ export class ToolRegistry {
       this.logger?.warn({ tool: name, hidden }, "hidden unicode removed from a tool result");
     }
 
-    const text = hidden > 0 ? removeHidden(raw) : raw;
+    // Cleaned before the size cap, so the Excel carries the same clean data the model reads
+    const clean = JSON.parse(hidden > 0 ? removeHidden(raw) : raw) as Record<string, unknown>;
+    const capped = await capResult(
+      clean,
+      context.origin === "mcp" ? EXTERNAL_MAX_BYTES : CHAT_MAX_BYTES,
+      this.archiveFor(name, caller),
+    );
+    if (!capped.ok) {
+      return this.fail(name, args, caller, context, started, "result_too_large", capped.message);
+    }
+
+    const text = JSON.stringify(capped.data);
     await this.audit(name, args, caller, context, started, {
       success: true,
       errorCode: null,
       text,
       rows: result.rows ?? null,
-      truncated: result.truncated === true,
+      truncated: result.truncated === true || capped.truncated,
     });
 
     return { ok: true, text, structured: JSON.parse(text) as Record<string, unknown> };

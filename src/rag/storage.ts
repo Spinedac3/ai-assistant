@@ -26,13 +26,32 @@ export interface StorageConfig {
 }
 
 /**
+ * Builds a client for any S3 compatible service
+ *
+ * @param   config  Endpoint and credentials
+ *
+ * @return  The client
+ */
+export function s3Client(config: StorageConfig): Client {
+  const url = new URL(config.endpoint);
+
+  return new Client({
+    endPoint: url.hostname,
+    port: url.port ? Number(url.port) : undefined,
+    useSSL: url.protocol === "https:",
+    accessKey: config.accessKey,
+    secretKey: config.secretKey,
+  });
+}
+
+/**
  * Tells whether a storage error means the object does not exist
  *
  * @param   error  Error thrown by the client
  *
  * @return  Whether it is a missing object
  */
-function isMissing(error: unknown): boolean {
+export function isMissing(error: unknown): boolean {
   const code = (error as { code?: string }).code;
 
   return code === "NotFound" || code === "NoSuchKey";
@@ -47,14 +66,7 @@ export class DocumentStorage {
    * @param   config  Endpoint, credentials and bucket
    */
   constructor(private readonly config: StorageConfig) {
-    const url = new URL(config.endpoint);
-    this.client = new Client({
-      endPoint: url.hostname,
-      port: url.port ? Number(url.port) : undefined,
-      useSSL: url.protocol === "https:",
-      accessKey: config.accessKey,
-      secretKey: config.secretKey,
-    });
+    this.client = s3Client(config);
   }
 
   /**
