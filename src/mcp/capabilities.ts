@@ -225,7 +225,8 @@ export function findCapabilities(
   // Only those that earned a top place on their own, so a declaration never displaces a usable one
   const restricted = ranked
     .slice(0, topK)
-    .filter(({ tool }) => !usable.has(tool.name))
+    // Without a shared word it is not what the person asked for, so declaring it would mislead
+    .filter(({ tool, score }) => !usable.has(tool.name) && score > 0)
     .slice(0, MAX_RESTRICTED)
     .map(({ tool, score }) => ({
       name: tool.name,

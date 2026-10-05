@@ -366,9 +366,6 @@ export async function* chatTurn(
       );
     }
 
-    // Calls of this turn are those after the last one stored before it
-    const callsBefore = await lastToolCallId(db, conversation);
-
     if (deps.mcpConfig) {
       releaseMcp = await deps.mcpConfig(workspace, user.id, conversation);
     } else {
@@ -387,6 +384,8 @@ export async function* chatTurn(
         ...(abortSignal ? [abortSignal] : []),
         AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
       ]);
+      // Sources are what ran in this attempt; a discarded attempt's tools must not be credited
+      const callsBefore = await lastToolCallId(db, conversation);
       const run = runCli(deps, model, workspace, prompt, resume, attemptSignal);
       let step = await run.next();
 
