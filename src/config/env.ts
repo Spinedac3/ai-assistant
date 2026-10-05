@@ -20,6 +20,9 @@ const envSchema = z.object({
   ASSISTANT_CONTEXT_FILE: z.string().min(1).optional(),
   // Public address of this server, used in OAuth metadata and the MCP 401 challenge
   PUBLIC_BASE_URL: z.string().url().optional(),
+  // Reverse proxies in front of this server; with none, X-Forwarded-For is ignored, since anyone can
+  // write it and it would pick the IP that rate limits and audits see
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(0),
   MCP_INTENT_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
   CLAUDE_BIN: z.string().min(1).default("claude"),
   CHAT_MODEL: z.string().min(1).default("claude-opus-5-5"),

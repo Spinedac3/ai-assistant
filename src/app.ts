@@ -20,6 +20,8 @@ export interface AppDependencies {
   // Without it /mcp and the OAuth server that guards it are not mounted
   mcp?: { registry: ToolRegistry; settings: McpSettings; publicBaseUrl: string };
   logger?: boolean;
+  // Reverse proxies whose X-Forwarded-For is believed; none by default
+  trustProxyHops?: number;
 }
 
 /**
@@ -30,7 +32,12 @@ export interface AppDependencies {
  * @return  The configured Fastify instance
  */
 export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> {
-  const app = Fastify({ logger: deps.logger ?? false, trustProxy: true });
+  const hops = deps.trustProxyHops ?? 0;
+  // Each trusted hop moves the client address one entry left in X-Forwarded-For
+  const app = Fastify({
+    logger: deps.logger ?? false,
+    trustProxy: hops > 0 ? (_address: string, hop: number) => hop < hops : false,
+  });
 
   app.get("/health", async () => ({ status: "ok" }));
 
