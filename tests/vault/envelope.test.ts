@@ -32,6 +32,10 @@ describe("envelope", () => {
     expect(() => vault.open(sealed, "source:crm")).toThrow();
     expect(() => vault.open(tampered, "source:erp")).toThrow();
     expect(() => Secrets.fromKey(randomBytes(32)).open(sealed, "source:erp")).toThrow();
+    expect(() =>
+      vault.open(JSON.stringify({ ...parsed, tag: parsed.tag.slice(0, 8) }), "source:erp"),
+    ).toThrow("formato");
+    expect(() => vault.open(JSON.stringify({ ...parsed, v: 2 }), "source:erp")).toThrow("versión");
   });
 
   it("derives the same key for a purpose and a different one for another", () => {

@@ -6,11 +6,18 @@ import { buildApp } from "../../src/app.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { exportFiles, toolCalls } from "../../src/db/schema.js";
 import { ExportStore } from "../../src/exports/store.js";
+import { isMissing, s3Client } from "../../src/rag/storage.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
 import { testSigner } from "../support/keys.js";
 import { freshDatabase } from "./support/database.js";
 
 const BASE = "https://assistant.example.com";
+const STORAGE = {
+  endpoint: process.env.S3_ENDPOINT ?? "http://localhost:9000",
+  accessKey: process.env.S3_ACCESS_KEY ?? "assistant",
+  secretKey: process.env.S3_SECRET_KEY ?? "assistant-secret",
+  bucket: "documents-test",
+};
 const caller = { userId: 7, email: "ana@example.com", scopes: new Set(["chat.use"]) };
 
 let database: DatabaseHandle;
@@ -48,17 +55,7 @@ function download(url: string) {
 describe("exports", () => {
   beforeAll(async () => {
     database = await freshDatabase();
-    store = new ExportStore(
-      database.db,
-      {
-        endpoint: process.env.S3_ENDPOINT ?? "http://localhost:9000",
-        accessKey: process.env.S3_ACCESS_KEY ?? "assistant",
-        secretKey: process.env.S3_SECRET_KEY ?? "assistant-secret",
-        bucket: "documents-test",
-      },
-      randomBytes(32),
-      BASE,
-    );
+    store = new ExportStore(database.db, STORAGE, randomBytes(32), BASE);
     registry = new ToolRegistry(database.db);
     registry.useExports(store);
     registry.register({
@@ -148,14 +145,51 @@ describe("exports", () => {
   it("stops serving and deletes a file once it expires", async () => {
     // Performs the test.
     const { url } = (await runBig("chat")).archivo as { url: string };
+    const id = new URL(url).pathname.split("/").pop() ?? "";
     await database.db.update(exportFiles).set({ expiresAt: sql`now() - interval '1 second'` });
     const expired = await download(url);
     const purged = await store.purge();
     const left = await database.db.select().from(exportFiles);
+    const file = await s3Client(STORAGE)
+      .statObject(STORAGE.bucket, `exports/${id}.xlsx`)
+      .then(() => "still there")
+      .catch((error: unknown) => (isMissing(error) ? "gone" : "unknown"));
 
     // Performs assertions.
     expect(expired.statusCode).toBe(404);
     expect(purged).toBeGreaterThan(0);
     expect(left).toHaveLength(0);
+    expect(file).toBe("gone");
+  });
+
+  it("sends only the text when a cut result no longer fits its declared shape", async () => {
+    // Performs the test.
+    registry.register({
+      definition: {
+        name: "estricta",
+        description: "Returns rows with a strict declared shape.",
+        inputSchema: { type: "object" },
+        outputSchema: {
+          type: "object",
+          properties: { filas: { type: "array" } },
+          additionalProperties: false,
+        },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({
+        ok: true,
+        data: { filas: Array.from({ length: 2_000 }, (_, id) => ({ id, texto: "x".repeat(40) })) },
+      }),
+    });
+    const outcome = await registry.execute("estricta", {}, caller, {
+      origin: "chat",
+      timeZone: "UTC",
+    });
+
+    // Performs assertions.
+    expect(outcome.ok).toBe(true);
+    expect(outcome.structured).toBeUndefined();
+    expect(JSON.parse(outcome.text).nota).toBeDefined();
   });
 });

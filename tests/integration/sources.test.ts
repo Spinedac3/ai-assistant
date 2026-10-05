@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
+import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { roles, sources, users } from "../../src/db/schema.js";
 import {
@@ -11,9 +12,11 @@ import {
   type EngineName,
   runQuery,
   TooManyRowsError,
+  writeAbilities,
 } from "../../src/sources/engines.js";
 import { connectionFor } from "../../src/sources/registry.js";
 import { Secrets } from "../../src/vault/envelope.js";
+import { asDemoAdmin } from "../support/demoAdmin.js";
 import { testSigner } from "../support/keys.js";
 import { freshDatabase } from "./support/database.js";
 
@@ -21,71 +24,7 @@ const PASSWORD = "tres caballos verdes";
 const LIMITS = { timeoutMs: 10_000, maxRows: 10_000 };
 
 // The demo engines of docker-compose, seeded with `pnpm demo:seed`
-const DEMO: Record<EngineName, { reader: ConnectionInfo; admin: ConnectionInfo; param: string }> = {
-  postgres: {
-    reader: {
-      engine: "postgres",
-      host: "localhost",
-      port: 5433,
-      database: "demo",
-      username: "demo_reader",
-      password: "demo-reader",
-      tls: false,
-    },
-    admin: {
-      engine: "postgres",
-      host: "localhost",
-      port: 5433,
-      database: "demo",
-      username: "demo",
-      password: "demo",
-      tls: false,
-    },
-    param: "$1",
-  },
-  mysql: {
-    reader: {
-      engine: "mysql",
-      host: "localhost",
-      port: 3307,
-      database: "demo",
-      username: "demo_reader",
-      password: "demo-reader",
-      tls: false,
-    },
-    admin: {
-      engine: "mysql",
-      host: "localhost",
-      port: 3307,
-      database: "demo",
-      username: "root",
-      password: "demo-root",
-      tls: false,
-    },
-    param: "?",
-  },
-  mssql: {
-    reader: {
-      engine: "mssql",
-      host: "localhost",
-      port: 1434,
-      database: "demo",
-      username: "demo_reader",
-      password: "Demo-Reader-2026",
-      tls: false,
-    },
-    admin: {
-      engine: "mssql",
-      host: "localhost",
-      port: 1434,
-      database: "demo",
-      username: "sa",
-      password: "Demo-Root-2026",
-      tls: false,
-    },
-    param: "@p1",
-  },
-};
+const DEMO = DEMO_ENGINES;
 
 /**
  * Tells whether a demo engine is running and seeded; SQL Server is optional on a laptop
@@ -169,9 +108,13 @@ describe("sources", () => {
     await database.close();
   });
 
-  it("has at least Postgres and MySQL to test against", () => {
+  it("has the engines to test against: all three in CI, SQL Server optional on a laptop", () => {
     // Performs assertions.
-    expect(available).toEqual(expect.arrayContaining(["postgres", "mysql"]));
+    expect(available).toEqual(
+      expect.arrayContaining(
+        process.env.CI === "true" ? ["postgres", "mysql", "mssql"] : ["postgres", "mysql"],
+      ),
+    );
   });
 
   it("registers a read-only source on every engine and seals its password", async () => {
@@ -313,14 +256,177 @@ describe("sources", () => {
     expect(Number(left.rows[0]?.n)).toBeGreaterThan(0);
   });
 
-  it("cuts a query that runs past its time", async () => {
+  it("cuts a slow query on every engine", async () => {
     // Performs the test.
-    const slow = runQuery(DEMO.postgres.reader, "select pg_sleep(3)", [], {
-      timeoutMs: 500,
-      maxRows: 10,
-    });
+    const slow: Record<EngineName, string> = {
+      postgres: "select pg_sleep(3)",
+      mysql: "select sleep(3) as s from productos",
+      mssql: "waitfor delay '00:00:03'; select 1 as uno",
+    };
+    const started = Date.now();
+    const attempts = await Promise.allSettled(
+      available.map((engine) =>
+        runQuery(DEMO[engine].reader, slow[engine], [], { timeoutMs: 500, maxRows: 100 }),
+      ),
+    );
 
     // Performs assertions.
-    await expect(slow).rejects.toThrow(/timeout|cancel/i);
+    expect(attempts.every((attempt) => attempt.status === "rejected")).toBe(true);
+    expect(Date.now() - started).toBeLessThan(2_500);
+  });
+
+  it("refuses users that can write in ways short of being administrators", async () => {
+    // Performs the test.
+    const found: Record<string, string[]> = {};
+    await asDemoAdmin("postgres", [
+      "drop role if exists w_insert",
+      "drop role if exists w_column",
+      "drop role if exists w_program",
+      "create role w_insert login password 'w-pass'",
+      "create role w_column login password 'w-pass'",
+      "create role w_program login password 'w-pass'",
+      "grant select on all tables in schema public to w_insert, w_column, w_program",
+      "grant insert on entregas to w_insert",
+      "grant update (piloto) on entregas to w_column",
+      "grant pg_execute_server_program to w_program",
+    ]);
+    for (const user of ["w_insert", "w_column", "w_program"]) {
+      found[user] = await writeAbilities({
+        ...DEMO.postgres.reader,
+        username: user,
+        password: "w-pass",
+      });
+    }
+    await asDemoAdmin("postgres", [
+      "drop owned by w_insert, w_column, w_program",
+      "drop role w_insert",
+      "drop role w_column",
+      "drop role w_program",
+    ]);
+
+    await asDemoAdmin("mysql", [
+      "drop user if exists 'w_insert'@'%'",
+      "drop user if exists 'w_vars'@'%'",
+      "create user 'w_insert'@'%' identified by 'w-pass'",
+      "create user 'w_vars'@'%' identified by 'w-pass'",
+      "grant select on demo.* to 'w_insert'@'%', 'w_vars'@'%'",
+      "grant insert on demo.entregas to 'w_insert'@'%'",
+      "grant system_variables_admin on *.* to 'w_vars'@'%'",
+    ]);
+    for (const user of ["w_insert", "w_vars"]) {
+      found[`mysql ${user}`] = await writeAbilities({
+        ...DEMO.mysql.reader,
+        username: user,
+        password: "w-pass",
+      });
+    }
+    await asDemoAdmin("mysql", ["drop user 'w_insert'@'%'", "drop user 'w_vars'@'%'"]);
+
+    if (available.includes("mssql")) {
+      await asDemoAdmin("mssql", [
+        "if exists (select 1 from sys.database_principals where name = 'w_exec') drop user w_exec",
+        "if exists (select 1 from sys.server_principals where name = 'w_exec') drop login w_exec",
+        "create login w_exec with password = 'W-Pass-2026-x'",
+        "create user w_exec for login w_exec",
+        "alter role db_datareader add member w_exec",
+        "create or alter procedure dbo.marcar as update entregas set a_tiempo = a_tiempo where 1 = 0",
+        "grant execute on dbo.marcar to w_exec",
+      ]);
+      found["mssql w_exec"] = await writeAbilities({
+        ...DEMO.mssql.reader,
+        username: "w_exec",
+        password: "W-Pass-2026-x",
+      });
+      await asDemoAdmin("mssql", [
+        "drop user w_exec",
+        "drop login w_exec",
+        "drop procedure dbo.marcar",
+      ]);
+    }
+
+    // Performs assertions.
+    expect(found.w_insert).toContain("write_rows");
+    expect(found.w_column).toContain("write_rows");
+    expect(found.w_program).toContain("run_server_programs");
+    expect(found["mysql w_insert"]).toEqual(["INSERT"]);
+    expect(found["mysql w_vars"]).toContain("SYSTEM_VARIABLES_ADMIN");
+    if (available.includes("mssql")) {
+      expect(found["mssql w_exec"]).toContain("object dbo.marcar EXECUTE");
+    }
+  });
+
+  it("runs one statement only, so no text can end the read-only transaction", async () => {
+    // Performs the test.
+    const postgresEscape = runQuery(
+      DEMO.postgres.admin,
+      "commit; delete from entregas where id = 1",
+      [],
+      LIMITS,
+    );
+    const mysqlEscape = runQuery(
+      DEMO.mysql.admin,
+      "rollback; delete from entregas where id = 1",
+      [],
+      LIMITS,
+    );
+    const outcomes = await Promise.allSettled([postgresEscape, mysqlEscape]);
+    const left = await runQuery(
+      DEMO.postgres.reader,
+      "select count(*) as n from entregas where id = 1",
+      [],
+      LIMITS,
+    );
+
+    // Performs assertions.
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
+    expect(Number(left.rows[0]?.n)).toBe(1);
+  });
+
+  it("answers a statement without rows instead of crashing", async () => {
+    // Performs the test.
+    const result = await runQuery(DEMO.mysql.reader, "set @nada = 1", [], LIMITS);
+
+    // Performs assertions.
+    expect(result).toEqual({ columns: [], rows: [] });
+  });
+
+  it("refuses repeated columns and more than one result", async () => {
+    // Performs the test.
+    const repeated = runQuery(DEMO.postgres.reader, "select 1 as a, 2 as a", [], LIMITS);
+    const several = available.includes("mssql")
+      ? runQuery(DEMO.mssql.reader, "select 1 as a; select 2 as b", [], LIMITS)
+      : Promise.reject(new Error("más de un resultado"));
+
+    // Performs assertions.
+    await expect(repeated).rejects.toThrow("columnas repetidas");
+    await expect(several).rejects.toThrow("más de un resultado");
+  });
+
+  it("lets a result of exactly the row limit through", async () => {
+    // Performs the test.
+    const attempts = await Promise.allSettled(
+      available.map((engine) =>
+        runQuery(DEMO[engine].reader, "select id from productos", [], {
+          timeoutMs: 10_000,
+          maxRows: 20,
+        }),
+      ),
+    );
+
+    // Performs assertions.
+    for (const attempt of attempts) {
+      expect(attempt.status === "fulfilled" && attempt.value.rows.length === 20).toBe(true);
+    }
+  });
+
+  it("names what failed in a connection without the driver's details", async () => {
+    // Performs the test.
+    const badPassword = await register("pass", { ...DEMO.postgres.reader, password: "mala-123" });
+    const badPort = await register("port", { ...DEMO.postgres.reader, port: 1 });
+
+    // Performs assertions.
+    expect(badPassword.json().message).toBe("Usuario o contraseña incorrectos");
+    expect(badPort.json().message).toBe("No se pudo alcanzar el servidor de la base");
+    expect(badPort.body).not.toContain("127.0.0.1");
   });
 });
