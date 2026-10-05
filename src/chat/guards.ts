@@ -28,9 +28,31 @@ const NARRATION_OPENER =
 const ANNOUNCEMENT =
   /^\s*(?:(?:perd[oó]n|disculp[ae]|disculpe|claro|ok|listo)[^.\n]{0,40}[.]\s*)?(?:d[eé]jame|perm[ií]teme|voy a|necesito|ahora)\s+(?:ver|mirar|buscar|consultar|revisar|verificar|chequear|averiguar|confirmar)[^\n]*$/i;
 
-// Markup of tool calls and results typed as plain text
-const TOOL_THEATER =
-  /<(?:invoke|tool_result|available_tool|use_tool)\b|<parameter name=|Tool search results/i;
+// Markup of tool calls and results typed as plain text; the source gate script uses it too
+export const TOOL_THEATER_SOURCE = String.raw`<(?:invoke|tool_result|available_tool|use_tool)\b|<parameter name=|Tool search results`;
+
+// A figure as written in an answer: digits with thousands, decimal, time or date separators
+export const FIGURE_SOURCE = String.raw`\d[\d.,:/]*`;
+
+// The numbering of a list item is layout, not a figure
+export const LIST_MARKER_SOURCE = String.raw`^\s*\d+[.)]\s`;
+
+const TOOL_THEATER = new RegExp(TOOL_THEATER_SOURCE, "i");
+
+/**
+ * Extracts the figures of a text, leaving out list numbering and trailing punctuation
+ *
+ * @param   text  Answer text
+ *
+ * @return  The figures in order
+ */
+export function figuresIn(text: string): string[] {
+  const withoutNumbering = text.replace(new RegExp(LIST_MARKER_SOURCE, "gm"), "");
+
+  return (withoutNumbering.match(new RegExp(FIGURE_SOURCE, "g")) ?? []).map((figure) =>
+    figure.replace(/[.,:/]+$/, ""),
+  );
+}
 
 /**
  * Tells whether a whole turn was only the announcement of a lookup that never happened
@@ -69,7 +91,7 @@ export function isToolTheater(text: string): boolean {
  * Tells whether an answer states figures that no tool and no earlier message provided
  *
  * @param   answer         Text about to be delivered
- * @param   known          Question plus earlier messages of the conversation
+ * @param   known          Question, instructions and earlier messages of the conversation
  * @param   toolsExecuted  Tools run in the turn
  *
  * @return  Whether the answer has a figure without a source
@@ -83,11 +105,7 @@ export function claimsUnsourcedFigures(
     return false;
   }
 
-  const figures = (answer.match(/\d[\d.,:/]*/g) ?? []).map((figure) =>
-    figure.replace(/[.,:/]+$/, ""),
-  );
-
-  return figures.some((figure) => !known.includes(figure));
+  return figuresIn(answer).some((figure) => !known.includes(figure));
 }
 
 /**

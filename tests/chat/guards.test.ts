@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   claimsUnsourcedFigures,
   cutOffAnswer,
+  figuresIn,
   finalAnswer,
   isHookRejection,
   isOnlyAnnouncement,
@@ -145,5 +146,19 @@ describe("guards", () => {
     // Performs assertions.
     expect(isHookRejection([{ type: "text", text: "Stop hook feedback: AVISO" }])).toBe(true);
     expect(isHookRejection("¿y la ruta sur?")).toBe(false);
+  });
+});
+
+describe("figures", () => {
+  it("leaves list numbering out of the figures", () => {
+    // Performs assertions.
+    expect(figuresIn("Puedo ayudarte con:\n1. Pedidos\n2) Rutas\n- 3 bodegas")).toEqual(["3"]);
+  });
+
+  it("does not take a numbered list of capabilities for invented figures", () => {
+    // Performs assertions.
+    expect(
+      claimsUnsourcedFigures("Puedo:\n1. Buscar pedidos\n2. Ver rutas", "¿qué puedes hacer?", 0),
+    ).toBe(false);
   });
 });

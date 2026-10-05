@@ -8,6 +8,11 @@ import { SOURCE_GATE_SCRIPT } from "../../src/chat/sourceGate.js";
 const dir = mkdtempSync(join(tmpdir(), "source-gate-"));
 const script = join(dir, "gate.cjs");
 writeFileSync(script, SOURCE_GATE_SCRIPT);
+// The workspace instructions the server writes, with the dates it gives the model
+writeFileSync(
+  join(dir, "CLAUDE.md"),
+  "Fechas: hoy es 2026-10-04; esta semana va de 2026-09-28 a 2026-10-04.",
+);
 
 /**
  * Runs the hook against a transcript and a final message
@@ -27,6 +32,7 @@ function gate(transcript: unknown[], answer: string, active = false) {
       transcript_path: path,
       last_assistant_message: answer,
       stop_hook_active: active,
+      cwd: dir,
     }),
     encoding: "utf8",
   });
@@ -98,5 +104,41 @@ describe("sourceGate", () => {
   it("blocks only once and then lets the turn close", () => {
     // Performs assertions.
     expect(gate([question("¿cuántos?")], "Hubo 312.", true).code).toBe(0);
+  });
+
+  it("does not take list numbering for invented figures", () => {
+    // Performs assertions.
+    expect(
+      gate([question("¿qué puedes hacer?")], "Puedo:\n1. Buscar pedidos\n2. Ver rutas").code,
+    ).toBe(0);
+  });
+
+  it("accepts the dates the server wrote into the instructions", () => {
+    // Performs assertions.
+    expect(gate([question("¿qué fecha es?")], "Hoy es 2026-10-04.").code).toBe(0);
+  });
+
+  it("accepts a figure the model passed to the tool", () => {
+    // Performs the test.
+    const call = {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "mcp__assistant__run_capability",
+            input: { since: "2026-07-01" },
+          },
+        ],
+      },
+    };
+
+    // Performs assertions.
+    expect(
+      gate(
+        [question("¿pedidos desde julio?"), call, toolResult('{"total":12}')],
+        "Desde 2026-07-01 hubo 12.",
+      ).code,
+    ).toBe(0);
   });
 });

@@ -1,13 +1,19 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cliToolName, FIND_CAPABILITY, MCP_SERVER, RUN_CAPABILITY } from "../mcp/names.js";
+import { FIGURE_SOURCE, LIST_MARKER_SOURCE, TOOL_THEATER_SOURCE } from "./guards.js";
 
 // The CLI has no forced tool choice; a Stop hook that exits 2 keeps the model in the same turn.
 // It reads the trace, never the answer's claims: every figure must appear in the question, in a
-// tool result of this turn, or in an earlier turn. It blocks once; the second time it lets the turn
-// close and the outer guard decides. Plain CommonJS for node, kept as a string so builds carry it.
+// tool call or result of this turn, in an earlier turn or in the workspace instructions. It blocks
+// once; the second time it lets the turn close and the outer guard decides. Plain CommonJS for node,
+// kept as a string so builds carry it; its patterns come from the guards so both judge alike.
 export const SOURCE_GATE_SCRIPT = String.raw`#!/usr/bin/env node
 const fs = require("fs");
+const path = require("path");
+const THEATER = new RegExp(${JSON.stringify(TOOL_THEATER_SOURCE)}, "i");
+const FIGURE = new RegExp(${JSON.stringify(FIGURE_SOURCE)}, "g");
+const LIST_MARKER = new RegExp(${JSON.stringify(LIST_MARKER_SOURCE)}, "gm");
 const PREFIX = "mcp__${MCP_SERVER}__";
 let raw = "";
 process.stdin.on("data", (chunk) => (raw += chunk));
@@ -20,6 +26,8 @@ process.stdin.on("end", () => {
   let tools = 0;
   let sources = "";
   const earlier = new Set();
+  // The dates and limits the server wrote into the instructions are not inventions
+  try { for (const run of fs.readFileSync(path.join(input.cwd || ".", "CLAUDE.md"), "utf8").match(/\d+/g) || []) earlier.add(run); } catch {}
   for (const line of lines) {
     if (!line.trim()) continue;
     let event; try { event = JSON.parse(line); } catch { continue; }
@@ -33,15 +41,15 @@ process.stdin.on("end", () => {
       for (const block of message.content) if (block.type === "tool_result") sources += "\n" + JSON.stringify(block.content);
     }
     if (event.type === "assistant" && Array.isArray(message.content)) {
-      for (const block of message.content) if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith(PREFIX)) tools++;
+      for (const block of message.content) if (block.type === "tool_use" && typeof block.name === "string" && block.name.startsWith(PREFIX)) { tools++; sources += "\n" + JSON.stringify(block.input); }
     }
   }
   const text = String(input.last_assistant_message || "");
-  const theater = tools === 0 && /<(?:invoke|tool_result|available_tool|use_tool)\b|<parameter name=|Tool search results/i.test(text);
+  const theater = tools === 0 && THEATER.test(text);
   // A figure is backed when each digit run appears inside a run of the sources; earlier turns count whole runs only
   const sourceRuns = sources.match(/\d+/g) || [];
   const backed = (figure) => figure.split(/[.,:/]+/).filter(Boolean).every((run) => earlier.has(run) || sourceRuns.some((source) => source.includes(run)));
-  const figures = (text.match(/\d[\d.,:/]*/g) || []).map((figure) => figure.replace(/[.,:/]+$/, ""));
+  const figures = (text.replace(LIST_MARKER, "").match(FIGURE) || []).map((figure) => figure.replace(/[.,:/]+$/, ""));
   const orphans = figures.filter((figure) => !backed(figure));
   if (!theater && orphans.length === 0) process.exit(0);
   const why = theater
