@@ -10,11 +10,8 @@ import { connectDatabase } from "./db/client.js";
 import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
-import { Embedder } from "./rag/embeddings.js";
-import type { Index } from "./rag/ingest.js";
 import { startWorker } from "./rag/jobs.js";
-import { Solr } from "./rag/solr.js";
-import { DocumentStorage } from "./rag/storage.js";
+import { indexFrom, storageFrom } from "./rag/services.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
@@ -25,18 +22,8 @@ const database = connectDatabase(env.DATABASE_URL);
 const organizationContext = readOrganizationContext(env.ASSISTANT_CONTEXT_FILE);
 const publicBaseUrl = (env.PUBLIC_BASE_URL ?? `http://localhost:${env.PORT}`).replace(/\/+$/, "");
 
-const embedder = new Embedder(env.EMBED_URL);
-const index: Index = {
-  solr: new Solr(env.SOLR_URL),
-  embedder,
-  cores: { current: "docs", historical: "docs_historical" },
-};
-const storage = new DocumentStorage({
-  endpoint: env.S3_ENDPOINT,
-  accessKey: env.S3_ACCESS_KEY,
-  secretKey: env.S3_SECRET_KEY,
-  bucket: env.S3_BUCKET,
-});
+const index = indexFrom(env);
+const storage = storageFrom(env);
 
 const registry = new ToolRegistry(database.db);
 registry.register(calculateTool);
@@ -78,7 +65,7 @@ const app = await buildApp({
       timeZone: env.APP_TIMEZONE,
       accessContact: async () =>
         (await readSetting(database.db, "access.contact")) ?? DEFAULT_ACCESS_CONTACT,
-      ranker: new CapabilityRanker(embedder),
+      ranker: new CapabilityRanker(index.embedder),
     },
   },
   docs: { index, storage },
@@ -110,11 +97,11 @@ const stopWorker = env.DOCS_WORKER_ENABLED
       logger: app.log,
       pollMs: env.DOCS_WORKER_POLL_MS,
     })
-  : () => {};
+  : async () => {};
 
 app.addHook("onClose", async () => {
   clearInterval(purgeTimer);
-  stopWorker();
+  await stopWorker();
   await database.close();
 });
 

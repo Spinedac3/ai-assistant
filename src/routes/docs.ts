@@ -1,4 +1,4 @@
-import multipart from "@fastify/multipart";
+import multipart, { type MultipartFile } from "@fastify/multipart";
 import { eq } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -6,11 +6,10 @@ import { logAudit } from "../audit.js";
 import type { Database } from "../db/client.js";
 import { scopes } from "../db/schema.js";
 import { areaScope, DOC_CODE, parseDocument } from "../rag/document.js";
-import { type Index, removeDocument } from "../rag/ingest.js";
+import { type Index, isCurrent, newerCurrent, removeDocument } from "../rag/ingest.js";
 import { enqueue, findJob } from "../rag/jobs.js";
 import { scopeFilter } from "../rag/search.js";
-import { escapeTerm } from "../rag/solr.js";
-import { CONTENT_TYPES, type DocumentStorage, type OriginalKind } from "../rag/storage.js";
+import { CONTENT_TYPES, type DocumentStorage } from "../rag/storage.js";
 
 export interface DocsRoutesOptions {
   db: Database;
@@ -29,6 +28,31 @@ const jobParams = z.object({ id: z.coerce.number().int().positive() });
 const originalQuery = z.object({ kind: z.enum(["md", "pdf"]).default("md") });
 
 /**
+ * Reads an uploaded file into memory, giving up as soon as it passes a size
+ *
+ * @param   part      Uploaded file
+ * @param   maxBytes  Size limit
+ *
+ * @return  The contents, or null when it is too large
+ */
+async function readCapped(part: MultipartFile, maxBytes: number): Promise<Buffer | null> {
+  const pieces: Buffer[] = [];
+  let size = 0;
+
+  for await (const piece of part.file) {
+    size += (piece as Buffer).length;
+    if (size > maxBytes) {
+      part.file.resume();
+      return null;
+    }
+
+    pieces.push(piece as Buffer);
+  }
+
+  return part.file.truncated ? null : Buffer.concat(pieces);
+}
+
+/**
  * Registers the routes to upload, list, download, reindex and delete documents
  *
  * @param   app      Fastify instance
@@ -44,49 +68,43 @@ export default async function docsRoutes(
 
   await app.register(multipart, { limits: { files: 2, fileSize: MAX_ORIGINAL_BYTES, fields: 0 } });
 
-  // Whether the person may read a current document; an unreadable one looks the same as a missing one
-  const readable = async (userScopes: ReadonlySet<string>, code: string): Promise<boolean> => {
-    const filter = scopeFilter(userScopes);
-    if (!filter) {
-      return false;
-    }
-
-    const hits = await index.solr.query(index.cores.current, {
-      query: `doc_code:${escapeTerm(code)}`,
-      filter: [filter],
-      fields: ["id"],
-      limit: 1,
-    });
-
-    return hits.length > 0;
-  };
-
   app.post("/docs", manage, async (request, reply) => {
-    let markdown: Buffer | null = null;
-    let original: Buffer | null = null;
+    const limits = { document: MAX_MARKDOWN_BYTES, original: MAX_ORIGINAL_BYTES };
+    const files: Partial<Record<keyof typeof limits, Buffer>> = {};
 
     for await (const part of request.files()) {
-      const data = await part.toBuffer();
-      if (part.fieldname === "document") {
-        markdown = data;
-      } else if (part.fieldname === "original") {
-        original = data;
+      const field = part.fieldname as keyof typeof limits;
+      // Checked before reading, so an unexpected or repeated file is never held in memory
+      if (!(field in limits) || files[field]) {
+        part.file.resume();
+        return reply.code(400).send({
+          ok: false,
+          error: "unexpected_file",
+          message: "Solo se aceptan un archivo document (.md) y un original (.pdf)",
+        });
       }
+
+      const data = await readCapped(part, limits[field]);
+      if (!data) {
+        return reply.code(413).send({
+          ok: false,
+          error: "file_too_large",
+          message:
+            field === "document"
+              ? "El .md supera los 2 MB; divídelo en documentos más chicos"
+              : "El PDF supera los 50 MB",
+        });
+      }
+
+      files[field] = data;
     }
 
+    const { document: markdown, original } = files;
     if (!markdown) {
       return reply.code(400).send({
         ok: false,
         error: "missing_document",
         message: "Falta el archivo .md en el campo document",
-      });
-    }
-
-    if (markdown.length > MAX_MARKDOWN_BYTES) {
-      return reply.code(413).send({
-        ok: false,
-        error: "document_too_large",
-        message: "El .md supera los 2 MB; divídelo en documentos más chicos",
       });
     }
 
@@ -120,12 +138,23 @@ export default async function docsRoutes(
     }
 
     const code = parsed.frontmatter.doc_code;
-    const userId = request.authUser?.id ?? 0;
-    await storage.save(code, "md", markdown);
-    if (original) {
-      await storage.save(code, "pdf", original);
+    const newer = await newerCurrent(index, code);
+    if (newer) {
+      return reply.code(409).send({
+        ok: false,
+        error: "older_version",
+        message: `Ya está vigente una versión más nueva (${newer}); sube una versión posterior`,
+      });
     }
 
+    // Both originals are replaced, so an old PDF never stays next to a new markdown
+    await storage.remove(code);
+    await storage.save(code, "md", markdown, scope);
+    if (original) {
+      await storage.save(code, "pdf", original, scope);
+    }
+
+    const userId = request.authUser?.id ?? 0;
     const job = await enqueue(db, code, "upload", userId);
     await logAudit(db, {
       userId,
@@ -168,25 +197,31 @@ export default async function docsRoutes(
   app.get("/docs/:code/original", read, async (request, reply) => {
     const { code } = codeParams.parse(request.params);
     const { kind } = originalQuery.parse(request.query);
-    const stream = (await readable(request.authUser?.scopes ?? new Set(), code))
-      ? await storage.open(code, kind as OriginalKind)
-      : null;
+    const userScopes = request.authUser?.scopes ?? new Set<string>();
 
-    if (!stream) {
+    // Current, and saved under an area the person reads; anything else looks like a missing file
+    const original = (await isCurrent(index, code)) ? await storage.open(code, kind) : null;
+    if (!original || !userScopes.has(original.requiredScope)) {
+      original?.stream.destroy();
       return reply.code(404).send({ ok: false, error: "document_not_found" });
     }
 
     return reply
-      .header("Content-Type", CONTENT_TYPES[kind as OriginalKind])
+      .header("Content-Type", CONTENT_TYPES[kind])
       .header("Content-Disposition", `attachment; filename="${code}.${kind}"`)
       .header("X-Content-Type-Options", "nosniff")
-      .send(stream);
+      .send(original.stream);
   });
 
   app.post("/docs/:code/reindex", manage, async (request, reply) => {
     const { code } = codeParams.parse(request.params);
-    if (!(await storage.exists(code, "md"))) {
-      return reply.code(404).send({ ok: false, error: "document_not_found" });
+    // Only the current version: reindexing a superseded one would roll its document back
+    if (!(await isCurrent(index, code)) || !(await storage.exists(code, "md"))) {
+      return reply.code(404).send({
+        ok: false,
+        error: "document_not_found",
+        message: "Solo se reindexa la versión vigente de un documento",
+      });
     }
 
     const userId = request.authUser?.id ?? 0;
@@ -195,8 +230,12 @@ export default async function docsRoutes(
     return reply.code(202).send({ ok: true, data: { job_id: job, doc_code: code } });
   });
 
-  app.delete("/docs/:code", manage, async (request) => {
+  app.delete("/docs/:code", manage, async (request, reply) => {
     const { code } = codeParams.parse(request.params);
+    if (!(await isCurrent(index, code))) {
+      return reply.code(404).send({ ok: false, error: "document_not_found" });
+    }
+
     await removeDocument(index, code);
     await storage.remove(code);
 

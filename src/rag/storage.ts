@@ -4,10 +4,19 @@ import { DOC_CODE } from "./document.js";
 
 export type OriginalKind = "md" | "pdf";
 
-const CONTENT_TYPES: Record<OriginalKind, string> = {
+export const CONTENT_TYPES: Record<OriginalKind, string> = {
   md: "text/markdown; charset=utf-8",
   pdf: "application/pdf",
 };
+
+// Each original carries the scope of its area, so a download checks the file it serves and not an
+// index that may still describe a previous upload
+const SCOPE_META = "required-scope";
+
+export interface Original {
+  stream: Readable;
+  requiredScope: string;
+}
 
 export interface StorageConfig {
   endpoint: string;
@@ -60,13 +69,20 @@ export class DocumentStorage {
   /**
    * Saves an original, replacing a previous one with the same code
    *
-   * @param   docCode  Document code
-   * @param   kind     Markdown or PDF
-   * @param   data     File contents
+   * @param   docCode        Document code
+   * @param   kind           Markdown or PDF
+   * @param   data           File contents
+   * @param   requiredScope  Scope of the document area
    */
-  async save(docCode: string, kind: OriginalKind, data: Buffer): Promise<void> {
+  async save(
+    docCode: string,
+    kind: OriginalKind,
+    data: Buffer,
+    requiredScope: string,
+  ): Promise<void> {
     await this.client.putObject(this.config.bucket, key(docCode, kind), data, data.length, {
       "Content-Type": CONTENT_TYPES[kind],
+      [`X-Amz-Meta-${SCOPE_META}`]: requiredScope,
     });
   }
 
@@ -93,11 +109,14 @@ export class DocumentStorage {
    * @param   docCode  Document code
    * @param   kind     Markdown or PDF
    *
-   * @return  The stream, or null when there is no such original
+   * @return  The stream and the scope it was saved with, or null when there is no such original
    */
-  async open(docCode: string, kind: OriginalKind): Promise<Readable | null> {
+  async open(docCode: string, kind: OriginalKind): Promise<Original | null> {
     try {
-      return await this.client.getObject(this.config.bucket, key(docCode, kind));
+      const stat = await this.client.statObject(this.config.bucket, key(docCode, kind));
+      const stream = await this.client.getObject(this.config.bucket, key(docCode, kind));
+
+      return { stream, requiredScope: String(stat.metaData?.[SCOPE_META] ?? "") };
     } catch (error) {
       if (isMissing(error)) {
         return null;
@@ -154,5 +173,3 @@ export function key(docCode: string, kind: OriginalKind): string {
 
   return `${docCode}.${kind}`;
 }
-
-export { CONTENT_TYPES };
