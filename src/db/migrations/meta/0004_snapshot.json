@@ -1,5 +1,5 @@
 {
-  "id": "556551da-f1fb-4904-a334-94a5047a1fd2",
+  "id": "5d981ef5-810f-439d-b83d-7773ee006001",
   "prevId": "26524566-7a87-4e07-a653-ac00fef787e3",
   "version": "7",
   "dialect": "postgresql",
@@ -52,6 +52,12 @@
         "previous_refresh_hash": {
           "name": "previous_refresh_hash",
           "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rotated_at": {
+          "name": "rotated_at",
+          "type": "timestamp (3) with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -129,6 +135,21 @@
           "columns": [
             {
               "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "access_tokens_previous_refresh_idx": {
+          "name": "access_tokens_previous_refresh_idx",
+          "columns": [
+            {
+              "expression": "previous_refresh_hash",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

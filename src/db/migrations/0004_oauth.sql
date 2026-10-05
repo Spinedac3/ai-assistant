@@ -6,4 +6,6 @@ CREATE TABLE "oauth_clients" (
 	"created_at" timestamp (3) with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX "oauth_clients_client_id_unique" ON "oauth_clients" USING btree ("client_id");
+ALTER TABLE "access_tokens" ADD COLUMN "rotated_at" timestamp (3) with time zone;--> statement-breakpoint
+CREATE UNIQUE INDEX "oauth_clients_client_id_unique" ON "oauth_clients" USING btree ("client_id");--> statement-breakpoint
+CREATE INDEX "access_tokens_previous_refresh_idx" ON "access_tokens" USING btree ("previous_refresh_hash");

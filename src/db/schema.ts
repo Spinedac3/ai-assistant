@@ -241,8 +241,10 @@ export const accessTokens = pgTable(
     clientId: varchar("client_id", { length: 64 }).notNull(),
     accessTokenHash: varchar("access_token_hash", { length: 64 }).notNull(),
     refreshTokenHash: varchar("refresh_token_hash", { length: 64 }),
-    // The refresh hash before the last rotation; presenting it again means it was stolen
+    // The refresh hash before the last rotation; presenting it again later means it was stolen
     previousRefreshHash: varchar("previous_refresh_hash", { length: 64 }),
+    // When it last rotated; a client racing two refreshes is not mistaken for a thief
+    rotatedAt: timestamptz("rotated_at"),
     kind: varchar("kind", { length: 20, enum: ["oauth", "run"] }).notNull(),
     accessExpiresAt: timestamptz("access_expires_at").notNull(),
     refreshExpiresAt: timestamptz("refresh_expires_at"),
@@ -254,6 +256,7 @@ export const accessTokens = pgTable(
     uniqueIndex("access_tokens_access_hash_unique").on(t.accessTokenHash),
     uniqueIndex("access_tokens_refresh_hash_unique").on(t.refreshTokenHash),
     index("access_tokens_user_idx").on(t.userId),
+    index("access_tokens_previous_refresh_idx").on(t.previousRefreshHash),
   ],
 );
 
