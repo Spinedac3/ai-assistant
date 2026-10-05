@@ -29,7 +29,10 @@ const FIELDS = [
 ];
 
 const DOC_SCOPE = /^docs\.[a-z0-9_-]+\.read$/;
-const SINGLE_CODE = /^[A-Za-z0-9._-]+$/;
+// Letters and digits joined by separators, as in BOD-PRO-V001; a number, year or decimal is no code
+const SINGLE_CODE = /^(?=.*[A-Za-z])[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)+$/;
+// Solr reads these words as operators; a question saying "or" must still be a question
+const OPERATORS = new Set(["AND", "OR", "NOT"]);
 
 export interface Hit {
   id: string;
@@ -90,7 +93,11 @@ export function scopeFilter(scopes: ReadonlySet<string>): string | null {
  * @return  The Solr query
  */
 export function wordQuery(question: string): string {
-  const terms = question.split(/\s+/).filter(Boolean).map(escapeTerm).join(" ");
+  const terms = question
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((term) => (OPERATORS.has(term) ? `"${term}"` : escapeTerm(term)))
+    .join(" ");
   if (terms === "") {
     return "*:*";
   }
@@ -120,10 +127,10 @@ function rangeOf(scores: readonly number[]): { min: number; max: number } | null
 /**
  * Runs the hybrid search and returns the candidates best first
  *
- * Words and meaning run in parallel and merge by position (RRF), which ignores their unrelated
- * scales; the normalized score of each is then added on top, because position alone ranks the
- * first place of a 0.95 match the same as one of 0.55. Without the embedding service the search
- * goes on with words only.
+ * The word query starts while the question is embedded; both rankings merge by position (RRF),
+ * which ignores their unrelated scales, and the normalized score of each is then added on top,
+ * because position alone ranks the first place of a 0.95 match the same as one of 0.55. Without
+ * the embedding service, or when the vector query fails, the search goes on with words only.
  *
  * @param   index     Solr, embedder and cores
  * @param   filter    Row filter of the person
@@ -136,7 +143,7 @@ async function hybrid(index: Index, filter: string, question: string): Promise<H
 
   // A question that is exactly one code asks for that document; it is a filter, not a ranking
   const code = question.trim();
-  if (SINGLE_CODE.test(code) && /\d/.test(code)) {
+  if (SINGLE_CODE.test(code)) {
     const exact = await solr.query<Hit>(cores.current, {
       query: `doc_code:(${escapeTerm(code)} OR ${escapeTerm(code.toUpperCase())})`,
       filter: [filter],
@@ -149,25 +156,27 @@ async function hybrid(index: Index, filter: string, question: string): Promise<H
     }
   }
 
+  const words = solr.query<Hit>(cores.current, {
+    query: wordQuery(question),
+    filter: [filter],
+    fields: FIELDS,
+    limit: POOL,
+  });
+  // Handled now so a failure while the question is embedded is not an unhandled rejection
+  words.catch(() => {});
+
   const vector = await embedder.query(question);
-  const [lexical, dense = []] = await Promise.all([
-    solr.query<Hit>(cores.current, {
-      query: wordQuery(question),
-      filter: [filter],
-      fields: FIELDS,
-      limit: POOL,
-    }),
-    ...(vector
-      ? [
-          solr.query<Hit>(cores.current, {
-            query: `{!knn f=embedding topK=${POOL}}[${vector.join(",")}]`,
-            filter: [filter],
-            fields: FIELDS,
-            limit: POOL,
-          }),
-        ]
-      : []),
-  ]);
+  const meaning = vector
+    ? solr
+        .query<Hit>(cores.current, {
+          query: `{!knn f=embedding topK=${POOL}}[${vector.join(",")}]`,
+          filter: [filter],
+          fields: FIELDS,
+          limit: POOL,
+        })
+        .catch(() => [])
+    : Promise.resolve([]);
+  const [lexical, dense] = await Promise.all([words, meaning]);
 
   const candidates = new Map<string, Candidate>();
   const collect = (hits: Hit[], signal: "dense" | "lexical") => {
