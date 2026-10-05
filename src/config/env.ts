@@ -33,6 +33,8 @@ const envSchema = z
       })
       .default("UTC"),
     JWT_PRIVATE_KEY_FILE: z.string().min(1),
+    // Master key that seals the passwords of the sources; a file, never a variable
+    SECRETS_KEK_FILE: z.string().min(1).default("secrets/kek.key"),
     JWT_ISSUER: z.string().min(1).default("ai-assistant"),
     JWT_TTL_SECONDS: z.coerce.number().int().positive().default(900),
     EXTERNAL_SYSTEMS_FILE: z.string().min(1).optional(),

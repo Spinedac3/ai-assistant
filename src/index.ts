@@ -7,11 +7,13 @@ import { chatMcpConfig } from "./chat/mcpConfig.js";
 import { readOrganizationContext } from "./chat/prompt.js";
 import { loadEnv } from "./config/env.js";
 import { connectDatabase } from "./db/client.js";
+import { ExportStore } from "./exports/store.js";
 import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
 import { startWorker } from "./rag/jobs.js";
 import { indexFrom, storageFrom } from "./rag/services.js";
+import { Secrets } from "./vault/envelope.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
@@ -22,7 +24,19 @@ const database = connectDatabase(env.DATABASE_URL);
 const organizationContext = readOrganizationContext(env.ASSISTANT_CONTEXT_FILE);
 const publicBaseUrl = (env.PUBLIC_BASE_URL ?? `http://localhost:${env.PORT}`).replace(/\/+$/, "");
 
+const secrets = Secrets.fromFile(env.SECRETS_KEK_FILE);
 const index = indexFrom(env);
+const exports = new ExportStore(
+  database.db,
+  {
+    endpoint: env.S3_ENDPOINT,
+    accessKey: env.S3_ACCESS_KEY,
+    secretKey: env.S3_SECRET_KEY,
+    bucket: env.S3_BUCKET,
+  },
+  secrets.derive("export-links"),
+  publicBaseUrl,
+);
 const storage = storageFrom(env);
 
 const registry = new ToolRegistry(database.db);
@@ -69,12 +83,15 @@ const app = await buildApp({
     },
   },
   docs: { index, storage },
+  sources: { secrets },
+  exports: { exports },
   logger: true,
   trustProxy: env.TRUST_PROXY,
 });
 
 // Tool failures, broken contracts and audit errors must reach the server log
 registry.useLogger(app.log);
+registry.useExports(exports);
 
 // Questions from external clients are kept only for the retention period
 const purge = () =>
@@ -83,6 +100,12 @@ const purge = () =>
   );
 void purge();
 const purgeTimer = setInterval(purge, 6 * 3_600_000);
+
+// Exported files live seven days; an hourly sweep keeps them from outliving that by much
+const purgeExports = () =>
+  exports.purge().catch((error) => app.log.error({ err: error }, "export purge failed"));
+const exportsTimer = setInterval(purgeExports, 3_600_000);
+exportsTimer.unref();
 purgeTimer.unref();
 
 // Without the bucket every upload would fail; the server still starts so search keeps working
@@ -101,6 +124,7 @@ const stopWorker = env.DOCS_WORKER_ENABLED
 
 app.addHook("onClose", async () => {
   clearInterval(purgeTimer);
+  clearInterval(exportsTimer);
   await stopWorker();
   await database.close();
 });

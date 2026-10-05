@@ -173,6 +173,7 @@ describe("auth", () => {
       "docs.general.read",
       "docs.manage",
       "settings.manage",
+      "sources.manage",
       "usage.read",
       "users.manage",
     ]);
