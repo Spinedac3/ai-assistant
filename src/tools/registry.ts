@@ -63,17 +63,23 @@ export class ToolRegistry {
     { input: ValidateFunction; output?: ValidateFunction }
   >();
   private readonly ajv = new Ajv({ strict: false, allErrors: false });
+  private logger?: FastifyBaseLogger;
 
   /**
    * Builds an empty registry
    *
-   * @param   db      Own database, for the call audit
-   * @param   logger  Where unusual results are reported
+   * @param   db  Own database, for the call audit
    */
-  constructor(
-    private readonly db: Database,
-    private readonly logger?: FastifyBaseLogger,
-  ) {}
+  constructor(private readonly db: Database) {}
+
+  /**
+   * Sets where failures and unusual results are reported, once the server's logger exists
+   *
+   * @param   logger  Server logger
+   */
+  useLogger(logger: FastifyBaseLogger): void {
+    this.logger = logger;
+  }
 
   /**
    * Adds a tool, compiling its schemas once

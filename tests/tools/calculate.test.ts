@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { calculateTool, evaluate, resolveDaysBetween } from "../../src/tools/native/calculate.js";
+import {
+  calculateTool,
+  evaluate,
+  resolveDaysBetween,
+  roundHalfAway,
+} from "../../src/tools/native/calculate.js";
 
 const context = {
   userId: 1,
@@ -33,7 +38,7 @@ describe("calculate", () => {
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "UTC" }).format(new Date());
 
     // Performs assertions.
-    expect(resolveDaysBetween("days_between(2026-10-05, 2026-09-30)", "UTC")).toBe("5");
+    expect(resolveDaysBetween("days_between(2026-09-30, 2026-10-05)", "UTC")).toBe("5");
     expect(resolveDaysBetween(`days_between(today, ${today})`, "UTC")).toBe("0");
   });
 
@@ -58,6 +63,28 @@ describe("calculate", () => {
         rounded: 0.07,
         percent: "7.49%",
       },
+    });
+  });
+
+  it("rounds halves away from zero, without binary drift", () => {
+    // Performs assertions.
+    expect(evaluate("round(1.005, 2)")).toBe(1.01);
+    expect(evaluate("round(-2.5, 0)")).toBe(-3);
+    expect(roundHalfAway(0.0000001, 2)).toBe(0);
+  });
+
+  it("refuses a date that does not exist instead of rolling it over", async () => {
+    // Performs the test.
+    const result = await calculateTool.execute(
+      { expression: "days_between(2026-02-30, today)" },
+      context,
+    );
+
+    // Performs assertions.
+    expect(result).toEqual({
+      ok: false,
+      error: "invalid_date",
+      message: "La fecha 2026-02-30 no existe",
     });
   });
 });

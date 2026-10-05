@@ -28,23 +28,51 @@ function toDays(literal: string, timeZone: string): number {
     literal.toLowerCase() === "today"
       ? new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date())
       : literal;
-  const [year, month, day] = iso.split("-").map(Number);
+  const [year = 0, month = 1, day = 1] = iso.split("-").map(Number);
+  const moment = new Date(Date.UTC(year, month - 1, day));
 
-  return Math.floor(Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1) / 86_400_000);
+  // Date.UTC rolls 2026-02-30 over into March; a date that does not exist is an error, not a guess
+  if (moment.getUTCMonth() !== month - 1 || moment.getUTCDate() !== day) {
+    throw new Error(`La fecha ${iso} no existe`);
+  }
+
+  return Math.floor(moment.getTime() / 86_400_000);
 }
 
 /**
- * Replaces every days_between(a, b) with its whole number of days before parsing
+ * Replaces every days_between(from, to) with the days from the first date to the second
  *
  * @param   expression  Expression as written
  * @param   timeZone    Zone where today is measured
  *
  * @return  The expression with the day counts in place
+ *
+ * @throws  Error  When a date does not exist
  */
 export function resolveDaysBetween(expression: string, timeZone: string): string {
   return expression.replace(DAYS_BETWEEN, (_match, from: string, to: string) =>
-    String(toDays(from, timeZone) - toDays(to, timeZone)),
+    String(toDays(to, timeZone) - toDays(from, timeZone)),
   );
+}
+
+/**
+ * Rounds like people do, halves away from zero, working on the decimal text so 1.005 is not 1.00499…
+ *
+ * @param   value   Number to round
+ * @param   digits  Decimals to keep
+ *
+ * @return  The rounded number
+ */
+export function roundHalfAway(value: number, digits: number): number {
+  const text = String(Math.abs(value));
+  // Very small or large numbers already print in exponent form, where the text shift does not apply
+  if (text.includes("e")) {
+    return Math.sign(value) * (Math.round(Math.abs(value) * 10 ** digits) / 10 ** digits);
+  }
+
+  const scaled = Math.round(Number(`${text}e${digits}`));
+
+  return Math.sign(value) * Number(`${scaled}e-${digits}`);
 }
 
 /**
@@ -197,7 +225,7 @@ class Parser {
         }
       }
       this.expect("close");
-      return Math.round(value * 10 ** digits) / 10 ** digits;
+      return roundHalfAway(value, digits);
     }
 
     throw new Error("Expresión incompleta o mal formada");
@@ -243,8 +271,9 @@ export const calculateTool: Tool = {
       "Evaluates an arithmetic expression deterministically and returns the exact result. Use it " +
       "for ANY arithmetic not already computed in a tool result, especially when combining figures " +
       "from two tools (percentages, differences, ratios). Never do the math yourself. Supports " +
-      "numbers, + - * / % (remainder), parentheses, round(x, decimals) and days_between(date_a, " +
-      "date_b) with ISO dates or the word today. Does not replace official metrics a tool exposes.",
+      "numbers, + - * / % (remainder), parentheses, round(x, decimals) and days_between(from, to), " +
+      "the days from the first date to the second, with ISO dates or the word today. Does not " +
+      "replace official metrics a tool exposes.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -277,7 +306,12 @@ export const calculateTool: Tool = {
 
   async execute(args, context): Promise<ToolResult> {
     const expression = String(args.expression).trim();
-    const resolved = resolveDaysBetween(expression, context.timeZone);
+    let resolved: string;
+    try {
+      resolved = resolveDaysBetween(expression, context.timeZone);
+    } catch (error) {
+      return { ok: false, error: "invalid_date", message: (error as Error).message };
+    }
 
     // Left in place, a date would be read as chained subtractions and give a plausible wrong number
     if (LOOSE_DATE.test(resolved)) {
@@ -306,7 +340,7 @@ export const calculateTool: Tool = {
         expression,
         ...(resolved !== expression ? { resolvedExpression: resolved } : {}),
         result,
-        rounded: Math.round(result * 100) / 100,
+        rounded: roundHalfAway(result, 2),
         // Only for proportions, so a value already in percent is not turned into percent again
         ...(Math.abs(result) <= 1 ? { percent: `${Math.round(result * 10_000) / 100}%` } : {}),
       },
