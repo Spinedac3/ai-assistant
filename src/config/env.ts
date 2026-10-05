@@ -18,6 +18,9 @@ const envSchema = z.object({
   EXTERNAL_SYSTEMS_FILE: z.string().min(1).optional(),
   // Markdown with what the organization is, its vocabulary and what the assistant covers
   ASSISTANT_CONTEXT_FILE: z.string().min(1).optional(),
+  // Public address of this server, used in OAuth metadata and the MCP 401 challenge
+  PUBLIC_BASE_URL: z.string().url().optional(),
+  MCP_INTENT_RETENTION_DAYS: z.coerce.number().int().positive().default(90),
   CLAUDE_BIN: z.string().min(1).default("claude"),
   CHAT_MODEL: z.string().min(1).default("claude-opus-5-5"),
   CHAT_WORKSPACES_DIR: z.string().min(1).optional(),

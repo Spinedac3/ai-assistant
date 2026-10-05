@@ -205,3 +205,67 @@ export const settings = pgTable("settings", {
   updatedAt: timestamptz("updated_at").notNull().defaultNow(),
   updatedBy: integer("updated_by"),
 });
+
+// Metadata of every tool call; the result itself is never stored, only its hash (D35)
+export const toolCalls = pgTable(
+  "tool_calls",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: integer("user_id").notNull(),
+    conversationId: bigint("conversation_id", { mode: "number" }),
+    toolName: varchar("tool_name", { length: 100 }).notNull(),
+    argsJson: jsonb("args_json").notNull(),
+    success: boolean("success").notNull(),
+    errorCode: varchar("error_code", { length: 60 }),
+    durationMs: integer("duration_ms").notNull(),
+    resultBytes: integer("result_bytes").notNull().default(0),
+    resultRows: integer("result_rows"),
+    truncated: boolean("truncated").notNull().default(false),
+    resultHash: varchar("result_hash", { length: 64 }),
+    // Which path ran it: chat, mcp, run
+    origin: varchar("origin", { length: 20 }).notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("tool_calls_user_created_idx").on(t.userId, t.createdAt),
+    index("tool_calls_conversation_idx").on(t.conversationId, t.id),
+  ],
+);
+
+// Opaque access tokens: OAuth sessions of MCP clients and short-lived run tokens, stored hashed
+export const accessTokens = pgTable(
+  "access_tokens",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    userId: integer("user_id").notNull(),
+    clientId: varchar("client_id", { length: 64 }).notNull(),
+    accessTokenHash: varchar("access_token_hash", { length: 64 }).notNull(),
+    refreshTokenHash: varchar("refresh_token_hash", { length: 64 }),
+    // The refresh hash before the last rotation; presenting it again means it was stolen
+    previousRefreshHash: varchar("previous_refresh_hash", { length: 64 }),
+    kind: varchar("kind", { length: 20, enum: ["oauth", "run"] }).notNull(),
+    accessExpiresAt: timestamptz("access_expires_at").notNull(),
+    refreshExpiresAt: timestamptz("refresh_expires_at"),
+    revokedAt: timestamptz("revoked_at"),
+    lastUsedAt: timestamptz("last_used_at"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("access_tokens_access_hash_unique").on(t.accessTokenHash),
+    uniqueIndex("access_tokens_refresh_hash_unique").on(t.refreshTokenHash),
+    index("access_tokens_user_idx").on(t.userId),
+  ],
+);
+
+// What people asked through external MCP clients, kept only for a while (D36)
+export const mcpIntents = pgTable(
+  "mcp_intents",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: integer("user_id").notNull(),
+    toolName: varchar("tool_name", { length: 100 }).notNull(),
+    question: text("question").notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("mcp_intents_created_idx").on(t.createdAt)],
+);
