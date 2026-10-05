@@ -16,6 +16,7 @@ import passwordResetRoutes, { type PasswordResetRoutesOptions } from "./routes/p
 import sourcesRoutes, { type SourcesRoutesOptions } from "./routes/sources.js";
 import toolsRoutes, { type ToolsRoutesOptions } from "./routes/tools.js";
 import usageRoutes, { type UsageRoutesOptions } from "./routes/usage.js";
+import usersRoutes from "./routes/users.js";
 import type { ToolRegistry } from "./tools/registry.js";
 
 export interface AppDependencies {
@@ -60,6 +61,7 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   await app.register(authPlugin, { db: deps.db, signer: deps.signer });
   await app.register(authRoutes, { db: deps.db, signer: deps.signer, systems: deps.systems });
   await app.register(adminRoutes, { db: deps.db });
+  await app.register(usersRoutes, { db: deps.db });
   if (deps.panel) {
     await app.register(panelRoutes, deps.panel);
   }

@@ -7,7 +7,7 @@ import { generateToken, hashToken } from "../auth/opaqueTokens.js";
 import { hashPassword, passwordProblem } from "../auth/password.js";
 import { resetHeaders, resetPage } from "../auth/resetPage.js";
 import type { Database } from "../db/client.js";
-import { passwordResets, users } from "../db/schema.js";
+import { passwordResets, userIdentities, users } from "../db/schema.js";
 import type { SendMail } from "../notices/mailer.js";
 
 export interface PasswordResetRoutesOptions {
@@ -64,8 +64,16 @@ export default async function passwordResetRoutes(
     if (!user) {
       return reply.code(404).send({ ok: false, error: "user_not_found" });
     }
-    // Giving it a password would open a door its external system controls (and may close)
-    if (user.passwordHash === null) {
+    // Giving a password to an account that only enters through an external system would open a
+    // door that system controls (and may close); a local account still without one may get it
+    const [external] = user.passwordHash
+      ? []
+      : await db
+          .select({ id: userIdentities.id })
+          .from(userIdentities)
+          .where(and(eq(userIdentities.userId, user.id), isNull(userIdentities.deletedAt)))
+          .limit(1);
+    if (external) {
       return reply.code(409).send({
         ok: false,
         error: "external_account",
