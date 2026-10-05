@@ -206,7 +206,7 @@ export const settings = pgTable("settings", {
   updatedBy: integer("updated_by"),
 });
 
-// Metadata of every tool call; the result itself is never stored, only its hash (D35)
+// Metadata of every tool call; the result itself is never stored, only its hash
 export const toolCalls = pgTable(
   "tool_calls",
   {
@@ -257,7 +257,7 @@ export const accessTokens = pgTable(
   ],
 );
 
-// What people asked through external MCP clients, kept only for a while (D36)
+// What people asked through external MCP clients, kept only for a while
 export const mcpIntents = pgTable(
   "mcp_intents",
   {
@@ -268,4 +268,17 @@ export const mcpIntents = pgTable(
     createdAt: timestamptz("created_at").notNull().defaultNow(),
   },
   (t) => [index("mcp_intents_created_idx").on(t.createdAt)],
+);
+
+// MCP clients registered dynamically (RFC 7591); public clients, protected by PKCE and exact redirects
+export const oauthClients = pgTable(
+  "oauth_clients",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    clientId: varchar("client_id", { length: 64 }).notNull(),
+    clientName: varchar("client_name", { length: 200 }),
+    redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("oauth_clients_client_id_unique").on(t.clientId)],
 );
