@@ -5,9 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
 import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
-import { CreatedTools } from "../../src/creator/store.js";
+import { CreatedTools, findDefinition, publishDefinition } from "../../src/creator/store.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { roles, users } from "../../src/db/schema.js";
+import { roleScopes, roles, scopes, toolDefinitions, users } from "../../src/db/schema.js";
 import { type EngineName, runQuery } from "../../src/sources/engines.js";
 import { saveSource, sourceScope } from "../../src/sources/registry.js";
 import { calculateTool } from "../../src/tools/native/calculate.js";
@@ -61,6 +61,7 @@ let app: FastifyInstance;
 let registry: ToolRegistry;
 let adminToken: string;
 let userToken: string;
+let managerToken: string;
 
 /**
  * Calls the creator as a person would
@@ -91,9 +92,19 @@ async function api(
 describe("tool creator", () => {
   beforeAll(async () => {
     database = await freshDatabase();
+    // Manages tools, and reads no source's data
+    const [manager] = await database.db
+      .insert(roles)
+      .values({ code: "gestor", description: "Gestor de herramientas" })
+      .returning();
+    const [manage] = await database.db.select().from(scopes).where(eq(scopes.code, "tools.manage"));
+    await database.db
+      .insert(roleScopes)
+      .values({ roleId: manager?.id ?? 0, scopeId: manage?.id ?? 0 });
     for (const [email, role] of [
       ["admin@example.com", "admin"],
       ["ana@example.com", "user"],
+      ["luis@example.com", "gestor"],
     ] as const) {
       const [roleRow] = await database.db.select().from(roles).where(eq(roles.code, role));
       await database.db.insert(users).values({
@@ -136,6 +147,7 @@ describe("tool creator", () => {
       ).json().data.token as string;
     adminToken = await login("admin@example.com");
     userToken = await login("ana@example.com");
+    managerToken = await login("luis@example.com");
   });
 
   afterAll(async () => {
@@ -259,5 +271,44 @@ describe("tool creator", () => {
     expect(edited.body.data.status).toBe("draft");
     expect(after).toBe(false);
     expect(moved).toMatchObject({ status: 409, body: { error: "source_changed" } });
+  });
+
+  it("keeps every tool of a source away from someone who manages tools but not that source", async () => {
+    // Performs the test.
+    const url = "/admin/tools/entregas_ajenas";
+    await api("PUT", url, { source: `demo-${available[0]}`, definition: deliveries });
+    const calls = await Promise.all([
+      api("GET", url, undefined, managerToken),
+      api("POST", `${url}/run`, { args: {} }, managerToken),
+      api("POST", `${url}/check`, undefined, managerToken),
+      api("POST", `${url}/publish`, undefined, managerToken),
+      api("DELETE", url, undefined, managerToken),
+    ]);
+    const listed = await api("GET", "/admin/tools", undefined, managerToken);
+    await api("DELETE", url);
+
+    // Performs assertions.
+    expect(calls.map((call) => call.status)).toEqual([403, 403, 403, 403, 403]);
+    expect(listed.body.data).toEqual([]);
+  });
+
+  it("publishes only the version that was checked, never one saved in the meantime", async () => {
+    // Performs the test.
+    const url = "/admin/tools/entregas_carrera";
+    await api("PUT", url, { source: `demo-${available[0]}`, definition: deliveries });
+    const read = await findDefinition(database.db, "entregas_carrera");
+    // A save lands while the checks of the version read above are running
+    await database.db
+      .update(toolDefinitions)
+      .set({ updatedAt: new Date(Date.now() + 1_000) })
+      .where(eq(toolDefinitions.name, "entregas_carrera"));
+    const stale = read ? await publishDefinition(database.db, read.tool) : "sin definición";
+    const current = await findDefinition(database.db, "entregas_carrera");
+    const fresh = current ? await publishDefinition(database.db, current.tool) : null;
+    await api("DELETE", url);
+
+    // Performs assertions.
+    expect(stale).toBeNull();
+    expect(fresh?.status).toBe("published");
   });
 });

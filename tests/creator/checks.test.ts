@@ -159,15 +159,17 @@ describe("tool checks", () => {
       ...tool,
       spec: { ...tool.spec, filters: [{ column: "cantidad", op: "between", required: false }] },
     };
+    // One row sits exactly on the middle of 2.5 and 7, which both halves hold
+    const data = [...rows, { ruta: "R-Centro-1", dia: "2026-03-12", cantidad: 4.75 }];
     const source: Runner = {
-      sample: async (column) => rows.map((row) => row[column]),
+      sample: async (column) => data.map((row) => row[column]),
       run: async (spec, args) => {
         const range = args.cantidad as [number, number] | undefined;
         const kept = range
-          ? rows.filter(
+          ? data.filter(
               (row) => Number(row.cantidad) >= range[0] && Number(row.cantidad) <= range[1],
             )
-          : rows;
+          : data;
         return evaluate(spec, {}, kept);
       },
     };

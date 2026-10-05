@@ -82,6 +82,28 @@ export async function saveDefinition(
 }
 
 /**
+ * Publishes the version of a definition that was checked; a save in the meantime made another
+ * version, which stays a draft until it is checked too
+ *
+ * @param   db    Own database
+ * @param   tool  Definition as it was read before its checks
+ *
+ * @return  The published definition, or null when it changed since it was read
+ */
+export async function publishDefinition(
+  db: Database,
+  tool: StoredTool,
+): Promise<StoredTool | null> {
+  const [published] = await db
+    .update(toolDefinitions)
+    .set({ status: "published", publishedAt: new Date() })
+    .where(and(eq(toolDefinitions.name, tool.name), eq(toolDefinitions.updatedAt, tool.updatedAt)))
+    .returning();
+
+  return published ?? null;
+}
+
+/**
  * Keeps the registry in step with the creator: published tools in it, drafts and deleted ones out
  */
 export class CreatedTools {

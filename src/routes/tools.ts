@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
@@ -9,6 +9,7 @@ import { checkPasted } from "../creator/pasted.js";
 import {
   type CreatedTools,
   findDefinition,
+  publishDefinition,
   type StoredTool,
   saveDefinition,
   shapeOf,
@@ -330,17 +331,7 @@ export default async function toolsRoutes(
       });
     }
 
-    // Only the version that was checked: a save in the meantime leaves it a draft
-    const [published] = await db
-      .update(toolDefinitions)
-      .set({ status: "published", publishedAt: new Date() })
-      .where(
-        and(
-          eq(toolDefinitions.name, found.tool.name),
-          eq(toolDefinitions.updatedAt, found.tool.updatedAt),
-        ),
-      )
-      .returning();
+    const published = await publishDefinition(db, found.tool);
     if (!published) {
       return reply.code(409).send({
         ok: false,

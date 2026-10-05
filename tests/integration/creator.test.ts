@@ -425,7 +425,7 @@ describe("creator on the demo engines", () => {
     // A definition stored before its shape changed
     await database.db
       .update(toolDefinitions)
-      .set({ status: "published", spec: { base: { kind: "table" } } as never })
+      .set({ status: "published", spec: { ...good, columns: [] } as never })
       .where(eq(toolDefinitions.name, "rota_carga"));
     await database.db
       .update(toolDefinitions)
