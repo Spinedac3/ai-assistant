@@ -12,7 +12,7 @@ import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
 import { startWorker } from "./rag/jobs.js";
-import { indexFrom, storageFrom } from "./rag/services.js";
+import { indexFrom, s3Config, storageFrom } from "./rag/services.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
@@ -28,12 +28,7 @@ const secrets = Secrets.fromFile(env.SECRETS_KEK_FILE);
 const index = indexFrom(env);
 const exports = new ExportStore(
   database.db,
-  {
-    endpoint: env.S3_ENDPOINT,
-    accessKey: env.S3_ACCESS_KEY,
-    secretKey: env.S3_SECRET_KEY,
-    bucket: env.S3_BUCKET,
-  },
+  s3Config(env),
   secrets.derive("export-links"),
   publicBaseUrl,
 );
@@ -100,13 +95,14 @@ const purge = () =>
   );
 void purge();
 const purgeTimer = setInterval(purge, 6 * 3_600_000);
+purgeTimer.unref();
 
 // Exported files live seven days; an hourly sweep keeps them from outliving that by much
 const purgeExports = () =>
   exports.purge().catch((error) => app.log.error({ err: error }, "export purge failed"));
+void purgeExports();
 const exportsTimer = setInterval(purgeExports, 3_600_000);
 exportsTimer.unref();
-purgeTimer.unref();
 
 // Without the bucket every upload would fail; the server still starts so search keeps working
 await storage

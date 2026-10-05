@@ -1,6 +1,7 @@
 import mssql from "mssql";
 import mysql from "mysql2/promise";
 import pg from "pg";
+import { DEMO_ENGINES } from "./demoEngines.js";
 
 // Builds the invented distributor on each demo engine, with the same rows everywhere, and a
 // read-only user for it. Usage: pnpm demo:seed [postgres] [mysql] [mssql]
@@ -226,14 +227,15 @@ interface Admin {
  * @return  A way to run statements, or null when the engine is not running
  */
 async function connect(engine: Engine): Promise<Admin | null> {
+  const { admin } = DEMO_ENGINES[engine];
   try {
     if (engine === "postgres") {
       const client = new pg.Client({
-        host: "localhost",
-        port: 5433,
-        user: "demo",
-        password: "demo",
-        database: "demo",
+        host: admin.host,
+        port: admin.port,
+        user: admin.username,
+        password: admin.password,
+        database: admin.database,
       });
       await client.connect();
       return {
@@ -247,11 +249,11 @@ async function connect(engine: Engine): Promise<Admin | null> {
 
     if (engine === "mysql") {
       const connection = await mysql.createConnection({
-        host: "localhost",
-        port: 3307,
-        user: "root",
-        password: "demo-root",
-        database: "demo",
+        host: admin.host,
+        port: admin.port,
+        user: admin.username,
+        password: admin.password,
+        database: admin.database,
       });
       return {
         run: async (sql, params = []) => {
@@ -262,24 +264,19 @@ async function connect(engine: Engine): Promise<Admin | null> {
       };
     }
 
-    const pool = await new mssql.ConnectionPool({
-      server: "localhost",
-      port: 1434,
-      user: "sa",
-      password: "Demo-Root-2026",
-      database: "master",
-      options: { encrypt: false, trustServerCertificate: true },
-    }).connect();
-    await pool.request().query("if db_id('demo') is null create database demo");
-    await pool.close();
-    const demo = await new mssql.ConnectionPool({
-      server: "localhost",
-      port: 1434,
-      user: "sa",
-      password: "Demo-Root-2026",
-      database: "demo",
-      options: { encrypt: false, trustServerCertificate: true },
-    }).connect();
+    const open = (database: string) =>
+      new mssql.ConnectionPool({
+        server: admin.host,
+        port: admin.port,
+        user: admin.username,
+        password: admin.password,
+        database,
+        options: { encrypt: false, trustServerCertificate: true },
+      }).connect();
+    const server = await open("master");
+    await server.request().query("if db_id('demo') is null create database demo");
+    await server.close();
+    const demo = await open(admin.database);
     return {
       run: async (sql, params = []) => {
         const request = demo.request();
