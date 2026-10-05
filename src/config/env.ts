@@ -1,5 +1,21 @@
 import { z } from "zod";
 
+// Document search: Solr holds the index, the embed service the vectors, S3 storage the originals
+const ragSchema = z.object({
+  SOLR_URL: z.string().url().default("http://localhost:8983"),
+  EMBED_URL: z.string().url().default("http://localhost:5000"),
+  S3_ENDPOINT: z.string().url().default("http://localhost:9000"),
+  S3_ACCESS_KEY: z.string().min(1).default("assistant"),
+  S3_SECRET_KEY: z.string().min(1).default("assistant-secret"),
+  S3_BUCKET: z.string().min(3).default("documents"),
+  // The worker that indexes uploaded documents; off when another process does it
+  DOCS_WORKER_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  DOCS_WORKER_POLL_MS: z.coerce.number().int().positive().default(5_000),
+});
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -31,6 +47,7 @@ const envSchema = z.object({
   RATE_LIMIT_MSGS_PER_HOUR: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_MSGS_PER_DAY: z.coerce.number().int().positive().default(300),
   RATE_LIMIT_TOKENS_PER_DAY: z.coerce.number().int().positive().default(2_000_000),
+  ...ragSchema.shape,
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -53,4 +70,15 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   }
 
   return parsed.data;
+}
+
+/**
+ * Validates only the document search settings, for tools that run without the server
+ *
+ * @param   source  Variables to validate
+ *
+ * @return  The typed settings
+ */
+export function loadRagEnv(source: NodeJS.ProcessEnv = process.env): z.infer<typeof ragSchema> {
+  return ragSchema.parse(source);
 }

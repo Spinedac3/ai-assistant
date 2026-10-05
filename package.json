@@ -24,13 +24,16 @@
     "test:watch": "vitest",
     "check": "pnpm typecheck && pnpm lint && pnpm test",
     "test:integration": "cross-env INTEGRATION_TESTS=true vitest run --no-file-parallelism",
+    "test:golden": "cross-env GOLDEN_TESTS=true vitest run tests/golden",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/cli/migrate.ts",
     "db:seed": "tsx src/cli/seed.ts",
     "keys:generate": "tsx src/cli/generateKeys.ts",
-    "admin:create": "tsx src/cli/createAdmin.ts"
+    "admin:create": "tsx src/cli/createAdmin.ts",
+    "docs:load": "tsx src/cli/loadDocuments.ts"
   },
   "dependencies": {
+    "@fastify/multipart": "^10.1.2",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@node-rs/argon2": "^2.2.1",
     "@zxcvbn-ts/core": "^4.2.0",
@@ -41,6 +44,7 @@
     "fastify": "^5.11.0",
     "fastify-plugin": "^5.1.0",
     "jose": "^6.2.12",
+    "minio": "^8.0.7",
     "pg": "^8.23.1",
     "zod": "^4.6.5"
   },
