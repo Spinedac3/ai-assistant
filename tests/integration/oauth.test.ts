@@ -69,11 +69,12 @@ function form(url: string, fields: Record<string, string>, cookie?: string) {
 /**
  * Opens the consent page as a browser would
  *
- * @param   extra  Query parameters to add or override
+ * @param   extra   Query parameters to add or override
+ * @param   cookie  Cookie header, if any
  *
  * @return  The response
  */
-function openPage(extra: Record<string, string> = {}) {
+function openPage(extra: Record<string, string> = {}, cookie?: string) {
   const query = new URLSearchParams({
     response_type: "code",
     client_id: clientId,
@@ -85,7 +86,7 @@ function openPage(extra: Record<string, string> = {}) {
     ...extra,
   });
 
-  return app.inject({ url: `/oauth/authorize?${query}` });
+  return app.inject({ url: `/oauth/authorize?${query}`, headers: cookie ? { cookie } : {} });
 }
 
 /**
@@ -163,7 +164,7 @@ async function obtainTokens(email = "ana@example.com") {
 /**
  * Asks for a new pair with a refresh token
  *
- * @param   token  Refresh token
+ * @param   token   Refresh token
  * @param   client  Client id
  *
  * @return  The response
@@ -277,7 +278,7 @@ describe("oauth", () => {
       "form-action 'self' https://client.example.com;",
     );
     expect(response.headers["set-cookie"]).toMatch(
-      /^oauth_consent=.+HttpOnly; SameSite=Strict; Secure$/,
+      /^__Host-oauth_consent=[\w-]{32}; Path=\/; Secure; Max-Age=600; HttpOnly; SameSite=Strict$/,
     );
   });
 
@@ -311,6 +312,37 @@ describe("oauth", () => {
     // Performs assertions.
     expect(response.statusCode).toBe(403);
     expect(response.headers.location).toBeUndefined();
+  });
+
+  it("keeps an open page valid when another authorization starts in the same browser", async () => {
+    // Performs the test.
+    const first = await openPage();
+    const cookie = String(first.headers["set-cookie"]).split(";")[0] ?? "";
+    const second = await openPage({}, cookie);
+
+    // Performs assertions.
+    expect(String(second.headers["set-cookie"]).split(";")[0]).toBe(cookie);
+  });
+
+  it("trusts no consent cookie when the browser sends it twice", async () => {
+    // Performs the test.
+    const page = await openPage();
+    const cookie = String(page.headers["set-cookie"]).split(";")[0] ?? "";
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page.body)?.[1] ?? "";
+    const response = await form(
+      "/oauth/authorize",
+      {
+        client_id: clientId,
+        redirect_uri: REDIRECT,
+        code_challenge: CHALLENGE,
+        csrf,
+        decision: "deny",
+      },
+      `__Host-oauth_consent=planted-value; ${cookie}`,
+    );
+
+    // Performs assertions.
+    expect(response.statusCode).toBe(403);
   });
 
   it("validates the hidden fields again when the form comes back", async () => {

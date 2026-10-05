@@ -16,8 +16,10 @@ export interface OAuthRoutesOptions {
   assistantName: string;
 }
 
-// Ties the consent post to the browser that loaded the page
+// Ties the consent post to the browser that loaded the page. Over https the __Host- prefix keeps a
+// sibling subdomain from planting its own value
 const CSRF_COOKIE = "oauth_consent";
+const CSRF_SHAPE = /^[A-Za-z0-9_-]{32}$/;
 const CSRF_TTL_SECONDS = 10 * 60;
 
 const ACCESS_TTL_SECONDS = 3_600;
@@ -141,8 +143,7 @@ function newTokenPair() {
 }
 
 /**
- * Tells whether a redirect URI is one the client registered. For loopback the port may change,
- * since native clients listen on whatever port is free
+ * Tells whether a redirect URI is one the client registered
  *
  * @param   registered  Registered redirect URIs
  * @param   uri         Presented redirect URI
@@ -153,6 +154,8 @@ export function registeredRedirect(registered: string[], uri: string): boolean {
   if (registered.includes(uri)) {
     return true;
   }
+
+  // On loopback the port may change: native clients listen on whatever port is free
 
   const portless = (value: string) => {
     const url = new URL(value);
@@ -175,17 +178,17 @@ export function registeredRedirect(registered: string[], uri: string): boolean {
  * @param   header  Cookie header, if any
  * @param   name    Cookie name
  *
- * @return  Its value, or an empty string
+ * @return  Its value, or an empty string when missing or sent more than once
  */
 function cookieValue(header: string | undefined, name: string): string {
-  for (const pair of (header ?? "").split(";")) {
-    const [key, ...rest] = pair.trim().split("=");
-    if (key === name) {
-      return rest.join("=");
-    }
-  }
+  const values = (header ?? "")
+    .split(";")
+    .map((pair) => pair.trim().split("="))
+    .filter(([key]) => key === name)
+    .map(([, ...rest]) => rest.join("="));
 
-  return "";
+  // Two cookies with one name means someone planted one; neither is trusted
+  return values.length === 1 ? (values[0] ?? "") : "";
 }
 
 /**
@@ -216,6 +219,9 @@ export default async function oauthRoutes(
   const { db, publicBaseUrl, assistantName } = options;
   const resource = `${publicBaseUrl}/mcp`;
   const tooManyRegistrations = registrationLimiter();
+  const https = publicBaseUrl.startsWith("https:");
+  const csrfCookie = https ? `__Host-${CSRF_COOKIE}` : CSRF_COOKIE;
+  const cookieScope = https ? "Path=/; Secure" : "Path=/oauth/authorize";
 
   // Token requests and the consent form arrive as form posts; scoped to this plugin
   app.addContentTypeParser(
@@ -379,11 +385,12 @@ export default async function oauthRoutes(
       });
     }
 
-    const csrf = randomBytes(24).toString("base64url");
-    const secure = publicBaseUrl.startsWith("https:") ? "; Secure" : "";
+    // A page already open in another tab keeps working: its value is reused, not replaced
+    const current = cookieValue(request.headers.cookie, csrfCookie);
+    const csrf = CSRF_SHAPE.test(current) ? current : randomBytes(24).toString("base64url");
     reply.header(
       "Set-Cookie",
-      `${CSRF_COOKIE}=${csrf}; Path=/oauth/authorize; Max-Age=${CSRF_TTL_SECONDS}; HttpOnly; SameSite=Strict${secure}`,
+      `${csrfCookie}=${csrf}; ${cookieScope}; Max-Age=${CSRF_TTL_SECONDS}; HttpOnly; SameSite=Strict`,
     );
 
     return showConsent(reply, query.data, client, csrf);
@@ -399,7 +406,7 @@ export default async function oauthRoutes(
     }
 
     // Only a post from the page this browser loaded gets through; a forged one cannot redirect
-    if (!sameValue(cookieValue(request.headers.cookie, CSRF_COOKIE), body.data.csrf)) {
+    if (!sameValue(cookieValue(request.headers.cookie, csrfCookie), body.data.csrf)) {
       return reply.code(403).send({
         error: "invalid_request",
         error_description:
