@@ -19,6 +19,8 @@ export interface ArgvOptions {
   continueSession?: boolean;
   allowedTools?: string;
   disallowedTools: string;
+  // Built-in tools the model may use; an empty list leaves it none
+  tools?: string;
 }
 
 export interface CliProcess {
@@ -107,6 +109,7 @@ export function cliArgs(options: ArgvOptions): string[] {
     ...(options.allowedTools !== undefined ? ["--allowedTools", options.allowedTools] : []),
     "--disallowedTools",
     options.disallowedTools,
+    ...(options.tools !== undefined ? ["--tools", options.tools] : []),
   ];
 }
 

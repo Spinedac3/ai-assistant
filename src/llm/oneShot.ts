@@ -33,6 +33,8 @@ export async function askOnce(deps: OneShotDependencies, prompt: string): Promis
       maxTurns: 1,
       mcpConfigPath,
       disallowedTools: DISALLOWED_CLI_TOOLS,
+      // A list of what is allowed, so a tool a newer CLI adds is not left open
+      tools: "",
     });
     const run = launchCli(
       deps.cli,

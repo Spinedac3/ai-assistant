@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { countHidden } from "../lib/hiddenText.js";
 import { timeZone } from "../sources/registry.js";
 import { paramName } from "./sql.js";
 
@@ -6,15 +7,19 @@ import { paramName } from "./sql.js";
 export const TOOL_NAME = /^[a-z][a-z0-9_]{2,63}$/;
 
 /**
- * Tells whether a name can be quoted by any of the three engines: none of their quote marks and
- * no control characters
+ * Tells whether a name can be quoted by any of the three engines: none of their quote marks, no
+ * control characters and nothing hidden
  *
  * @param   name  Name as the source writes it
  *
  * @return  Whether it is safe to quote
  */
 function quotable(name: string): boolean {
-  return name.length > 0 && ![...name].some((char) => '"`]'.includes(char) || char < " ");
+  return (
+    name.length > 0 &&
+    countHidden(name) === 0 &&
+    ![...name].some((char) => '"`]'.includes(char) || char < " ")
+  );
 }
 
 // Any name the source uses; the creator quotes it, and the length is the longest the engines take

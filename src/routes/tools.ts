@@ -3,7 +3,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
 import { chatMcpConfig } from "../chat/mcpConfig.js";
-import { RateLimitExceededError, reserveMessage } from "../chat/rateLimit.js";
+import {
+  RateLimitExceededError,
+  type Reservation,
+  refundMessage,
+  reserveMessage,
+} from "../chat/rateLimit.js";
 import { findConversation } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
@@ -28,6 +33,7 @@ import {
 } from "../creator/tool.js";
 import type { Database } from "../db/client.js";
 import { conversations, messages, toolDefinitions } from "../db/schema.js";
+import { removeHiddenDeep } from "../lib/hiddenText.js";
 import { oneAtATime } from "../lib/oneAtATime.js";
 import { cliToolName } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
@@ -217,7 +223,8 @@ export default async function toolsRoutes(
         message: `${name} es una herramienta propia del asistente; usa otro nombre`,
       });
     }
-    const parsed = definitionSchema.safeParse(body.data.definition);
+    // Its texts become the description every model reads, so nothing hidden may stay in them
+    const parsed = definitionSchema.safeParse(removeHiddenDeep(body.data.definition));
     if (!parsed.success) {
       return reply.code(400).send({
         ok: false,
@@ -322,32 +329,39 @@ export default async function toolsRoutes(
     }
 
     const tool = found.tool;
+    const userId = request.authUser?.id;
+    let reservation: Reservation | null = null;
     try {
       // A call to the model counts as a message of the person, like a chat turn
       const limits = options.trial?.chat.limits;
-      if (limits && request.authUser) {
-        await reserveMessage(db, request.authUser.id, limits, options.appTimeZone);
+      if (limits && userId !== undefined) {
+        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
       }
-      // One read of a few rows, whatever the number of columns, so the source is not held long
-      const rows = await oneAtATime(`checks:${tool.sourceCode}`, () =>
-        runner.sample(
+      const valuesOf = (rows: Record<string, unknown>[], column: string) => [
+        ...new Set(
+          rows
+            .map((row) => row[column])
+            .filter((value) => value != null)
+            .map((value) => (value instanceof Date ? value.toISOString() : String(value))),
+        ),
+      ];
+      // One read of a few rows, whatever the number of columns, so the source is not held long;
+      // only a column empty in those rows is read again on its own
+      const samples = await oneAtATime(`checks:${tool.sourceCode}`, async () => {
+        const rows = await runner.sample(
           tool.columns.map((column) => column.name),
           false,
-        ),
-      );
-      const samples = Object.fromEntries(
-        tool.columns.map((column) => [
-          column.name,
-          [
-            ...new Set(
-              rows
-                .map((row) => row[column.name])
-                .filter((value) => value != null)
-                .map(String),
-            ),
-          ].slice(0, GUIDE_SAMPLES),
-        ]),
-      );
+        );
+        const found: Record<string, string[]> = {};
+        for (const column of tool.columns) {
+          found[column.name] = valuesOf(rows, column.name);
+          if (found[column.name]?.length === 0) {
+            found[column.name] = valuesOf(await runner.sample([column.name], true), column.name);
+          }
+          found[column.name] = found[column.name]?.slice(0, GUIDE_SAMPLES) ?? [];
+        }
+        return found;
+      });
       const input = {
         spec: tool.spec,
         columns: tool.columns,
@@ -364,6 +378,10 @@ export default async function toolsRoutes(
     } catch (error) {
       if (error instanceof RateLimitExceededError) {
         return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
+      }
+      // The person did not get an answer, so the message is theirs again
+      if (reservation && userId !== undefined) {
+        await refundMessage(db, userId, reservation).catch(() => undefined);
       }
       request.log.warn({ err: error, tool: tool.name }, "tool guide failed");
       return reply.code(502).send({

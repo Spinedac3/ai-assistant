@@ -46,6 +46,7 @@ describe("one-shot call", () => {
     expect(call.model).toBe("sonnet");
     expect(call.args).toContain("--strict-mcp-config");
     expect(call.args[call.args.indexOf("--max-turns") + 1]).toBe("1");
+    expect(call.args[call.args.indexOf("--tools") + 1]).toBe("");
     expect(call.args).not.toContain("--settings=evil ¿qué columnas conviene filtrar?");
     expect(await readdir(workspacesDir)).toEqual([]);
   });

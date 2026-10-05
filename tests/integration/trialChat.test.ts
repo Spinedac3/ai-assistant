@@ -10,7 +10,7 @@ import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
 import { listConversations } from "../../src/chat/repository.js";
 import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
-import { CreatedTools } from "../../src/creator/store.js";
+import { CreatedTools, findDefinition } from "../../src/creator/store.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { conversations, rateLimits, roles, toolCalls, users } from "../../src/db/schema.js";
 import { saveSource } from "../../src/sources/registry.js";
@@ -37,6 +37,8 @@ const deliveries = {
 let database: DatabaseHandle;
 let app: FastifyInstance;
 let token: string;
+const asked: string[] = [];
+let guideAnswer: () => string = () => JSON.stringify({ explanation: "ok", chips: [] });
 
 /**
  * Finds a free local port, so the fake CLI can reach this app's /mcp over HTTP
@@ -145,7 +147,10 @@ describe("trial chat", () => {
         appTimeZone: "UTC",
         created,
         trial: { chat, mcpUrl, registry },
-        ask: async () => JSON.stringify({ explanation: "ok", chips: [] }),
+        ask: async (prompt: string) => {
+          asked.push(prompt);
+          return guideAnswer();
+        },
       },
     });
     await app.listen({ port, host: "127.0.0.1" });
@@ -310,5 +315,54 @@ describe("trial chat", () => {
     // Performs assertions.
     expect(answered.status).toBe(200);
     expect(answered.body.data.trace).toEqual([]);
+  });
+
+  it("guides with values of sparse columns and dates as the source writes them, and gives the message back when it fails", async () => {
+    // Performs the test.
+    const url = "/admin/tools/entregas_ralas";
+    await api("PUT", url, {
+      source: "demo",
+      definition: {
+        base: {
+          kind: "query",
+          sql: "select ruta, entregado_en, case when id > 400 then piloto end as piloto_tarde from entregas",
+        },
+        columns: [{ name: "ruta" }, { name: "entregado_en" }, { name: "piloto_tarde" }],
+        meaning: { definition: "Entregas.", grain: "entrega", additive: true },
+      },
+    });
+    guideAnswer = () => JSON.stringify({ explanation: "ok", chips: [] });
+    const guided = await api("POST", `${url}/guide`, {});
+    const prompt = asked.at(-1) ?? "";
+    const spent = async () =>
+      (await database.db.select().from(rateLimits)).map((row) => row.msgCount);
+    const before = await spent();
+    guideAnswer = () => "no sé";
+    const failed = await api("POST", `${url}/guide`, {});
+    const after = await spent();
+    guideAnswer = () => JSON.stringify({ explanation: "ok", chips: [] });
+
+    // Performs assertions.
+    expect(guided.status).toBe(200);
+    expect(prompt).toMatch(/"piloto_tarde":\["[A-Z][a-z]+ /);
+    expect(prompt).toMatch(/"entregado_en":\["2026-\d{2}-\d{2} \d{2}:00:00"/);
+    expect(failed).toMatchObject({ status: 502, body: { error: "guide_failed" } });
+    expect(after).toEqual(before);
+  });
+
+  it("saves a definition with no hidden text in what models will read", async () => {
+    // Performs the test.
+    const saved = await api("PUT", "/admin/tools/entregas_limpias", {
+      source: "demo",
+      definition: {
+        ...deliveries,
+        meaning: { ...deliveries.meaning, caveats: ["Ojo󠄁‎ aquí"] },
+      },
+    });
+    const stored = await findDefinition(database.db, "entregas_limpias");
+
+    // Performs assertions.
+    expect(saved.status).toBe(200);
+    expect(stored?.tool.spec.meaning.caveats).toEqual(["Ojo aquí"]);
   });
 });
