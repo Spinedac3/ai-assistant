@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Shared by the docs core (current versions) and docs_historical (superseded ones) -->
+<schema name="docs" version="1.6">
+  <uniqueKey>id</uniqueKey>
+
+  <fieldType name="string" class="solr.StrField" sortMissingLast="true" docValues="true"/>
+  <fieldType name="boolean" class="solr.BoolField" sortMissingLast="true"/>
+  <fieldType name="pint" class="solr.IntPointField" docValues="true"/>
+  <fieldType name="plong" class="solr.LongPointField" docValues="true"/>
+  <fieldType name="pdate" class="solr.DatePointField" docValues="true"/>
+
+  <!-- Accent and case insensitive, no stemming: codes and acronyms must match as written -->
+  <fieldType name="text" class="solr.TextField" positionIncrementGap="100">
+    <analyzer>
+      <tokenizer class="solr.StandardTokenizerFactory"/>
+      <filter class="solr.LowerCaseFilterFactory"/>
+      <filter class="solr.ASCIIFoldingFilterFactory"/>
+    </analyzer>
+  </fieldType>
+
+  <!-- bge-m3 vectors; stored so a superseded version moves to the history without re-embedding -->
+  <fieldType name="vector" class="solr.DenseVectorField" vectorDimension="1024"
+             similarityFunction="cosine"/>
+
+  <field name="id" type="string" indexed="true" stored="true" required="true"/>
+  <field name="doc_code" type="string" indexed="true" stored="true" required="true"/>
+  <field name="doc_family" type="string" indexed="true" stored="true" required="true"/>
+  <field name="doc_title" type="text" indexed="true" stored="true" required="true"/>
+  <field name="doc_version" type="string" indexed="true" stored="true"/>
+  <field name="doc_revision" type="string" indexed="true" stored="true"/>
+  <field name="doc_type" type="string" indexed="true" stored="true"/>
+  <field name="section" type="text" indexed="true" stored="true"/>
+  <field name="section_path" type="string" indexed="true" stored="true"/>
+  <field name="text" type="text" indexed="true" stored="true" required="true"/>
+  <field name="page_number" type="pint" indexed="true" stored="true"/>
+  <field name="chunk_index" type="pint" indexed="true" stored="true" required="true"/>
+  <field name="required_scope" type="string" indexed="true" stored="true" required="true"/>
+  <field name="tags" type="string" indexed="true" stored="true" multiValued="true"/>
+  <field name="status" type="string" indexed="true" stored="true"/>
+  <field name="effective_date" type="pdate" indexed="true" stored="true"/>
+  <field name="is_current" type="boolean" indexed="true" stored="true"/>
+  <field name="updated_at" type="pdate" indexed="true" stored="true"/>
+  <field name="embedding" type="vector" indexed="true" stored="true"/>
+  <field name="_version_" type="plong" indexed="false" stored="false"/>
+</schema>
