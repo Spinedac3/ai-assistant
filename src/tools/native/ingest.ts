@@ -152,7 +152,7 @@ const uploading = new Map<string, Promise<unknown>>();
  *
  * @return  What the work returns
  */
-async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
+export async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
   const previous = uploading.get(key) ?? Promise.resolve();
   const current = previous.catch(() => {}).then(work);
   uploading.set(key, current);

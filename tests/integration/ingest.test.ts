@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { auditLogs, documentJobs, scopes } from "../../src/db/schema.js";
+import { auditLogs, documentJobs, scopes, toolCalls } from "../../src/db/schema.js";
 import { parseDocument } from "../../src/rag/document.js";
 import { Embedder } from "../../src/rag/embeddings.js";
 import type { Index } from "../../src/rag/ingest.js";
@@ -8,7 +8,7 @@ import { claimNext, runJob } from "../../src/rag/jobs.js";
 import { Solr } from "../../src/rag/solr.js";
 import { DocumentStorage } from "../../src/rag/storage.js";
 import { searchTool } from "../../src/tools/native/documents.js";
-import { INGEST, ingestTool } from "../../src/tools/native/ingest.js";
+import { INGEST, ingestTool, oneAtATime } from "../../src/tools/native/ingest.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
 import { type FakeEmbed, startFakeEmbed } from "../support/fakeEmbed.js";
 import { createCores, dropCores } from "../support/solrCores.js";
@@ -213,6 +213,11 @@ describe("ingest_document", () => {
     // Performs assertions.
     expect(outcomes.slice(0, 5).every((outcome) => outcome.result === "part_received")).toBe(true);
     expect(outcomes[5].error).toBe("too_large");
+    // The audit keeps how the tool was called, not the whole document
+    const calls = await database.db.select().from(toolCalls);
+    const audited = JSON.stringify(calls.map((row) => row.argsJson));
+    expect(audited).toContain("[390000 caracteres]");
+    expect(audited).not.toContain(piece);
     expect(
       await storage.partsReceived({ owner: manager.userId, docCode: code, parts: 30 }, HOUR),
     ).toEqual([]);
@@ -242,6 +247,11 @@ describe("ingest_document", () => {
       { mode: "ingest", doc_code: "SALARIOS-V002", ...salaries },
       outsider,
     );
+    // Refused before any part is kept for an area they cannot publish to
+    const firstPart = await call(
+      { mode: "ingest", doc_code: "SALARIOS-V003", ...salaries, part: 1, parts: 2 },
+      outsider,
+    );
     // From an area they read, over a family that lives in one they do not
     const supersede = await call(
       { mode: "ingest", doc_code: "SALARIOS-V002", ...fields, markdown: body },
@@ -268,6 +278,7 @@ describe("ingest_document", () => {
 
     // Performs assertions.
     expect(publish.error).toBe("area_not_readable");
+    expect(firstPart.error).toBe("area_not_readable");
     expect(supersede.error).toBe("area_not_readable");
     expect(overwrite.error).toBe("area_not_readable");
     expect(stored.frontmatter.area).toBe("rrhh");
@@ -347,5 +358,27 @@ describe("ingest_document", () => {
     expect(nothing.error).toBe("missing_fields");
     const events = await database.db.select().from(auditLogs);
     expect(events.some((event) => event.eventCode === "docs.reclassified")).toBe(true);
+  });
+
+  it("runs the work on one person's document one call at a time", async () => {
+    // Performs the test.
+    const order: string[] = [];
+    const work = (name: string, wait: number) => async () => {
+      order.push(`${name} empieza`);
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      order.push(`${name} termina`);
+    };
+    await Promise.all([
+      oneAtATime("7:GUIA-V001", work("primera", 50)),
+      oneAtATime("7:GUIA-V001", work("segunda", 0)),
+    ]);
+
+    // Performs assertions.
+    expect(order).toEqual([
+      "primera empieza",
+      "primera termina",
+      "segunda empieza",
+      "segunda termina",
+    ]);
   });
 });

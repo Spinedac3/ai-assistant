@@ -34,7 +34,7 @@ export type Stored =
  */
 export function writeDocument(frontmatter: Record<string, unknown>, body: string): string {
   // Double quotes and line breaks would end a value early in the flat reader, and a comma would
-  // split a tag; a tag left blank is dropped
+  // split a tag; a tag left blank is dropped by the reader
   const quote = (value: unknown) => `"${String(value).replace(/["\r\n]/g, " ")}"`;
   const lines = Object.entries(frontmatter)
     .filter(([, value]) => value !== undefined)
@@ -42,7 +42,6 @@ export function writeDocument(frontmatter: Record<string, unknown>, body: string
       Array.isArray(value)
         ? `${name}: [${value
             .map((item) => String(item).replace(/,/g, " ").trim())
-            .filter(Boolean)
             .map(quote)
             .join(", ")}]`
         : `${name}: ${quote(value)}`,
