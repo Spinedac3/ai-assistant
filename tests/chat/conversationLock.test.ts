@@ -52,3 +52,17 @@ describe("conversationLock", () => {
     expect(order).toEqual(["first ends", "third starts"]);
   });
 });
+
+describe("conversationLock backstop", () => {
+  it("stops waiting for a turn ahead that never ends", async () => {
+    // Performs the test.
+    await holdTurn("stuck");
+    const started = Date.now();
+    const release = await holdTurn("stuck", undefined, 50);
+
+    // Performs assertions.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(45);
+    expect(release).toEqual(expect.any(Function));
+    release?.();
+  });
+});

@@ -135,6 +135,14 @@ export default async function chatRoutes(
 
     let done: Extract<ChatEvent, { type: "done" }> | null = null;
     let userMessageId = 0;
+    const controller = new AbortController();
+    const onClose = () => {
+      // The response closes after a normal send too; only an unfinished one means the client left
+      if (!reply.raw.writableFinished) {
+        controller.abort();
+      }
+    };
+    reply.raw.on("close", onClose);
 
     try {
       const turn = chatTurn(
@@ -142,6 +150,7 @@ export default async function chatRoutes(
         userOf(request),
         body.data.content,
         body.data.conversationId ?? null,
+        controller.signal,
       );
 
       for await (const event of turn) {
@@ -158,6 +167,8 @@ export default async function chatRoutes(
       }
 
       return reply.code(code).send({ ok: false, ...failure(error) });
+    } finally {
+      reply.raw.off("close", onClose);
     }
 
     if (!done) {

@@ -27,6 +27,8 @@ export interface CliProcess {
   closed: Promise<number | null>;
 }
 
+const KILL_GRACE_MS = 5_000;
+
 // Only what the CLI needs to run and find its own login; nothing else of the server reaches it
 const INHERITED_ENV = [
   "PATH",
@@ -128,7 +130,15 @@ export function launchCli(
   child.stdin?.on("error", () => undefined);
   child.stdin?.end(prompt);
 
-  const onAbort = () => child.kill("SIGTERM");
+  // A CLI that ignores SIGTERM would hold the conversation lock forever, so it gets SIGKILL after a grace
+  const onAbort = () => {
+    child.kill("SIGTERM");
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }, KILL_GRACE_MS).unref();
+  };
   if (abortSignal?.aborted) {
     onAbort();
   }

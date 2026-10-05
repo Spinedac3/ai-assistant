@@ -108,3 +108,26 @@ describe("launchCli", () => {
     expect(await cli.closed).toBe(0);
   });
 });
+
+describe("launchCli abort", () => {
+  it("kills a CLI that ignores the polite stop", async () => {
+    // Performs the test.
+    const workspace = mkdtempSync(join(tmpdir(), "cli-stubborn-"));
+    const stop = new AbortController();
+    const cli = launchCli(
+      {
+        bin: process.execPath,
+        binArgs: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"],
+      },
+      [],
+      "hola",
+      workspace,
+      stop.signal,
+    );
+    setTimeout(() => stop.abort(), 200);
+    await cli.closed.catch(() => undefined);
+
+    // Performs assertions.
+    expect(cli.child.exitCode !== null || cli.child.signalCode !== null).toBe(true);
+  }, 15_000);
+});
