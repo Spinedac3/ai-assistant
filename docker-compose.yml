@@ -19,16 +19,20 @@ services:
 
   solr:
     image: solr:9
-    # Current versions in docs, superseded ones in docs_historical; both with the versioned schema
+    # Current versions in docs, superseded ones in docs_historical; both with the versioned schema.
+    # The schema is mounted outside the volume and copied in: a mount inside it leaves the data
+    # folder owned by root on a fresh volume, and Solr cannot create its cores
     command: >
-      bash -c "precreate-core docs /var/solr/data/configsets/docs &&
+      bash -c "mkdir -p /var/solr/data/configsets &&
+      cp -r /opt/configsets/docs /var/solr/data/configsets/ &&
+      precreate-core docs /var/solr/data/configsets/docs &&
       precreate-core docs_historical /var/solr/data/configsets/docs &&
       exec solr-foreground"
     ports:
       - "127.0.0.1:8983:8983"
     volumes:
       - solr-data:/var/solr
-      - ./docker/solr/docs:/var/solr/data/configsets/docs:ro
+      - ./docker/solr/docs:/opt/configsets/docs:ro
 
   embed:
     build: ./docker/embed

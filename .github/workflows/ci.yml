@@ -31,11 +31,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # Solr needs the versioned configset from the checkout, so it starts here and not as a service
       - run: docker compose --profile engines up -d solr minio demo-db demo-mysql demo-mssql
+      # A Solr that never answers fails here with its log, not later as failing search tests
       - run: |
           for i in $(seq 1 60); do
-            curl -sf "http://localhost:8983/solr/docs/admin/ping" > /dev/null && break
+            curl -sf "http://localhost:8983/solr/docs/admin/ping" > /dev/null && exit 0
             sleep 2
           done
+          docker compose logs solr
+          exit 1
       # The demo engines take a while to accept logins; the seed retries until each one answers
       - run: |
           seeded=0
