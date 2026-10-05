@@ -95,14 +95,15 @@ URL `https://<tu-dominio>/mcp`:
 El token nunca da más de lo que la persona ya puede hacer: sus permisos salen de su rol en cada
 llamada. Revocar sus sesiones (`POST /auth/sessions/revoke`) también corta estos tokens.
 
-El registro está abierto a cualquier redirect `https` o a `localhost` (en `localhost` el puerto
-puede cambiar entre intentos), porque cada cliente igual necesita que una persona real entre y
+El registro está abierto a cualquier redirect `https` o a esta máquina (`localhost`, `127.0.0.1`,
+`[::1]`, donde el puerto puede cambiar entre intentos), porque cada cliente igual necesita que una persona real entre y
 acepte; cada registro queda en la auditoría y hay un máximo de 10 por IP cada 10 minutos.
 
-Detrás de un proxy (nginx, un balanceador) hay que poner `TRUST_PROXY_HOPS` con la cantidad de
-proxies; sin eso se ignora `X-Forwarded-For`, porque cualquiera puede escribirlo y elegiría la IP
-que ven los límites y la auditoría. Para que los
-clientes en la nube lleguen, el servidor tiene que estar publicado con HTTPS y `PUBLIC_BASE_URL`
+Detrás de un proxy (nginx, un balanceador) hay que poner en `TRUST_PROXY` sus direcciones o CIDR;
+sin eso se ignora `X-Forwarded-For`, porque cualquiera puede escribirlo y elegiría la IP que ven los
+límites y la auditoría.
+
+Para que los clientes en la nube lleguen, el servidor tiene que estar publicado con HTTPS y `PUBLIC_BASE_URL`
 tiene que tener esa dirección.
 
 En Windows, `CLAUDE_BIN` tiene que apuntar al `claude.exe` real: Node no ejecuta el
