@@ -50,7 +50,7 @@ if (!url) {
 }
 
 const password = await askHidden("Contraseña: ");
-const problem = passwordProblem(password, values.email);
+const problem = passwordProblem(password, [values.email, values.name]);
 if (problem) {
   throw new Error(problem);
 }

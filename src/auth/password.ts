@@ -1,31 +1,18 @@
 import { hash, verify } from "@node-rs/argon2";
+import { ZxcvbnFactory } from "@zxcvbn-ts/core";
+import * as common from "@zxcvbn-ts/language-common";
+import * as spanish from "@zxcvbn-ts/language-es-es";
 
 const MIN_LENGTH = 12;
 const MAX_LENGTH = 128;
+// The top zxcvbn score: out of reach even for an offline attack on a stolen hash
+const MIN_SCORE = 4;
 
-// The most common choices in public breach lists; a longer list adds little at this length
-const COMMON_PASSWORDS = new Set([
-  "123456789012",
-  "1234567890123",
-  "qwertyuiopas",
-  "password1234",
-  "password12345",
-  "passwordpassword",
-  "contraseña123",
-  "contrasena123",
-  "contraseña1234",
-  "administrator",
-  "administrador",
-  "iloveyou1234",
-  "welcome12345",
-  "bienvenido123",
-  "letmein12345",
-  "qwerty123456",
-  "abc123456789",
-  "aaaaaaaaaaaa",
-  "111111111111",
-  "000000000000",
-]);
+const strength = new ZxcvbnFactory({
+  translations: spanish.translations,
+  graphs: common.adjacencyGraphs,
+  dictionary: { ...common.dictionary, ...spanish.dictionary },
+});
 
 // OWASP Password Storage baseline for argon2id
 const ARGON2_OPTIONS = { algorithm: 2, memoryCost: 19_456, timeCost: 2, parallelism: 1 } as const;
@@ -37,11 +24,11 @@ let dummyHash: Promise<string> | null = null;
  * Tells why a new password is not acceptable, or null when it is
  *
  * @param   password  Candidate password
- * @param   email     Account email, which the password must not contain
+ * @param   personal  Data of the account the password must not lean on, such as email and name
  *
  * @return  The rejection reason in Spanish, or null
  */
-export function passwordProblem(password: string, email: string): string | null {
+export function passwordProblem(password: string, personal: string[]): string | null {
   if (password.length < MIN_LENGTH) {
     return `La contraseña debe tener al menos ${MIN_LENGTH} caracteres`;
   }
@@ -50,13 +37,17 @@ export function passwordProblem(password: string, email: string): string | null 
     return `La contraseña no puede pasar de ${MAX_LENGTH} caracteres`;
   }
 
-  if (COMMON_PASSWORDS.has(password.toLowerCase())) {
-    return "La contraseña es demasiado común";
-  }
+  // zxcvbn only matches whole entries, so "Mariana del Campo" must reach it as separate words
+  const words = personal.flatMap((value) =>
+    value
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((word) => word.length >= 3),
+  );
 
-  const localPart = email.split("@")[0]?.toLowerCase() ?? "";
-  if (localPart.length >= 4 && password.toLowerCase().includes(localPart)) {
-    return "La contraseña no puede contener el usuario del correo";
+  const { score, feedback } = strength.check(password, words);
+  if (score < MIN_SCORE) {
+    return feedback.warning ?? feedback.suggestions[0] ?? "La contraseña es fácil de adivinar";
   }
 
   return null;
