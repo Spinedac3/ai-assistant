@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cliToolName, FIND_CAPABILITY, MCP_SERVER, RUN_CAPABILITY } from "../mcp/names.js";
-import { FIGURE_SOURCE, LIST_MARKER_SOURCE, TOOL_THEATER_SOURCE } from "./guards.js";
+import { FIGURE_SOURCE, LIST_MARKER_SOURCE, TOOL_THEATER_SOURCE, wholeDate } from "./guards.js";
 
 // The CLI has no forced tool choice; a Stop hook that exits 2 keeps the model in the same turn.
 // It reads the trace, never the answer's claims: every figure must appear in the question, in a
@@ -51,7 +51,7 @@ process.stdin.on("end", () => {
   const sourceRuns = sources.match(/\d+/g) || [];
   const backed = (figure) => figure.split(/[.,:/]+/).filter(Boolean).every((run) => earlier.has(run) || sourceRuns.some((source) => source.includes(run)));
   let remaining = text.replace(LIST_MARKER, "");
-  for (const date of knownDates) remaining = remaining.split(date).join(" ");
+  for (const pattern of knownDates) remaining = remaining.replace(new RegExp(pattern, "g"), " ");
   const figures = (remaining.match(FIGURE) || []).map((figure) => figure.replace(/[.,:/]+$/, ""));
   const orphans = figures.filter((figure) => !backed(figure));
   if (!theater && orphans.length === 0) process.exit(0);
@@ -86,7 +86,11 @@ export function installSourceGate(workspace: string, knownDates: readonly string
 
   const script = join(dir, "source-gate.cjs");
   writeFileSync(script, SOURCE_GATE_SCRIPT);
-  writeFileSync(join(dir, "known-dates.json"), JSON.stringify(knownDates));
+  // Written as ready patterns: the script cannot hold the escaping, it would read as interpolation
+  writeFileSync(
+    join(dir, "known-dates.json"),
+    JSON.stringify(knownDates.map((date) => wholeDate(date).source)),
+  );
   writeFileSync(
     join(dir, "settings.json"),
     JSON.stringify({

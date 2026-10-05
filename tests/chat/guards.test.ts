@@ -193,3 +193,17 @@ describe("figure matching", () => {
     expect(figuresIn("2025. Fue el año con más ventas")).toEqual(["2025"]);
   });
 });
+
+describe("whole dates", () => {
+  it("does not take the 4th out of the 24th", () => {
+    // Performs the test.
+    const dates = dateSpellings(["2026-10-04"]);
+    const question = "¿qué pasa el 24 de octubre de 2026?";
+
+    // Performs assertions.
+    expect(claimsUnsourcedFigures("El 24 de octubre de 2026 cierra.", question, 0, dates)).toBe(
+      false,
+    );
+    expect(figuresIn("Llega el 14 de octubre.", dates)).toEqual(["14"]);
+  });
+});

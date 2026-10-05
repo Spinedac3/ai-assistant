@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { dateSpellings } from "../../src/chat/guards.js";
+import { dateSpellings, wholeDate } from "../../src/chat/guards.js";
 import { SOURCE_GATE_SCRIPT } from "../../src/chat/sourceGate.js";
 
 const dir = mkdtempSync(join(tmpdir(), "source-gate-"));
@@ -13,7 +13,7 @@ writeFileSync(script, SOURCE_GATE_SCRIPT);
 mkdirSync(join(dir, ".claude"));
 writeFileSync(
   join(dir, ".claude", "known-dates.json"),
-  JSON.stringify(dateSpellings(["2026-10-04"])),
+  JSON.stringify(dateSpellings(["2026-10-04"]).map((date) => wholeDate(date).source)),
 );
 writeFileSync(join(dir, "CLAUDE.md"), "Regla 3: sé concisa, máximo 3 o 4 párrafos.");
 

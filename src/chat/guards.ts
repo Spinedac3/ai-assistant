@@ -82,6 +82,17 @@ export function dateSpellings(isoDates: readonly string[]): string[] {
 }
 
 /**
+ * Matches a date only when no digit touches it, so the 4th never matches inside the 24th
+ *
+ * @param   date  Exact spelling of a date
+ *
+ * @return  A global pattern for that date
+ */
+export function wholeDate(date: string): RegExp {
+  return new RegExp(`(?<!\\d)${date.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(?!\\d)`, "g");
+}
+
+/**
  * Extracts the figures of a text, leaving out list numbering, given dates and trailing punctuation
  *
  * @param   text       Answer text
@@ -93,7 +104,7 @@ export function figuresIn(text: string, knownDates: readonly string[] = []): str
   let remaining = text.replace(new RegExp(LIST_MARKER_SOURCE, "gm"), "");
 
   for (const date of knownDates) {
-    remaining = remaining.split(date).join(" ");
+    remaining = remaining.replace(wholeDate(date), " ");
   }
 
   return (remaining.match(new RegExp(FIGURE_SOURCE, "g")) ?? []).map((figure) =>
