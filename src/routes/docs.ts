@@ -237,8 +237,10 @@ export default async function docsRoutes(
       return reply.code(404).send({ ok: false, error: "document_not_found" });
     }
 
-    await removeDocument(index, code);
+    // Originals first: a job indexing this code then sees them gone and removes it again, so the
+    // delete wins whichever finishes last
     await storage.remove(code);
+    await removeDocument(index, code);
 
     await logAudit(db, {
       userId: request.authUser?.id ?? null,

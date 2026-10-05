@@ -129,7 +129,8 @@ export async function runJob(deps: Omit<WorkerDependencies, "pollMs">, job: Job)
   try {
     const parsed = parseDocument(await deps.storage.readMarkdown(job.docCode));
     const result = await ingestDocument(deps.index, parsed);
-    // Deleted while it was being indexed: the delete wins, or it would come back without originals
+    // Deleted while it was being indexed: the delete removes the originals first, so their absence
+    // here means it wins, or the document would come back without them
     if (!(await deps.storage.exists(job.docCode, "md"))) {
       await removeDocument(deps.index, job.docCode);
       throw new Error("El documento se borró mientras se indexaba");

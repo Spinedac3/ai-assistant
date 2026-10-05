@@ -6,7 +6,8 @@ import { ingestDocument } from "../rag/ingest.js";
 import { indexFrom, storageFrom } from "../rag/services.js";
 
 // Indexes every .md of a folder right away, without the queue, so it works with the server stopped.
-// Unlike the upload route it does not check that each area exists as a permission
+// Unlike the upload route it does not check that each area exists as a permission, and it does not
+// wait for the server worker: run it when nothing else is indexing
 const folder = process.argv[2];
 if (!folder) {
   throw new Error("Uso: pnpm docs:load <carpeta con archivos .md>");
