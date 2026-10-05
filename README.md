@@ -78,6 +78,27 @@ viajan al proveedor del modelo como parte de la conversación.
 El chat obtiene en cada turno un token propio, atado a la persona y a la conversación, que se
 revoca al terminar.
 
+### Conectar Claude, ChatGPT u otro cliente MCP
+
+El asistente es su propio servidor OAuth 2.1, así que un cliente externo se conecta solo con la
+URL `https://<tu-dominio>/mcp`:
+
+1. El cliente recibe un 401 que le dice dónde están los metadatos
+   (`/.well-known/oauth-protected-resource`) y se registra solo en `POST /oauth/register`.
+2. Abre en el navegador la página de consentimiento: la persona entra con su correo y contraseña
+   y decide si permite o rechaza.
+3. El cliente canjea el código con PKCE (S256) y recibe un token de 1 hora y un refresh de 90
+   días, que rota en cada uso. Si un refresh ya usado vuelve a aparecer, la sesión entera se
+   revoca: alguien tiene una copia robada.
+
+El token nunca da más de lo que la persona ya puede hacer: sus permisos salen de su rol en cada
+llamada. Revocar sus sesiones (`POST /auth/sessions/revoke`) también corta estos tokens.
+
+El registro está abierto a cualquier redirect `https` o a `localhost`, porque cada cliente igual
+necesita que una persona real entre y acepte; cada registro queda en la auditoría. Para que los
+clientes en la nube lleguen, el servidor tiene que estar publicado con HTTPS y `PUBLIC_BASE_URL`
+tiene que tener esa dirección.
+
 En Windows, `CLAUDE_BIN` tiene que apuntar al `claude.exe` real: Node no ejecuta el
 `claude.cmd` sin una shell.
 

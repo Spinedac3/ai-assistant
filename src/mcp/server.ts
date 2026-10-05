@@ -13,7 +13,7 @@ import { recordIntent } from "./intents.js";
 import { FIND_CAPABILITY, RUN_CAPABILITY } from "./names.js";
 import { type Channel, surfaceFor } from "./surface.js";
 
-// Asked of every tool an external client sees, to learn what people need; never on the chat or runs (D36)
+// Asked of every tool an external client sees, to learn what people need; never on the chat or runs
 export const INTENT_PARAM = "original_question";
 
 const INTENT_SCHEMA = {
