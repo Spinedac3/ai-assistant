@@ -9,14 +9,12 @@
   <!-- The schema is the versioned schema.xml; nothing is inferred from incoming documents -->
   <schemaFactory class="ClassicIndexSchemaFactory"/>
 
+  <!-- No automatic commits: the app commits after each write, and a timed commit could make a
+       delete permanent before a failed write is rolled back -->
   <updateHandler class="solr.DirectUpdateHandler2">
     <updateLog>
       <str name="dir">${solr.ulog.dir:}</str>
     </updateLog>
-    <autoCommit>
-      <maxTime>15000</maxTime>
-      <openSearcher>false</openSearcher>
-    </autoCommit>
   </updateHandler>
 
   <requestHandler name="/select" class="solr.SearchHandler">

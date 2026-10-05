@@ -24,6 +24,24 @@ export interface IngestResult {
 // Solr internals that must not be posted back when a document is copied
 const INTERNAL_FIELDS = ["_version_", "score"];
 
+// Index writes of this process run one at a time: a commit or a rollback applies to the whole
+// core, so a delete committed in the middle of an ingest would publish half a document
+let writes: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs an index write after the ones already waiting
+ *
+ * @param   work  The write
+ *
+ * @return  Its result
+ */
+function exclusive<T>(work: () => Promise<T>): Promise<T> {
+  const run = writes.then(work, work);
+  writes = run.catch(() => {});
+
+  return run;
+}
+
 /**
  * Reads the version number of a code, as in GUIDE-V002; a code without one counts as version 0
  *
@@ -95,39 +113,44 @@ export async function ingestDocument(
     throw new Error("El documento no tiene texto para indexar");
   }
 
-  const newer = await newerCurrent(index, docCode);
-  if (newer) {
-    throw new Error(`Ya está vigente una versión más nueva (${newer}); sube una versión posterior`);
-  }
-
-  // Embedded before anything is deleted: if the service is down, the indexed version stays
+  // Embedded before taking the lock and before anything is deleted: the slow part blocks no other
+  // write, and if the service is down the indexed version stays
   const vectors = await embedder.passages(chunks.map(embeddingText));
   const code = escapeTerm(docCode);
 
-  try {
-    await solr.deleteWhere(cores.current, `doc_code:${code}`);
-    await solr.add(
-      cores.current,
-      chunks.map((chunk, position) => ({ ...chunk, embedding: vectors[position] })),
-    );
-    await solr.commit(cores.current);
-  } catch (error) {
-    // Without this, the delete and the chunks already sent would go live with the next commit
-    await solr.rollback(cores.current).catch(() => {});
-    throw error;
-  }
+  return exclusive(async () => {
+    const newer = await newerCurrent(index, docCode);
+    if (newer) {
+      throw new Error(
+        `Ya está vigente una versión más nueva (${newer}); sube una versión posterior`,
+      );
+    }
 
-  // A code that was superseded once and comes back current must not stay in the history too
-  await solr.deleteWhere(cores.historical, `doc_code:${code}`);
-  await solr.commit(cores.historical);
+    try {
+      await solr.deleteWhere(cores.current, `doc_code:${code}`);
+      await solr.add(
+        cores.current,
+        chunks.map((chunk, position) => ({ ...chunk, embedding: vectors[position] })),
+      );
+      await solr.commit(cores.current);
+    } catch (error) {
+      // Without this, the delete and the chunks already sent would go live with the next commit
+      await solr.rollback(cores.current).catch(() => {});
+      throw error;
+    }
 
-  try {
-    return { chunks: chunks.length, superseded: await supersede(index, docCode) };
-  } catch (error) {
-    throw new Error(
-      `La versión nueva quedó indexada, pero no se pudo mover la anterior al histórico: ${(error as Error).message}`,
-    );
-  }
+    try {
+      // A code that was superseded once and comes back current must not stay in the history too
+      await solr.deleteWhere(cores.historical, `doc_code:${code}`);
+      await solr.commit(cores.historical);
+
+      return { chunks: chunks.length, superseded: await supersede(index, docCode) };
+    } catch (error) {
+      throw new Error(
+        `La versión nueva quedó indexada, pero no se pudo poner en orden el histórico: ${(error as Error).message}`,
+      );
+    }
+  });
 }
 
 /**
@@ -180,6 +203,8 @@ async function supersede(index: Index, docCode: string): Promise<string[]> {
  * @param   docCode  Document code
  */
 export async function removeDocument(index: Index, docCode: string): Promise<void> {
-  await index.solr.deleteWhere(index.cores.current, `doc_code:${escapeTerm(docCode)}`);
-  await index.solr.commit(index.cores.current);
+  await exclusive(async () => {
+    await index.solr.deleteWhere(index.cores.current, `doc_code:${escapeTerm(docCode)}`);
+    await index.solr.commit(index.cores.current);
+  });
 }
