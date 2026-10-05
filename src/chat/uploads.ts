@@ -1,0 +1,100 @@
+import { randomUUID } from "node:crypto";
+
+export interface Upload {
+  name: string;
+  bytes: Buffer;
+}
+
+interface Stored extends Upload {
+  userId: number;
+  expiresAt: number;
+}
+
+// A file is read within the conversation that brought it; past this long unused, it is gone
+const TTL_MS = 30 * 60_000;
+// Uploads live in memory, so all of them together stay under this
+const TOTAL_BYTES = 100 * 1024 * 1024;
+// And one person never takes more than this of it, so no one fills it for everybody
+export const PERSON_BYTES = 30 * 1024 * 1024;
+
+/**
+ * Files a person attaches to the chat, kept in memory for a while and only for that person
+ */
+export class Uploads {
+  private readonly files = new Map<string, Stored>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /**
+   * Tells why a file of a size would not fit, before it is read
+   *
+   * @param   userId  Owner
+   * @param   bytes   Size of the file, or the most it may be
+   *
+   * @return  The person's share or the store being full, or null when it fits
+   */
+  refusal(userId: number, bytes: number): "person" | "total" | null {
+    this.sweep();
+    let total = 0;
+    let own = 0;
+    for (const file of this.files.values()) {
+      total += file.bytes.length;
+      own += file.userId === userId ? file.bytes.length : 0;
+    }
+
+    if (own + bytes > PERSON_BYTES) {
+      return "person";
+    }
+
+    return total + bytes > TOTAL_BYTES ? "total" : null;
+  }
+
+  /**
+   * Keeps a file for its owner
+   *
+   * @param   userId  Owner
+   * @param   upload  Name and contents
+   *
+   * @return  Its id, or null when there is no room left
+   */
+  put(userId: number, upload: Upload): string | null {
+    if (this.refusal(userId, upload.bytes.length)) {
+      return null;
+    }
+    const id = randomUUID();
+    this.files.set(id, { ...upload, userId, expiresAt: this.now() + TTL_MS });
+
+    return id;
+  }
+
+  /**
+   * Gives a file back only to its owner, and only while it lives; each use keeps it longer
+   *
+   * @param   userId  Who asks
+   * @param   id      Id of the file
+   *
+   * @return  The file, or null
+   */
+  get(userId: number, id: string): Upload | null {
+    this.sweep();
+    const file = this.files.get(id);
+    if (!file || file.userId !== userId) {
+      return null;
+    }
+    file.expiresAt = this.now() + TTL_MS;
+
+    return { name: file.name, bytes: file.bytes };
+  }
+
+  /**
+   * Drops the files whose time is over
+   */
+  private sweep(): void {
+    const now = this.now();
+    for (const [id, file] of this.files) {
+      if (file.expiresAt <= now) {
+        this.files.delete(id);
+      }
+    }
+  }
+}

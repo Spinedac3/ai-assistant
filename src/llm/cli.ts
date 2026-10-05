@@ -21,6 +21,8 @@ export interface ArgvOptions {
   disallowedTools: string;
   // Built-in tools the model may use; an empty list leaves it none
   tools?: string;
+  // How a tool not allowed beforehand is treated; dontAsk denies it without asking anyone
+  permissionMode?: "dontAsk";
 }
 
 export interface CliProcess {
@@ -101,8 +103,11 @@ export function cliArgs(options: ArgvOptions): string[] {
     "--max-turns",
     String(options.maxTurns),
     ...(options.continueSession ? ["--continue"] : []),
-    // On a developer machine the child would load that developer's plugins, hooks and memory
-    ...(process.platform === "win32" ? ["--setting-sources", "project,local"] : []),
+    // The child loads no settings of the machine's account: on a developer machine its plugins,
+    // hooks and memory, on a server whatever permissions someone once granted there
+    "--setting-sources",
+    "project,local",
+    ...(options.permissionMode ? ["--permission-mode", options.permissionMode] : []),
     "--strict-mcp-config",
     "--mcp-config",
     options.mcpConfigPath,

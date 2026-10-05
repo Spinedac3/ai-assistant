@@ -1,6 +1,6 @@
 // Stands in for the claude CLI: replays one scripted run per invocation and logs how it was called.
 // Usage: node fakeCli.mjs <scenario.json> <cli flags...>, with the prompt on stdin like the real one.
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const [scenarioPath, ...args] = process.argv.slice(2);
 const runs = JSON.parse(readFileSync(scenarioPath, "utf8"));
@@ -20,6 +20,8 @@ appendFileSync(
     model: args[args.indexOf("--model") + 1],
     args,
     prompt,
+    // What the call found in its folder, to tell whether an attachment was there
+    files: readdirSync("."),
   })}\n`,
 );
 

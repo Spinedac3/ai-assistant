@@ -5,6 +5,7 @@ import { loadExternalSystems } from "./auth/externalSystems.js";
 import { createTokenSigner, readPrivateKey } from "./auth/tokens.js";
 import { chatMcpConfig } from "./chat/mcpConfig.js";
 import { readOrganizationContext } from "./chat/prompt.js";
+import { Uploads } from "./chat/uploads.js";
 import { loadEnv } from "./config/env.js";
 import { CreatedTools } from "./creator/store.js";
 import { connectDatabase } from "./db/client.js";
@@ -21,6 +22,7 @@ import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
 import { ingestTool } from "./tools/native/ingest.js";
+import { readPdfTool } from "./tools/native/readPdf.js";
 import { sendNoticeTool } from "./tools/native/sendNotice.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { Secrets } from "./vault/envelope.js";
@@ -85,6 +87,21 @@ const chat = {
 // The CLI runs on this host, so it reaches /mcp locally rather than through the public address
 const mcpUrl = `http://127.0.0.1:${env.PORT}/mcp`;
 
+// One call to the chat's model, read on each call as the chat reads it; used by the guide of the
+// creator and to read a PDF attached to the chat
+const askModel = async (prompt: string, attachment?: Buffer) =>
+  askOnce(
+    {
+      cli: chat.cli,
+      model: (await readSetting(database.db, "chat.model")) ?? env.CHAT_MODEL,
+      workspacesDir: chat.workspacesDir,
+    },
+    prompt,
+    attachment,
+  );
+const uploads = new Uploads();
+registry.register(readPdfTool({ uploads, ask: askModel }));
+
 const app = await buildApp({
   db: database.db,
   signer: createTokenSigner(
@@ -95,9 +112,11 @@ const app = await buildApp({
   systems: loadExternalSystems(env.EXTERNAL_SYSTEMS_FILE),
   passwordReset: { mailer, publicBaseUrl, assistantName: env.ASSISTANT_NAME },
   usage: { timeZone: env.APP_TIMEZONE },
+  panel: { dir: env.PANEL_DIR },
   chat: {
     ...chat,
     mcpConfig: chatMcpConfig(database.db, mcpUrl),
+    uploads,
   },
   mcp: {
     registry,
@@ -118,16 +137,7 @@ const app = await buildApp({
     appTimeZone: env.APP_TIMEZONE,
     created: createdTools,
     trial: { chat, mcpUrl, registry },
-    // The guide answers with the chat's model, read on each call as the chat reads it
-    ask: async (prompt) =>
-      askOnce(
-        {
-          cli: chat.cli,
-          model: (await readSetting(database.db, "chat.model")) ?? env.CHAT_MODEL,
-          workspacesDir: chat.workspacesDir,
-        },
-        prompt,
-      ),
+    ask: (prompt) => askModel(prompt),
   },
   exports: { exports },
   logger: true,

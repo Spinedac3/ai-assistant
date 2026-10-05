@@ -87,4 +87,34 @@ describe("one-shot call", () => {
     expect(answer).toBe("listo");
     expect(await readdir(missing)).toEqual([]);
   });
+
+  it("lets the model read only the attached file, under a fixed name, and removes it after", async () => {
+    // Performs the test.
+    const { scenario, workspacesDir } = await scripted([{ result: "Dice 3 cosas" }]);
+    const answer = await askOnce(
+      {
+        cli: { bin: process.execPath, binArgs: [fakeCli, scenario] },
+        model: "sonnet",
+        workspacesDir,
+      },
+      "Resume el documento",
+      Buffer.from("%PDF-1.7"),
+    );
+    const [call] = (await readFile(`${scenario}.calls`, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const value = (flag: string) => call.args[call.args.indexOf(flag) + 1];
+
+    // Performs assertions.
+    expect(answer).toBe("Dice 3 cosas");
+    expect(call.files).toContain("document.pdf");
+    expect(value("--tools")).toBe("Read");
+    expect(value("--allowedTools")).toBe("Read(./document.pdf)");
+    expect(value("--permission-mode")).toBe("dontAsk");
+    expect(value("--setting-sources")).toBe("project,local");
+    expect(value("--disallowedTools").split(" ")).not.toContain("Read");
+    expect(value("--disallowedTools").split(" ")).toContain("Bash");
+    expect(await readdir(workspacesDir)).toEqual([]);
+  });
 });

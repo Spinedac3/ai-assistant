@@ -23,10 +23,22 @@ pnpm kek:generate               # llave maestra de las contraseñas de las fuent
 pnpm db:migrate
 pnpm admin:create --email tu@empresa.com --name "Tu Nombre"
 pnpm dev                        # http://localhost:3000/health
+pnpm --filter ai-assistant-web build   # el panel, que el servidor sirve en http://localhost:3000/panel
 pnpm check                      # typecheck + lint + tests unitarios
 pnpm demo:seed                  # base demo de la distribuidora
 pnpm test:integration           # también los que usan Postgres, Solr, MinIO y las bases demo
 ```
+
+## Panel
+
+Una web en `/panel` con el chat interno, los documentos y, según los permisos de cada persona, la
+administración. La sirve el mismo servidor desde `PANEL_DIR` (por defecto `web/dist`), así que no
+hace falta CORS. En desarrollo, `pnpm --filter ai-assistant-web dev` la levanta con Vite y usa el
+servidor local como API. El color de marca se cambia con `VITE_BRAND_COLOR` al construirla.
+
+En el chat se puede adjuntar un PDF de hasta 10 MB: queda en memoria media hora desde su último
+uso, solo para quien lo subió, y el modelo lo lee con la tool `read_pdf`, que abre una llamada al
+CLI que solo puede leer ese archivo.
 
 ## Entrar
 

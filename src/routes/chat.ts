@@ -1,4 +1,5 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import multipart from "@fastify/multipart";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { RateLimitExceededError } from "../chat/rateLimit.js";
 import {
@@ -9,8 +10,16 @@ import {
   renameConversation,
 } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, type ChatUser, chatTurn } from "../chat/turn.js";
+import type { Uploads } from "../chat/uploads.js";
+import { removeHidden } from "../lib/hiddenText.js";
 
-export type ChatRoutesOptions = Omit<ChatDependencies, "logger">;
+export type ChatRoutesOptions = Omit<ChatDependencies, "logger"> & {
+  // Without it the chat takes no attachments
+  uploads?: Uploads;
+};
+
+// A PDF the model reads whole; larger ones are better loaded as documents
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 const sendBody = z.object({
   content: z.string().trim().min(1).max(20_000),
@@ -53,6 +62,48 @@ function failure(error: unknown): { error: string; message: string } {
 }
 
 /**
+ * Reads the one file of an upload and makes sure it is a PDF within the size
+ *
+ * @param   request  Multipart request
+ *
+ * @return  Its name and contents, or why it was refused
+ */
+async function readPdf(
+  request: FastifyRequest,
+): Promise<{ name: string; bytes: Buffer } | { status: number; error: string; message: string }> {
+  const part = await request.file().catch(() => undefined);
+  if (!part) {
+    return { status: 400, error: "no_file", message: "No llegó ningún archivo" };
+  }
+  const pieces: Buffer[] = [];
+  for await (const piece of part.file) {
+    pieces.push(piece as Buffer);
+  }
+  if (part.file.truncated) {
+    return {
+      status: 413,
+      error: "file_too_large",
+      message: "El PDF pasa de 10 MB; cárgalo como documento",
+    };
+  }
+  const bytes = Buffer.concat(pieces);
+  // What the file is, not what it claims to be
+  if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-") {
+    return { status: 400, error: "not_pdf", message: "Solo se pueden adjuntar PDF" };
+  }
+
+  // The name is shown back to the person and read by the model, so nothing hidden stays in it
+  const name =
+    removeHidden(part.filename ?? "")
+      .replace(/\p{Cc}/gu, "")
+      .split(/[/\\]/)
+      .pop()
+      ?.slice(0, 120) || "documento.pdf";
+
+  return { name, bytes };
+}
+
+/**
  * Registers the chat routes: streamed and plain turns, conversations and ratings
  *
  * @param   app      Fastify instance
@@ -63,6 +114,8 @@ export default async function chatRoutes(
   options: ChatRoutesOptions,
 ): Promise<void> {
   const chatScope = { preHandler: [app.requireAuth, app.requireScope("chat.use")] };
+  await app.register(multipart, { limits: { files: 1, fileSize: MAX_UPLOAD_BYTES, fields: 0 } });
+  const receiving = new Set<number>();
 
   const userOf = (request: { authUser: ChatUser | null }): ChatUser => {
     const user = request.authUser;
@@ -178,6 +231,56 @@ export default async function chatRoutes(
     const { type: _type, ...data } = done;
 
     return { ok: true, data: { ...data, userMessageId } };
+  });
+
+  // The file stays in memory for its owner; the model reads it with read_pdf
+  app.post("/chat/upload", chatScope, async (request, reply) => {
+    const uploads = options.uploads;
+    if (!uploads) {
+      return reply.code(503).send({ ok: false, error: "uploads_off" });
+    }
+    const userId = userOf(request).id;
+    // Room is checked before the file is read, and each person sends one at a time, so a burst of
+    // uploads never holds more memory than the store would accept
+    if (receiving.has(userId)) {
+      return reply.code(429).send({
+        ok: false,
+        error: "upload_in_progress",
+        message: "Espera a que termine de subir el PDF anterior",
+      });
+    }
+    const refusal = uploads.refusal(userId, MAX_UPLOAD_BYTES);
+    if (refusal) {
+      return reply.code(429).send({
+        ok: false,
+        error: "uploads_full",
+        message:
+          refusal === "person"
+            ? "Ya tienes varios PDF abiertos; cada uno se libera media hora después de su último uso"
+            : "Hay demasiados PDF abiertos en este momento; vuelve a intentarlo en unos minutos",
+      });
+    }
+    receiving.add(userId);
+    try {
+      const read = await readPdf(request);
+      if ("error" in read) {
+        return reply
+          .code(read.status)
+          .send({ ok: false, error: read.error, message: read.message });
+      }
+      const id = uploads.put(userId, read);
+      if (!id) {
+        return reply.code(503).send({
+          ok: false,
+          error: "uploads_full",
+          message: "Hay demasiados archivos abiertos ahora; vuelve a intentarlo en unos minutos",
+        });
+      }
+
+      return { ok: true, data: { fileId: id, name: read.name, bytes: read.bytes.length } };
+    } finally {
+      receiving.delete(userId);
+    }
   });
 
   app.get("/chat/conversations", chatScope, async (request) => {
