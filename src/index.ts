@@ -94,6 +94,7 @@ const app = await buildApp({
   ),
   systems: loadExternalSystems(env.EXTERNAL_SYSTEMS_FILE),
   passwordReset: { mailer, publicBaseUrl, assistantName: env.ASSISTANT_NAME },
+  usage: { timeZone: env.APP_TIMEZONE },
   chat: {
     ...chat,
     mcpConfig: chatMcpConfig(database.db, mcpUrl),

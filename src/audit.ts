@@ -8,6 +8,8 @@ export interface AuditEvent {
   message: string;
   systemCode?: string | null;
   ip?: string | null;
+  // What changed, for whoever reviews the log later
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -25,6 +27,7 @@ export async function logAudit(db: Database, event: AuditEvent): Promise<void> {
       message: event.message,
       systemCode: event.systemCode ?? null,
       ipAddress: event.ip ?? null,
+      metadata: event.metadata ?? null,
     });
   } catch {
     // Logging is best effort

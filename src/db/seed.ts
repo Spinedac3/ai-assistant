@@ -13,7 +13,7 @@ const SCOPES = [
   },
   {
     code: "usage.read",
-    description: "Ver el uso del asistente y lo que se pregunta",
+    description: "Ver cuánto se usa el asistente (conteos, sin el contenido)",
     sensitive: true,
   },
   {
