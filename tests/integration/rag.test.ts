@@ -199,6 +199,32 @@ describe("rag", () => {
     expect(after.map((chunk) => chunk.text).join(" ")).toContain("30 días");
   });
 
+  it("never publishes half a document when a delete lands in the middle of an ingest", async () => {
+    // Performs the test.
+    class SlowSolr extends Solr {
+      override async add(core: string, documents: Array<Record<string, unknown>>): Promise<void> {
+        for (const document of documents) {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          await super.add(core, [document]);
+        }
+      }
+    }
+    const slow: Index = { ...index, solr: new SlowSolr(SOLR_URL) };
+    const steps = [1, 2, 3, 4, 5, 6]
+      .map((n) => `## Paso ${n}\n\n${"Texto del paso con instrucciones completas. ".repeat(3)}\n`)
+      .join("\n");
+    const ingest = ingestDocument(slow, document("RACE-V001", "general", steps));
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await Promise.all([ingest, removeDocument(index, "RACE-V001")]);
+    const left = await index.solr.query(index.cores.current, {
+      query: `doc_code:${escapeTerm("RACE-V001")}`,
+      limit: 50,
+    });
+
+    // Performs assertions.
+    expect(left).toHaveLength(0);
+  });
+
   it("filters every result by the areas the person can read", async () => {
     // Performs the test.
     const general = await searchDocuments(index, GENERAL, "hospedaje viaje de trabajo", 50);

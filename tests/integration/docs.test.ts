@@ -337,6 +337,56 @@ describe("docs", () => {
     await drainQueue();
   });
 
+  it("keeps the connection usable after refusing a markdown over 2 MB", async () => {
+    // Performs the test.
+    const address = await app.listen({ port: 0, host: "127.0.0.1" });
+    const send = async (contents: string) => {
+      const form = new FormData();
+      form.append("document", new Blob([contents]), "doc.md");
+
+      return fetch(`${address}/docs`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${adminToken}` },
+        body: form,
+        signal: AbortSignal.timeout(5_000),
+      });
+    };
+    const large = await send(`${markdown("BIG-V001")}${"relleno ".repeat(600_000)}`);
+    const statuses = [large.status];
+    for (const code of ["NEXT-V001", "LAST-V001"]) {
+      statuses.push((await send(markdown(code))).status);
+    }
+    await drainQueue();
+
+    // Performs assertions.
+    expect(statuses).toEqual([413, 202, 202]);
+  });
+
+  it("does not bring back a document deleted while it was being indexed", async () => {
+    // Performs the test.
+    await upload(adminToken, { document: markdown("GONE-V001") });
+    const job = await claimNext(database.db);
+    // The delete arrives right after the worker read the markdown
+    const deleting = Object.create(storage) as DocumentStorage;
+    deleting.readMarkdown = async (code: string) => {
+      const text = await storage.readMarkdown(code);
+      await storage.remove(code);
+      return text;
+    };
+    if (job) {
+      await runJob({ db: database.db, storage: deleting, index, logger: silent }, job);
+    }
+    const found = await app.inject({
+      url: "/docs",
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+
+    // Performs assertions.
+    expect(found.json().data.map((doc: { doc_code: string }) => doc.doc_code)).not.toContain(
+      "GONE-V001",
+    );
+  });
+
   it("refuses to roll a document back to an older version", async () => {
     // Performs the test.
     await upload(adminToken, { document: markdown("FAM-V002") });
