@@ -29,6 +29,13 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Solr needs the versioned configset from the checkout, so it starts here and not as a service
+      - run: docker compose up -d solr minio
+      - run: |
+          for i in $(seq 1 60); do
+            curl -sf "http://localhost:8983/solr/docs/admin/ping" > /dev/null && break
+            sleep 2
+          done
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test:integration
