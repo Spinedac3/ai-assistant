@@ -230,6 +230,7 @@ export function toolFrom(
   zone: string | null,
 ): Tool {
   const timeZone = tool.spec.time_zone ?? zone ?? deps.appTimeZone;
+  const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
 
   return {
     definition: {
@@ -259,11 +260,12 @@ export function toolFrom(
         pasted = checked.sql;
       }
 
-      const query = buildQuery(tool.spec, source.info.engine, pasted, args);
+      const query = buildQuery(tool.spec, source.info.engine, pasted, args, kinds);
       try {
         const result = await runQuery(source.info, query.sql, query.params, {
           timeoutMs: QUERY_TIMEOUT_MS,
           maxRows: MAX_ROWS,
+          timeZone,
         });
         const rows = normalizeRows(result);
 

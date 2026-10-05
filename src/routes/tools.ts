@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
@@ -11,6 +11,7 @@ import {
   findDefinition,
   type StoredTool,
   saveDefinition,
+  shapeOf,
 } from "../creator/store.js";
 import {
   type CreatedToolDependencies,
@@ -21,6 +22,7 @@ import {
 } from "../creator/tool.js";
 import type { Database } from "../db/client.js";
 import { toolDefinitions } from "../db/schema.js";
+import { oneAtATime } from "../lib/oneAtATime.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
 import { ToolRegistry } from "../tools/registry.js";
 
@@ -122,9 +124,17 @@ export default async function toolsRoutes(
       return [{ name: "runs", ok: false, detail: pasted.message }];
     }
 
-    return runChecks(
-      { name: tool.name, sourceCode: tool.sourceCode, spec: tool.spec, columns: tool.columns },
-      runnerFor(source.info, tool.spec.base, pasted?.sql ?? null, CHECK_LIMITS),
+    const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
+    const limits = {
+      ...CHECK_LIMITS,
+      timeZone: tool.spec.time_zone ?? source.timeZone ?? options.appTimeZone,
+    };
+    // Checks read the source several times; one set at a time per source keeps it answering
+    return oneAtATime(`checks:${tool.sourceCode}`, () =>
+      runChecks(
+        shapeOf(tool),
+        runnerFor(source.info, tool.spec.base, pasted?.sql ?? null, limits, kinds),
+      ),
     );
   };
 
@@ -151,12 +161,7 @@ export default async function toolsRoutes(
       return reply;
     }
     const { tool, zone } = found;
-    const shaped = {
-      name: tool.name,
-      sourceCode: tool.sourceCode,
-      spec: tool.spec,
-      columns: tool.columns,
-    };
+    const shaped = shapeOf(tool);
 
     return {
       ok: true,
@@ -292,19 +297,14 @@ export default async function toolsRoutes(
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: "invalid_body" });
     }
-    const { tool, zone } = found;
-    const trial = new ToolRegistry(db);
-    trial.register(
-      toolFrom(
-        { name: tool.name, sourceCode: tool.sourceCode, spec: tool.spec, columns: tool.columns },
-        options,
-        zone,
-      ),
-    );
     const user = request.authUser;
     if (!user) {
       return reply.code(401).send({ ok: false });
     }
+    const { tool, zone } = found;
+    const trial = new ToolRegistry(db);
+    trial.useLogger(request.log);
+    trial.register(toolFrom(shapeOf(tool), options, zone));
     const outcome = await trial.execute(
       tool.name,
       body.data.args,
@@ -330,14 +330,25 @@ export default async function toolsRoutes(
       });
     }
 
+    // Only the version that was checked: a save in the meantime leaves it a draft
     const [published] = await db
       .update(toolDefinitions)
       .set({ status: "published", publishedAt: new Date() })
-      .where(eq(toolDefinitions.name, found.tool.name))
+      .where(
+        and(
+          eq(toolDefinitions.name, found.tool.name),
+          eq(toolDefinitions.updatedAt, found.tool.updatedAt),
+        ),
+      )
       .returning();
-    if (published) {
-      created.sync(published, found.zone);
+    if (!published) {
+      return reply.code(409).send({
+        ok: false,
+        error: "changed_while_checking",
+        message: "La herramienta cambió mientras se chequeaba; vuelve a publicarla",
+      });
     }
+    created.sync(published, found.zone);
     await logAudit(db, {
       userId: request.authUser?.id ?? null,
       level: "info",

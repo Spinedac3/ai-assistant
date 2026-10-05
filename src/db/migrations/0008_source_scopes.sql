@@ -6,6 +6,8 @@ ON CONFLICT ("code") DO NOTHING;
 --> statement-breakpoint
 INSERT INTO "role_scopes" ("role_id", "scope_id")
 SELECT "roles"."id", "scopes"."id"
-FROM "roles" JOIN "scopes" ON "scopes"."code" LIKE 'sources.%.use'
+FROM "roles"
+JOIN "sources" ON true
+JOIN "scopes" ON "scopes"."code" = 'sources.' || "sources"."code" || '.use'
 WHERE "roles"."code" = 'admin'
 ON CONFLICT DO NOTHING;

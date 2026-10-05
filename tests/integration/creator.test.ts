@@ -67,7 +67,10 @@ async function onEveryEngine(
     if (pasted && !pasted.ok) {
       throw new Error(pasted.message);
     }
-    const query = buildQuery(spec, engine, pasted?.sql ?? null, args);
+    const info = DEMO_ENGINES[engine].reader;
+    const columns = await describeBase(info, spec.base, pasted?.sql ?? null, LIMITS);
+    const kinds = new Map(columns.map((column) => [column.name, column.kind]));
+    const query = buildQuery(spec, engine, pasted?.sql ?? null, args, kinds);
     found[engine] = normalizeRows(
       await runQuery(DEMO_ENGINES[engine].reader, query.sql, query.params, LIMITS),
     );
@@ -365,7 +368,7 @@ describe("creator on the demo engines", () => {
         const columns = await describeBase(info, spec.base, sql, LIMITS);
         const results = await runChecks(
           { name: "entregas", sourceCode: `demo-${engine}`, spec, columns },
-          runnerFor(info, spec.base, sql, LIMITS),
+          runnerFor(info, spec.base, sql, LIMITS, new Map(columns.map((c) => [c.name, c.kind]))),
         );
         outcomes[`${engine} ${index}`] = results.map((result) => [
           result.name,
@@ -385,5 +388,128 @@ describe("creator on the demo engines", () => {
         ["range_splits", true, false],
       ]);
     }
+  });
+
+  it("reads Postgres dates that carry a zone in the zone the tool declares", async () => {
+    // Performs the test.
+    const result = await runQuery(
+      DEMO_ENGINES.postgres.reader,
+      "select '2026-01-01 00:00:00+00'::timestamptz as momento",
+      [],
+      { ...LIMITS, timeZone: "America/Guatemala" },
+    );
+
+    // Performs assertions.
+    expect(result.rows[0]?.momento).toBe("2025-12-31 18:00:00-06");
+  });
+
+  it("loads every stored tool it can, leaving out one that no longer reads right", async () => {
+    // Performs the test.
+    const engine = available[0] as EngineName;
+    const registry = new ToolRegistry(database.db);
+    const created = new CreatedTools(registry, { db: database.db, secrets, appTimeZone: "UTC" });
+    const good = definitionSchema.parse({
+      base: { kind: "table", name: "pedidos" },
+      columns: [{ name: "id" }],
+      meaning,
+    });
+    for (const name of ["rota_carga", "buena_carga"]) {
+      await saveDefinition(database.db, {
+        name,
+        sourceCode: `demo-${engine}`,
+        spec: good,
+        columns: [{ name: "id", kind: "number" }],
+        userId: 1,
+      });
+    }
+    // A definition stored before its shape changed
+    await database.db
+      .update(toolDefinitions)
+      .set({ status: "published", spec: { base: { kind: "table" } } as never })
+      .where(eq(toolDefinitions.name, "rota_carga"));
+    await database.db
+      .update(toolDefinitions)
+      .set({ status: "published" })
+      .where(eq(toolDefinitions.name, "buena_carga"));
+    const loaded = await created.load();
+    await database.db.delete(toolDefinitions).where(eq(toolDefinitions.name, "rota_carga"));
+    await database.db.delete(toolDefinitions).where(eq(toolDefinitions.name, "buena_carga"));
+
+    // Performs assertions.
+    expect(registry.has("buena_carga")).toBe(true);
+    expect(registry.has("rota_carga")).toBe(false);
+    expect(loaded).toBeGreaterThanOrEqual(1);
+  });
+
+  it("never takes over a permission someone made by hand for a new source's name", async () => {
+    // Performs the test.
+    const engine = available[0] as EngineName;
+    await database.db
+      .insert(scopes)
+      .values({ code: "sources.ajena.use", description: "Hecho a mano", sensitive: false });
+    const saved = await saveSource(
+      database.db,
+      secrets,
+      { code: "ajena", name: "Ajena", ...DEMO_ENGINES[engine].reader },
+      1,
+    );
+    const [scope] = await database.db
+      .select()
+      .from(scopes)
+      .where(eq(scopes.code, "sources.ajena.use"));
+
+    // Performs assertions.
+    expect(saved).toEqual({ saved: false });
+    expect(scope?.description).toBe("Hecho a mano");
+  });
+
+  it("sends a source's published tools back to drafts when it points to another database", async () => {
+    // Performs the test.
+    const engine = available[0] as EngineName;
+    const reader = DEMO_ENGINES[engine].reader;
+    await saveSource(database.db, secrets, { code: "movida", name: "Movida", ...reader }, 1);
+    const registry = new ToolRegistry(database.db);
+    const created = new CreatedTools(registry, { db: database.db, secrets, appTimeZone: "UTC" });
+    await saveDefinition(database.db, {
+      name: "movida_pedidos",
+      sourceCode: "movida",
+      spec: definitionSchema.parse({
+        base: { kind: "table", name: "pedidos" },
+        columns: [{ name: "id" }],
+        meaning,
+      }),
+      columns: [{ name: "id", kind: "number" }],
+      userId: 1,
+    });
+    await database.db
+      .update(toolDefinitions)
+      .set({ status: "published" })
+      .where(eq(toolDefinitions.name, "movida_pedidos"));
+    await created.load();
+    const zoneOnly = await saveSource(
+      database.db,
+      secrets,
+      { code: "movida", name: "Movida", ...reader, timeZone: "America/Guatemala" },
+      1,
+    );
+    const moved = await saveSource(
+      database.db,
+      secrets,
+      { code: "movida", name: "Movida", ...reader, database: "otra" },
+      1,
+    );
+    await created.sourceChanged("movida", moved.saved && moved.retargeted);
+    const [after] = await database.db
+      .select()
+      .from(toolDefinitions)
+      .where(eq(toolDefinitions.name, "movida_pedidos"));
+    await database.db.delete(toolDefinitions).where(eq(toolDefinitions.sourceCode, "movida"));
+    await deleteSource(database.db, "movida");
+
+    // Performs assertions.
+    expect(zoneOnly).toEqual({ saved: true, retargeted: false });
+    expect(moved).toEqual({ saved: true, retargeted: true });
+    expect(after?.status).toBe("draft");
+    expect(registry.has("movida_pedidos")).toBe(false);
   });
 });

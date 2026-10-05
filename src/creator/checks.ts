@@ -1,5 +1,10 @@
 import { Ajv } from "ajv";
-import { type ConnectionInfo, type QueryLimits, runQuery } from "../sources/engines.js";
+import {
+  type ColumnKind,
+  type ConnectionInfo,
+  type QueryLimits,
+  runQuery,
+} from "../sources/engines.js";
 import { normalizeRows } from "./columns.js";
 import type { ToolDefinitionSpec } from "./definition.js";
 import { buildQuery, paramName, sampleQuery } from "./sql.js";
@@ -17,12 +22,13 @@ export interface CheckResult {
 
 export interface Runner {
   run(spec: ToolDefinitionSpec, args: Record<string, unknown>): Promise<Row[]>;
-  sample(columns: string[]): Promise<Row[]>;
+  // Values of a column, none of them empty
+  sample(column: string): Promise<unknown[]>;
 }
 
-// Enough rows to find a value for every filter without reading the whole base
-const SAMPLE_ROWS = 200;
-const DATE_ONLY = /^\d{4}-\d{2}-\d{2}/;
+// Enough values to find one for every filter without reading the whole base
+const SAMPLE_ROWS = 50;
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86_400_000;
 
 /**
@@ -32,6 +38,7 @@ const DAY_MS = 86_400_000;
  * @param   base    Base of the definition
  * @param   pasted  Checked pasted query, when the base is one
  * @param   limits  Timeout and rows
+ * @param   kinds   What each column of the base holds
  *
  * @return  The runner
  */
@@ -40,82 +47,60 @@ export function runnerFor(
   base: ToolDefinitionSpec["base"],
   pasted: string | null,
   limits: QueryLimits,
+  kinds: ReadonlyMap<string, ColumnKind>,
 ): Runner {
   return {
     run: async (spec, args) => {
-      const query = buildQuery(spec, info.engine, pasted, args);
+      const query = buildQuery(spec, info.engine, pasted, args, kinds);
       return normalizeRows(await runQuery(info, query.sql, query.params, limits));
     },
-    sample: async (columns) => {
-      const sql = sampleQuery(base, info.engine, pasted, columns, SAMPLE_ROWS);
-      return normalizeRows(await runQuery(info, sql, [], limits));
+    sample: async (column) => {
+      const sql = sampleQuery(base, info.engine, pasted, column, SAMPLE_ROWS);
+      const rows = normalizeRows(await runQuery(info, sql, [], limits));
+      return rows.map((row) => row[column]).filter((value) => value !== "");
     },
   };
 }
 
 /**
- * Picks the value of a filter from the rows of a sample, written as its operator takes it
+ * Picks the value of a filter from sample values, written as its operator takes it
  *
- * @param   filter  Filter
+ * @param   op      Operator
  * @param   kind    What its column holds
- * @param   rows    Sample rows
+ * @param   values  Sample values, none empty
  *
- * @return  The argument, or undefined when the sample has no value for it
+ * @return  The argument, or undefined when there is no value to try
  */
-function sampleArgument(
-  filter: ToolDefinitionSpec["filters"][number],
-  kind: string,
-  rows: Row[],
-): unknown {
-  const values = rows
-    .map((row) => row[filter.column])
-    .filter((value) => value !== null && value !== undefined && value !== "");
-  const first = values[0];
-  if (filter.op === "empty") {
+function sampleArgument(op: string, kind: ColumnKind, values: unknown[]): unknown {
+  if (op === "empty") {
     return false;
   }
+  const dated = kind === "date" || kind === "datetime";
+  // A date is asked for by its day, the way a person asks
+  const plain = values.map((value) =>
+    dated && typeof value === "string" ? value.slice(0, 10) : value,
+  );
+  const first = plain[0];
   if (first === undefined) {
     return undefined;
   }
 
-  // A date is asked for by its day, the way a person asks
-  const plain = (value: unknown) =>
-    (kind === "date" || kind === "datetime") && typeof value === "string"
-      ? value.slice(0, 10)
-      : value;
-  switch (filter.op) {
+  switch (op) {
     case "between": {
-      const sorted = values.map(plain).sort((a, b) => (String(a) < String(b) ? -1 : 1));
-      return kind === "number"
-        ? [Math.min(...(values as number[])), Math.max(...(values as number[]))]
-        : [sorted[0], sorted[sorted.length - 1]];
+      const sorted = [...plain].sort((a, b) =>
+        kind === "number" ? Number(a) - Number(b) : String(a) < String(b) ? -1 : 1,
+      );
+      return [sorted[0], sorted[sorted.length - 1]];
     }
     case "in":
-      return [plain(first)];
+      return [first];
     case "contains": {
       const text = String(first);
       return text.length > 0 ? text.slice(0, Math.min(3, text.length)) : undefined;
     }
     default:
-      return plain(first);
+      return first;
   }
-}
-
-/**
- * Counts the rows of a list by their content, to compare lists as bags
- *
- * @param   rows  Rows
- *
- * @return  How many times each row appears
- */
-function bag(rows: Row[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const row of rows) {
-    const key = JSON.stringify(row);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-
-  return counts;
 }
 
 /**
@@ -131,10 +116,32 @@ function addDays(day: string, days: number): string {
 }
 
 /**
+ * Runs a check, turning any failure of the source into a failed check with its reason
+ *
+ * @param   name  Check
+ * @param   work  The check itself
+ *
+ * @return  Its result
+ */
+async function guarded(
+  name: CheckResult["name"],
+  work: () => Promise<CheckResult>,
+): Promise<CheckResult> {
+  try {
+    return await work();
+  } catch (error) {
+    return { name, ok: false, detail: `No se pudo probar: ${(error as Error).message}` };
+  }
+}
+
+/**
  * Runs the automatic checks of a tool: that it runs, that its result has its declared shape, and
  * three properties that hold for any correct query whatever the data, so a check needs no
- * expected answer: a filter only removes rows, the sums of the groups add up to the total, and a
- * range split in two halves holds the rows of the whole
+ * expected answer: a filter only removes rows, the sums of the groups add up to the total, and the
+ * two halves of a range hold the rows of the whole
+ *
+ * They compare counts and sums the source computes, so a base of any size is checked without
+ * bringing its rows over.
  *
  * @param   tool    Created tool
  * @param   runner  Runs variants of the definition and reads samples
@@ -144,14 +151,21 @@ function addDays(day: string, days: number): string {
 export async function runChecks(tool: CreatedTool, runner: Runner): Promise<CheckResult[]> {
   const { spec } = tool;
   const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
-  const filterColumns = [...new Set(spec.filters.map((filter) => filter.column))];
-  const sample = filterColumns.length > 0 ? await runner.sample(filterColumns) : [];
-  const values = new Map(
-    spec.filters.map((filter) => [
-      filter.column,
-      sampleArgument(filter, kinds.get(filter.column) ?? "text", sample),
-    ]),
-  );
+
+  const values = new Map<string, unknown>();
+  try {
+    for (const filter of spec.filters) {
+      const kind = kinds.get(filter.column) ?? "text";
+      values.set(
+        filter.column,
+        sampleArgument(filter.op, kind, await runner.sample(filter.column)),
+      );
+    }
+  } catch (error) {
+    return [
+      { name: "runs", ok: false, detail: `No se pudo leer la base: ${(error as Error).message}` },
+    ];
+  }
 
   const missing = spec.filters.filter((f) => f.required && values.get(f.column) === undefined);
   if (missing.length > 0) {
@@ -159,7 +173,7 @@ export async function runChecks(tool: CreatedTool, runner: Runner): Promise<Chec
       {
         name: "runs",
         ok: false,
-        detail: `No hay datos para probar los filtros obligatorios: ${missing.map((f) => f.column).join(", ")}`,
+        detail: `La base no tiene datos para probar los filtros obligatorios: ${missing.map((f) => f.column).join(", ")}`,
       },
     ];
   }
@@ -169,55 +183,61 @@ export async function runChecks(tool: CreatedTool, runner: Runner): Promise<Chec
       .map((filter) => [paramName(filter.column), values.get(filter.column)]),
   );
 
-  const results: CheckResult[] = [];
+  // Counting runs on the plain rows, before any summary
+  const counted: ToolDefinitionSpec = {
+    ...spec,
+    summary: { group_by: [], aggregates: [{ fn: "count", as: "filas" }] },
+    order_by: [],
+  };
+  const count = async (args: Record<string, unknown>) =>
+    Number((await runner.run(counted, args))[0]?.filas ?? 0);
+
   let rows: Row[];
   try {
     rows = await runner.run(spec, base);
-    results.push({ name: "runs", ok: true, detail: `Corrió con ${rows.length} filas` });
+    // A tool over no rows passes every property and proves nothing
+    if ((await count(base)) === 0) {
+      return [
+        { name: "runs", ok: false, detail: "La base no tiene filas con que probar la herramienta" },
+      ];
+    }
   } catch (error) {
     return [{ name: "runs", ok: false, detail: `No corrió: ${(error as Error).message}` }];
   }
 
   const validate = new Ajv({ strict: false }).compile(outputSchemaOf(tool));
   const shaped = validate({ filas: rows, total_filas: rows.length });
-  results.push({
-    name: "shape",
-    ok: shaped,
-    detail: shaped ? "La salida tiene la forma declarada" : new Ajv().errorsText(validate.errors),
-  });
 
-  // The properties are checked on the plain rows, before any summary
-  const detail: ToolDefinitionSpec = {
-    ...spec,
-    columns: tool.columns.map((column) => ({ name: column.name })),
-    summary: undefined,
-    order_by: [],
-  };
-
-  results.push(await filterShrinks(detail, runner, base, values));
-  results.push(await sumAddsUp(spec, runner, base));
-  results.push(await rangeSplits(detail, runner, base, values));
-
-  return results;
+  return [
+    { name: "runs", ok: true, detail: `Corrió con ${rows.length} filas` },
+    {
+      name: "shape",
+      ok: shaped,
+      detail: shaped ? "La salida tiene la forma declarada" : new Ajv().errorsText(validate.errors),
+    },
+    await guarded("filter_shrinks", () => filterShrinks(spec, count, base, values)),
+    await guarded("sum_adds_up", () => sumAddsUp(spec, runner, base)),
+    await guarded("range_splits", () => rangeSplits(spec, count, base, kinds, values)),
+  ];
 }
 
 /**
  * Checks that each optional filter only removes rows from the result without it
  *
- * @param   detail  Definition without summary
- * @param   runner  Runner
+ * @param   spec    Definition
+ * @param   count   Counts the rows of a call
  * @param   base    Arguments of the required filters
  * @param   values  Sample value of each filter
  *
  * @return  The result
  */
 async function filterShrinks(
-  detail: ToolDefinitionSpec,
-  runner: Runner,
+  spec: ToolDefinitionSpec,
+  count: (args: Record<string, unknown>) => Promise<number>,
   base: Record<string, unknown>,
   values: Map<string, unknown>,
 ): Promise<CheckResult> {
-  const optional = detail.filters.filter((f) => !f.required && values.get(f.column) !== undefined);
+  const optional = spec.filters.filter((f) => !f.required && values.get(f.column) !== undefined);
   if (optional.length === 0) {
     return {
       name: "filter_shrinks",
@@ -227,13 +247,14 @@ async function filterShrinks(
     };
   }
 
-  const all = bag(await runner.run(detail, base));
+  const all = await count(base);
   const grown: string[] = [];
   for (const filter of optional) {
-    const filtered = bag(
-      await runner.run(detail, { ...base, [paramName(filter.column)]: values.get(filter.column) }),
-    );
-    if ([...filtered].some(([row, times]) => times > (all.get(row) ?? 0))) {
+    const filtered = await count({
+      ...base,
+      [paramName(filter.column)]: values.get(filter.column),
+    });
+    if (filtered > all) {
       grown.push(filter.column);
     }
   }
@@ -244,7 +265,7 @@ async function filterShrinks(
     detail:
       grown.length === 0
         ? `Cada filtro solo quitó filas (${optional.length} probados)`
-        : `Al filtrar por ${grown.join(", ")} aparecieron filas que sin el filtro no estaban`,
+        : `Al filtrar por ${grown.join(", ")} hubo más filas que sin el filtro`,
   };
 }
 
@@ -295,30 +316,35 @@ async function sumAddsUp(
 }
 
 /**
- * Checks that a range split in two halves holds the same rows as the whole range
+ * Checks that two halves of a range hold the rows of the whole range
  *
- * @param   detail  Definition without summary
- * @param   runner  Runner
+ * Days split into halves that meet without overlap, which also catches a source that drops the
+ * last day of every range. Numbers may have decimals between any two, so their halves share the
+ * middle and it is counted once.
+ *
+ * @param   spec    Definition
+ * @param   count   Counts the rows of a call
  * @param   base    Arguments of the required filters
+ * @param   kinds   What each column holds
  * @param   values  Sample value of each filter
  *
  * @return  The result
  */
 async function rangeSplits(
-  detail: ToolDefinitionSpec,
-  runner: Runner,
+  spec: ToolDefinitionSpec,
+  count: (args: Record<string, unknown>) => Promise<number>,
   base: Record<string, unknown>,
+  kinds: Map<string, ColumnKind>,
   values: Map<string, unknown>,
 ): Promise<CheckResult> {
-  // Halves that meet without overlap are only exact on days and whole numbers
-  const range = detail.filters.find((filter) => {
+  const range = spec.filters.find((filter) => {
+    const kind = kinds.get(filter.column);
     const value = values.get(filter.column) as [unknown, unknown] | undefined;
     return (
       filter.op === "between" &&
+      (kind === "number" || kind === "date" || kind === "datetime") &&
       value !== undefined &&
-      value[0] !== value[1] &&
-      (DATE_ONLY.test(String(value[0])) ||
-        (Number.isInteger(value[0]) && Number.isInteger(value[1])))
+      value[0] !== value[1]
     );
   });
   if (!range) {
@@ -326,28 +352,28 @@ async function rangeSplits(
       name: "range_splits",
       ok: true,
       skipped: true,
-      detail: "No hay un rango de fechas o enteros para partir",
+      detail: "No hay un rango de números o fechas para partir",
     };
   }
 
   const [low, high] = values.get(range.column) as [string | number, string | number];
-  const days = typeof low === "string";
+  const days = typeof low === "string" && DATE_ONLY.test(low);
   const middle = days
     ? addDays(low, Math.floor((Date.parse(String(high)) - Date.parse(low)) / DAY_MS / 2))
-    : Math.floor(((low as number) + (high as number)) / 2);
-  const after = days ? addDays(String(middle), 1) : (middle as number) + 1;
+    : ((low as number) + (high as number)) / 2;
   const name = paramName(range.column);
-  const count = async (from: unknown, to: unknown) =>
-    (await runner.run(detail, { ...base, [name]: [from, to] })).length;
-  const whole = await count(low, high);
-  const halves = (await count(low, middle)) + (await count(after, high));
+  const span = (from: unknown, to: unknown) => count({ ...base, [name]: [from, to] });
+  const whole = await span(low, high);
+  const next = days ? addDays(String(middle), 1) : middle;
+  const halves =
+    (await span(low, middle)) + (await span(next, high)) - (days ? 0 : await span(middle, middle));
 
   return {
     name: "range_splits",
     ok: whole === halves,
     detail:
       whole === halves
-        ? `${range.column}: ${low}–${middle} y ${after}–${high} suman las ${whole} filas del rango entero`
+        ? `${range.column}: ${low}–${middle} y ${next}–${high} suman las ${whole} filas del rango entero`
         : `${range.column}: las mitades suman ${halves} filas y el rango entero tiene ${whole}`,
   };
 }

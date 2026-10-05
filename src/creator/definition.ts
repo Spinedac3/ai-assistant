@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { timeZone } from "../sources/registry.js";
 import { paramName } from "./sql.js";
 
 // Also the name the model calls; lowercase so it reads the same on every client
@@ -89,7 +90,7 @@ export const definitionSchema = z
       .array(z.object({ column: z.string().min(1), direction: z.enum(["asc", "desc"]) }).strict())
       .default([]),
     // Zone of the dates without one; absent, the source's applies
-    time_zone: z.string().min(1).optional(),
+    time_zone: timeZone.optional(),
     meaning: z
       .object({
         definition: z.string().trim().min(1),
@@ -128,6 +129,12 @@ export const definitionSchema = z
       if (!columns.includes(column)) {
         issue(`Se agrupa por ${column}, que no está entre las columnas`);
       }
+    }
+
+    // Each column of the result needs a name of its own
+    const named = [...(summary?.group_by ?? []), ...(summary?.aggregates ?? []).map((a) => a.as)];
+    if (new Set(named).size !== named.length) {
+      issue("Cada agregado necesita un nombre que no repita otra columna del resultado");
     }
 
     // The result has the grouped columns and the aggregates, or the plain columns

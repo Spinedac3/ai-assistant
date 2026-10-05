@@ -18,6 +18,8 @@ export interface QueryLimits {
   timeoutMs: number;
   // Rows read before giving up; the query is cut, never loaded whole into memory
   maxRows: number;
+  // Zone in which Postgres reads and shows the dates that carry one; the session's otherwise
+  timeZone?: string;
 }
 
 // What a column holds, read from the engine's own type and not from the values
@@ -50,7 +52,6 @@ const PG_KINDS: Record<number, ColumnKind> = {
   23: "number",
   700: "number",
   701: "number",
-  790: "number",
   1700: "number",
   16: "boolean",
   1082: "date",
@@ -164,6 +165,9 @@ async function postgresQuery(
 
   try {
     await client.query("BEGIN READ ONLY");
+    if (limits.timeZone) {
+      await client.query("SELECT set_config('TimeZone', $1, true)", [limits.timeZone]);
+    }
     const rows: Array<Record<string, unknown>> = [];
     let columns: string[] = [];
     let kinds: Record<string, ColumnKind> = {};
@@ -270,10 +274,12 @@ async function mysqlQuery(
           kinds = Object.fromEntries(
             (fields ?? []).map((field) => {
               const type = field.type ?? field.columnType ?? -1;
-              // MySQL stores a boolean as a one-digit tinyint
+              // MySQL stores a boolean as a one-digit tinyint or a one-bit field
               return [
                 field.name,
-                type === 1 && field.columnLength === 1 ? "boolean" : (MYSQL_KINDS[type] ?? "text"),
+                (type === 1 || type === 16) && field.columnLength === 1
+                  ? "boolean"
+                  : (MYSQL_KINDS[type] ?? "text"),
               ];
             }),
           );
@@ -339,7 +345,8 @@ async function mssqlQuery(
 
   try {
     await transaction.begin();
-    await new mssql.Request(transaction).query("SET XACT_ABORT ON");
+    // Dates in YYYY-MM-DD read the same whatever language the login has
+    await new mssql.Request(transaction).query("SET XACT_ABORT ON; SET DATEFORMAT ymd");
     const request = new mssql.Request(transaction);
     request.stream = true;
     for (const [position, value] of params.entries()) {

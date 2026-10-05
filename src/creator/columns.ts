@@ -58,9 +58,13 @@ export function normalizeRows(result: QueryResult): Array<Record<string, unknown
         copy[column] = Number(copy[column]);
       }
     }
+    // MySQL gives a one-bit field as a one-byte buffer
     for (const column of flags) {
-      if (typeof copy[column] === "number") {
-        copy[column] = copy[column] !== 0;
+      const value = copy[column];
+      if (typeof value === "number") {
+        copy[column] = value !== 0;
+      } else if (Buffer.isBuffer(value)) {
+        copy[column] = value[0] !== 0;
       }
     }
     return copy;

@@ -14,7 +14,8 @@ import { type ConnectionInfo, writeAbilities } from "./engines.js";
 
 const DEFAULT_PORTS = { postgres: 5432, mysql: 3306, mssql: 1433 } as const;
 
-const zone = z
+// An IANA zone, as the engines and Intl read it
+export const timeZone = z
   .string()
   .refine((value) => Intl.supportedValuesOf("timeZone").includes(value) || value === "UTC", {
     message: "zona horaria IANA desconocida",
@@ -42,7 +43,7 @@ export const sourceInput = z.object({
   database: z.string().trim().min(1).max(128),
   username: z.string().trim().min(1).max(128),
   password: z.string().min(1).max(512),
-  timeZone: zone.nullable().optional(),
+  timeZone: timeZone.nullable().optional(),
   tls: z.boolean().default(true),
 });
 
@@ -169,13 +170,16 @@ export function connectionOf(input: SourceInput): ConnectionInfo {
  * @param   secrets  Vault
  * @param   input    Source fields
  * @param   userId   Who registers it
+ *
+ * @return  Saved, and whether it now points elsewhere; or refused because its permission's name
+ *          already belongs to a permission someone made by hand
  */
 export async function saveSource(
   db: Database,
   secrets: Secrets,
   input: SourceInput,
   userId: number,
-): Promise<void> {
+): Promise<{ saved: true; retargeted: boolean } | { saved: false }> {
   const info = connectionOf(input);
   const values = {
     name: input.name,
@@ -189,7 +193,18 @@ export async function saveSource(
     tls: input.tls,
   };
 
-  await db.transaction(async (tx) => {
+  return db.transaction(async (tx) => {
+    const [before] = await tx.select().from(sources).where(eq(sources.code, input.code));
+    // A new source never takes over a permission that exists already: the roles holding it
+    // would reach this source's data without anyone granting it
+    const [taken] = await tx
+      .select({ id: scopes.id })
+      .from(scopes)
+      .where(eq(scopes.code, sourceScope(input.code)));
+    if (!before && taken) {
+      return { saved: false } as const;
+    }
+
     await tx
       .insert(sources)
       .values({ ...values, code: input.code, createdBy: userId })
@@ -212,6 +227,15 @@ export async function saveSource(
         .values({ roleId: admin.id, scopeId: scope.id })
         .onConflictDoNothing();
     }
+
+    const retargeted =
+      before !== undefined &&
+      (before.engine !== values.engine ||
+        before.host !== values.host ||
+        before.port !== values.port ||
+        before.database !== values.database);
+
+    return { saved: true, retargeted } as const;
   });
 }
 
@@ -292,21 +316,29 @@ export async function deleteSource(
     return "in_use";
   }
 
-  return db.transaction(async (tx) => {
-    const removed = await tx
-      .delete(sources)
-      .where(eq(sources.code, code))
-      .returning({ id: sources.id });
-    // Its permission goes too, with every grant of it, so no role keeps a scope that means nothing
-    const [scope] = await tx
-      .delete(scopes)
-      .where(eq(scopes.code, sourceScope(code)))
-      .returning({ id: scopes.id });
-    if (scope) {
-      await tx.delete(roleScopes).where(eq(roleScopes.scopeId, scope.id));
-      await tx.delete(userExtraScopes).where(eq(userExtraScopes.scopeId, scope.id));
-    }
+  // A tool made between the count and the delete is caught by the foreign key
+  return db
+    .transaction(async (tx) => {
+      const removed = await tx
+        .delete(sources)
+        .where(eq(sources.code, code))
+        .returning({ id: sources.id });
+      // Its permission goes too, with every grant of it, so no role keeps a scope that means nothing
+      const [scope] = await tx
+        .delete(scopes)
+        .where(eq(scopes.code, sourceScope(code)))
+        .returning({ id: scopes.id });
+      if (scope) {
+        await tx.delete(roleScopes).where(eq(roleScopes.scopeId, scope.id));
+        await tx.delete(userExtraScopes).where(eq(userExtraScopes.scopeId, scope.id));
+      }
 
-    return removed.length > 0 ? "deleted" : "missing";
-  });
+      return removed.length > 0 ? ("deleted" as const) : ("missing" as const);
+    })
+    .catch((error: { code?: string; cause?: { code?: string } }) => {
+      if ((error.cause?.code ?? error.code) === "23503") {
+        return "in_use" as const;
+      }
+      throw error;
+    });
 }

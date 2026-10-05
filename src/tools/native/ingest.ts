@@ -1,4 +1,5 @@
 import { logAudit } from "../../audit.js";
+import { oneAtATime } from "../../lib/oneAtATime.js";
 import { areaScope, DOC_CODE, parseDocument } from "../../rag/document.js";
 import { currentOfFamily, isCurrent } from "../../rag/ingest.js";
 import { enqueue, findJob } from "../../rag/jobs.js";
@@ -140,31 +141,6 @@ async function validate(
   };
 }
 
-// Parts of one document sent in parallel would each see the set complete; one at a time, the
-// last one gathers it once
-const uploading = new Map<string, Promise<unknown>>();
-
-/**
- * Runs the work of one person's document after the work already running for it
- *
- * @param   key   Person and document
- * @param   work  What to run
- *
- * @return  What the work returns
- */
-export async function oneAtATime<T>(key: string, work: () => Promise<T>): Promise<T> {
-  const previous = uploading.get(key) ?? Promise.resolve();
-  const current = previous.catch(() => {}).then(work);
-  uploading.set(key, current);
-  try {
-    return await current;
-  } finally {
-    if (uploading.get(key) === current) {
-      uploading.delete(key);
-    }
-  }
-}
-
 /**
  * Keeps a part of a document sent in pieces and, once all are in, puts the body together
  *
@@ -248,7 +224,9 @@ async function ingest(
     );
   }
 
-  return oneAtATime(`${context.userId}:${code}`, async () => {
+  // Parts of one document sent in parallel would each see the set complete; one at a time, the
+  // last one gathers it once
+  return oneAtATime(`ingest:${context.userId}:${code}`, async () => {
     let body = String(args.markdown);
     if (parts > 1) {
       const gathered = await gather(

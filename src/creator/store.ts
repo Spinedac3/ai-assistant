@@ -1,13 +1,24 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import type { Database } from "../db/client.js";
 import { sources, toolDefinitions } from "../db/schema.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { BaseColumn } from "./columns.js";
-import type { ToolDefinitionSpec } from "./definition.js";
-import { type CreatedToolDependencies, toolFrom } from "./tool.js";
+import { definitionSchema, type ToolDefinitionSpec } from "./definition.js";
+import { type CreatedTool, type CreatedToolDependencies, toolFrom } from "./tool.js";
 
 export type StoredTool = typeof toolDefinitions.$inferSelect;
+
+/**
+ * Gives a stored definition the shape the tool builder and the checks take
+ *
+ * @param   tool  Stored definition
+ *
+ * @return  The created tool
+ */
+export function shapeOf(tool: StoredTool): CreatedTool {
+  return { name: tool.name, sourceCode: tool.sourceCode, spec: tool.spec, columns: tool.columns };
+}
 
 /**
  * Reads one definition with the zone of its source
@@ -126,13 +137,7 @@ export class CreatedTools {
       return;
     }
 
-    this.registry.replace(
-      toolFrom(
-        { name: tool.name, sourceCode: tool.sourceCode, spec: tool.spec, columns: tool.columns },
-        this.deps,
-        zone,
-      ),
-    );
+    this.registry.replace(toolFrom(shapeOf(tool), this.deps, zone));
     this.own.add(tool.name);
   }
 
@@ -158,10 +163,46 @@ export class CreatedTools {
       .from(toolDefinitions)
       .innerJoin(sources, eq(sources.code, toolDefinitions.sourceCode))
       .where(eq(toolDefinitions.status, "published"));
+    let loaded = 0;
+    for (const { tool, zone } of rows) {
+      // One definition that no longer reads right stays out; the others still load
+      const spec = definitionSchema.safeParse(tool.spec);
+      try {
+        if (!spec.success) {
+          throw new Error(spec.error.issues.map((issue) => issue.message).join("; "));
+        }
+        this.sync({ ...tool, spec: spec.data }, zone);
+        loaded++;
+      } catch (error) {
+        this.logger?.error({ err: error, tool: tool.name }, "created tool could not load");
+      }
+    }
+
+    return loaded;
+  }
+
+  /**
+   * Follows a change to a source: its tools take its new zone, and when it now points to another
+   * engine or database they go back to drafts, since their columns may no longer be there
+   *
+   * @param   code        Source code
+   * @param   retargeted  Whether the engine, host or database changed
+   */
+  async sourceChanged(code: string, retargeted: boolean): Promise<void> {
+    if (retargeted) {
+      await this.deps.db
+        .update(toolDefinitions)
+        .set({ status: "draft", publishedAt: null, updatedAt: new Date() })
+        .where(and(eq(toolDefinitions.sourceCode, code), eq(toolDefinitions.status, "published")));
+    }
+
+    const rows = await this.deps.db
+      .select({ tool: toolDefinitions, zone: sources.timeZone })
+      .from(toolDefinitions)
+      .innerJoin(sources, eq(sources.code, toolDefinitions.sourceCode))
+      .where(eq(toolDefinitions.sourceCode, code));
     for (const { tool, zone } of rows) {
       this.sync(tool, zone);
     }
-
-    return rows.length;
   }
 }

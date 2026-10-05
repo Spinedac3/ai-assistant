@@ -1,4 +1,4 @@
-import type { EngineName } from "../sources/engines.js";
+import type { ColumnKind, EngineName } from "../sources/engines.js";
 import type { ToolDefinitionSpec } from "./definition.js";
 
 export interface BuiltQuery {
@@ -83,6 +83,7 @@ function nextDay(date: string): string {
  * @param   engine  Engine of the source
  * @param   base    Checked pasted query, when the base is one
  * @param   args    Filter values by parameter name; absent optional filters are left out
+ * @param   kinds   What each column of the base holds
  *
  * @return  The query and its parameters
  */
@@ -91,6 +92,7 @@ export function buildQuery(
   engine: EngineName,
   base: string | null,
   args: Record<string, unknown>,
+  kinds: ReadonlyMap<string, ColumnKind>,
 ): BuiltQuery {
   const params: unknown[] = [];
   const bind = (value: unknown) => {
@@ -113,8 +115,12 @@ export function buildQuery(
     }
 
     const column = quote(filter.column, engine);
-    // A bare date stands for the whole day, whatever hour the column holds
-    const day = typeof value === "string" && DATE_ONLY.test(value);
+    // On a date column a bare date stands for the whole day, whatever hour the column holds; on
+    // any other column the text is compared as written
+    const dated = ["date", "datetime"].includes(kinds.get(filter.column) ?? "text");
+    const isDay = (item: unknown): item is string =>
+      dated && typeof item === "string" && DATE_ONLY.test(item);
+    const day = isDay(value);
     switch (filter.op) {
       case "=":
         conditions.push(
@@ -146,20 +152,32 @@ export function buildQuery(
         break;
       case "between": {
         const [low, high] = value as [unknown, unknown];
-        const lastDay = typeof high === "string" && DATE_ONLY.test(high);
+        const lastDay = isDay(high);
         conditions.push(
           lastDay
-            ? `${column} >= ${bind(low)} AND ${column} < ${bind(nextDay(high))}`
+            ? `${column} >= ${bind(low)} AND ${column} < ${bind(nextDay(high as string))}`
             : `${column} BETWEEN ${bind(low)} AND ${bind(high)}`,
         );
         break;
       }
-      case "in":
-        conditions.push(`${column} IN (${(value as unknown[]).map(bind).join(", ")})`);
+      case "in": {
+        // Each bare date of the list stands for its whole day too
+        const days = (value as unknown[]).filter(isDay);
+        const exact = (value as unknown[]).filter((item) => !isDay(item));
+        const parts = [
+          ...(exact.length > 0 ? [`${column} IN (${exact.map(bind).join(", ")})`] : []),
+          ...days.map(
+            (item) => `(${column} >= ${bind(item)} AND ${column} < ${bind(nextDay(item))})`,
+          ),
+        ];
+        conditions.push(parts.length === 1 ? (parts[0] as string) : `(${parts.join(" OR ")})`);
         break;
+      }
       case "contains": {
-        // The value is searched as written: its own % and _ match themselves
-        const escaped = String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
+        // The value is searched as written: its own wildcards match themselves, and SQL Server
+        // also reads [ as one
+        const wildcards = engine === "mssql" ? /[\\%_[]/g : /[\\%_]/g;
+        const escaped = String(value).replace(wildcards, (char) => `\\${char}`);
         const like = engine === "postgres" ? "ILIKE" : "LIKE";
         // MySQL reads a backslash inside a string as an escape, so it writes the backslash twice
         const escapeMark = engine === "mysql" ? "'\\\\'" : "'\\'";
@@ -180,11 +198,12 @@ export function buildQuery(
         ...summary.group_by.map((column) => quote(column, engine)),
         ...summary.aggregates.map((aggregate) => {
           const column = aggregate.column ? quote(aggregate.column, engine) : "*";
-          // An average of whole numbers would be cut to a whole number in SQL Server
-          const expression =
-            aggregate.fn === "avg"
-              ? `AVG(CAST(${column} AS DECIMAL(38, 6)))`
-              : `${aggregate.fn.toUpperCase()}(${column})`;
+          // An average of whole numbers would be cut to a whole number in SQL Server, and a sum
+          // of them would overflow past two billion
+          const widened = aggregate.fn === "avg" || (aggregate.fn === "sum" && engine === "mssql");
+          const expression = widened
+            ? `${aggregate.fn.toUpperCase()}(CAST(${column} AS DECIMAL(38, 6)))`
+            : `${aggregate.fn.toUpperCase()}(${column})`;
           return `${expression} AS ${quote(aggregate.as, engine)}`;
         }),
       ]
@@ -207,13 +226,14 @@ export function buildQuery(
 }
 
 /**
- * Builds a query that reads a few rows of some columns of the base, to take sample values from
+ * Builds a query that reads a few values of one column of the base, skipping empty ones, to try
+ * the filters with
  *
- * @param   base     Base of the definition
- * @param   engine   Engine
- * @param   pasted   Checked pasted query, when the base is one
- * @param   columns  Columns to read
- * @param   rows     How many rows
+ * @param   base    Base of the definition
+ * @param   engine  Engine
+ * @param   pasted  Checked pasted query, when the base is one
+ * @param   column  Column to read
+ * @param   rows    How many values
  *
  * @return  The query
  */
@@ -221,13 +241,17 @@ export function sampleQuery(
   base: ToolDefinitionSpec["base"],
   engine: EngineName,
   pasted: string | null,
-  columns: string[],
+  column: string,
   rows: number,
 ): string {
-  const list = columns.map((column) => quote(column, engine)).join(", ");
-  const from = `FROM ${fromClause(base, engine, pasted)} AS base`;
+  const quoted = quote(column, engine);
+  const from = `FROM ${fromClause(base, engine, pasted)} AS base
+WHERE ${quoted} IS NOT NULL`;
 
   return engine === "mssql"
-    ? `SELECT TOP ${rows} ${list}\n${from}`
-    : `SELECT ${list}\n${from}\nLIMIT ${rows}`;
+    ? `SELECT TOP ${rows} ${quoted}
+${from}`
+    : `SELECT ${quoted}
+${from}
+LIMIT ${rows}`;
 }

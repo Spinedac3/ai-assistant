@@ -86,7 +86,7 @@ const app = await buildApp({
     },
   },
   docs: { index, storage },
-  sources: { secrets },
+  sources: { secrets, onSaved: (code, retargeted) => createdTools.sourceChanged(code, retargeted) },
   tools: { secrets, appTimeZone: env.APP_TIMEZONE, created: createdTools },
   exports: { exports },
   logger: true,
