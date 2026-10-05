@@ -11,6 +11,7 @@ import docsRoutes, { type DocsRoutesOptions } from "./routes/docs.js";
 import exportsRoutes, { type ExportsRoutesOptions } from "./routes/exports.js";
 import mcpRoutes from "./routes/mcp.js";
 import oauthRoutes from "./routes/oauth.js";
+import panelRoutes, { type PanelRoutesOptions } from "./routes/panel.js";
 import passwordResetRoutes, { type PasswordResetRoutesOptions } from "./routes/passwordReset.js";
 import sourcesRoutes, { type SourcesRoutesOptions } from "./routes/sources.js";
 import toolsRoutes, { type ToolsRoutesOptions } from "./routes/tools.js";
@@ -33,6 +34,8 @@ export interface AppDependencies {
   tools?: Omit<ToolsRoutesOptions, "db">;
   // Without it the document routes are not mounted
   docs?: Omit<DocsRoutesOptions, "db">;
+  // Without it the web panel is not served
+  panel?: PanelRoutesOptions;
   // Without it there is no usage report
   usage?: Omit<UsageRoutesOptions, "db">;
   // Without it a password cannot be reset by mail
@@ -57,6 +60,9 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   await app.register(authPlugin, { db: deps.db, signer: deps.signer });
   await app.register(authRoutes, { db: deps.db, signer: deps.signer, systems: deps.systems });
   await app.register(adminRoutes, { db: deps.db });
+  if (deps.panel) {
+    await app.register(panelRoutes, deps.panel);
+  }
   if (deps.usage) {
     await app.register(usageRoutes, { ...deps.usage, db: deps.db });
   }

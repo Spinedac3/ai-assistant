@@ -80,6 +80,8 @@ const envSchema = z
       .enum(["true", "false"])
       .default("false")
       .transform((value) => value === "true"),
+    // The built web panel, served under /panel
+    PANEL_DIR: z.string().min(1).default("web/dist"),
     NOTICES_WORKER_POLL_MS: z.coerce.number().int().positive().default(10_000),
     ...ragSchema.shape,
   })
