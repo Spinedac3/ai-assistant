@@ -57,6 +57,7 @@ jobs:
           [ "$seeded" = "1" ]
       - run: pnpm typecheck
       - run: pnpm --filter ai-assistant-web build
+      - run: pnpm --filter ai-assistant-web test
       - run: pnpm lint
       - run: pnpm test:integration
         env:

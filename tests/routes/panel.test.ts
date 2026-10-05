@@ -41,7 +41,7 @@ describe("panel", () => {
     const route = await app.inject({ url: "/panel/chat/42" });
     const bare = await app.inject({ url: "/panel" });
     const missing = await app.inject({ url: "/panel/assets/nada.js" });
-    const escape = await app.inject({ url: "/panel/..%2f..%2fsecreto-panel.txt" });
+    const outside = await app.inject({ url: "/panel/..%2f..%2fsecreto-panel.txt" });
     const notBuilt = await (await appWith(join(built, "no-existe"))).inject({ url: "/panel/" });
 
     // Performs assertions.
@@ -54,7 +54,7 @@ describe("panel", () => {
     expect(route.headers["x-frame-options"]).toBe("DENY");
     expect(bare.statusCode).toBe(302);
     expect(missing.statusCode).toBe(404);
-    expect(escape.body).not.toContain("secreto");
+    expect(outside.body).not.toContain("secreto");
     expect(notBuilt.statusCode).toBe(404);
   });
 });
