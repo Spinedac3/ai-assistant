@@ -9,8 +9,12 @@ import { loadEnv } from "./config/env.js";
 import { connectDatabase } from "./db/client.js";
 import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
+import { CapabilityRanker } from "./mcp/ranking.js";
+import { startWorker } from "./rag/jobs.js";
+import { indexFrom, storageFrom } from "./rag/services.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
+import { fetchTool, searchTool } from "./tools/native/documents.js";
 import { ToolRegistry } from "./tools/registry.js";
 
 const env = loadEnv();
@@ -18,8 +22,13 @@ const database = connectDatabase(env.DATABASE_URL);
 const organizationContext = readOrganizationContext(env.ASSISTANT_CONTEXT_FILE);
 const publicBaseUrl = (env.PUBLIC_BASE_URL ?? `http://localhost:${env.PORT}`).replace(/\/+$/, "");
 
+const index = indexFrom(env);
+const storage = storageFrom(env);
+
 const registry = new ToolRegistry(database.db);
 registry.register(calculateTool);
+registry.register(searchTool(index));
+registry.register(fetchTool(index));
 
 const app = await buildApp({
   db: database.db,
@@ -56,8 +65,10 @@ const app = await buildApp({
       timeZone: env.APP_TIMEZONE,
       accessContact: async () =>
         (await readSetting(database.db, "access.contact")) ?? DEFAULT_ACCESS_CONTACT,
+      ranker: new CapabilityRanker(index.embedder),
     },
   },
+  docs: { index, storage },
   logger: true,
   trustProxy: env.TRUST_PROXY,
 });
@@ -74,8 +85,23 @@ void purge();
 const purgeTimer = setInterval(purge, 6 * 3_600_000);
 purgeTimer.unref();
 
+// Without the bucket every upload would fail; the server still starts so search keeps working
+await storage
+  .ensureBucket()
+  .catch((error) => app.log.error({ err: error }, "document storage unavailable"));
+const stopWorker = env.DOCS_WORKER_ENABLED
+  ? startWorker({
+      db: database.db,
+      storage,
+      index,
+      logger: app.log,
+      pollMs: env.DOCS_WORKER_POLL_MS,
+    })
+  : async () => {};
+
 app.addHook("onClose", async () => {
   clearInterval(purgeTimer);
+  await stopWorker();
   await database.close();
 });
 

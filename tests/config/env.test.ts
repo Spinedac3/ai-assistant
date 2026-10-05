@@ -26,6 +26,20 @@ describe("env", () => {
     );
   });
 
+  it("refuses the example storage credentials in production only", () => {
+    // Performs the test.
+    const production = { ...required, NODE_ENV: "production" };
+    const ownKeys = { S3_ACCESS_KEY: "propia", S3_SECRET_KEY: "una-clave-propia-larga" };
+
+    // Performs assertions.
+    expect(() => loadEnv(production)).toThrow("S3_SECRET_KEY: En producción");
+    expect(() => loadEnv({ ...production, S3_SECRET_KEY: "una-clave-propia-larga" })).toThrow(
+      "En producción",
+    );
+    expect(loadEnv({ ...production, ...ownKeys }).S3_ACCESS_KEY).toBe("propia");
+    expect(loadEnv(required).S3_ACCESS_KEY).toBe("assistant");
+  });
+
   it("fails on a missing database url", () => {
     // Performs assertions.
     expect(() => loadEnv({ JWT_PRIVATE_KEY_FILE: "secrets/jwt-private.pem" })).toThrow(

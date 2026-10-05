@@ -17,13 +17,13 @@ Necesitás Node 22, pnpm, Docker y el [CLI de Claude](https://docs.claude.com/en
 ```bash
 pnpm install
 cp .env.example .env
-docker compose up -d postgres   # el resto de servicios entra con su rebanada
+docker compose up -d            # postgres, solr, embed, minio y demo-db
 pnpm keys:generate              # llave RS256 en secrets/, nunca en variables
 pnpm db:migrate
 pnpm admin:create --email tu@empresa.com --name "Tu Nombre"
 pnpm dev                        # http://localhost:3000/health
 pnpm check                      # typecheck + lint + tests unitarios
-pnpm test:integration           # también los que usan Postgres
+pnpm test:integration           # también los que usan Postgres, Solr y MinIO
 ```
 
 ## Entrar
@@ -66,9 +66,12 @@ que ve cada quien lo decide una sola función:
 
 | Quién llama | Qué ve |
 |---|---|
-| El chat del asistente | `find_capability` y `run_capability`: descubre la herramienta con su esquema y la ejecuta |
-| Un cliente externo (Claude, ChatGPT…) | Lo mismo, más un parámetro `original_question` que se guarda 90 días para mejorar el catálogo |
+| El chat del asistente | `find_capability` y `run_capability`: descubre la herramienta con su esquema y la ejecuta. Además `search` y `fetch` para los documentos |
+| Un cliente externo (Claude, ChatGPT…) | Lo mismo, más un parámetro `original_question` (salvo en `search` y `fetch`) que se guarda 90 días para mejorar el catálogo |
 | La corrida de un agente | Solo sus herramientas, directas, con su esquema de salida |
+
+`find_capability` ordena las capacidades por significado con el mismo servicio de vectores de los
+documentos, y por palabras si ese servicio no responde.
 
 Cada llamada pasa por la misma puerta: permisos, validación de entrada y de salida contra el
 esquema declarado, limpieza de caracteres invisibles y auditoría en `tool_calls`. La auditoría
@@ -108,6 +111,85 @@ tiene que tener esa dirección.
 
 En Windows, `CLAUDE_BIN` tiene que apuntar al `claude.exe` real: Node no ejecuta el
 `claude.cmd` sin una shell.
+
+## Documentos
+
+El asistente busca en los documentos de la organización (procedimientos, políticas, manuales).
+Solr guarda el índice, el servicio `embed` (bge-m3) convierte el texto en vectores y MinIO guarda
+los originales.
+
+### Cargar documentos
+
+Cada documento entra como `.md` con un encabezado:
+
+```markdown
+---
+doc_code: BOD-PRO-RECEP-V001
+doc_title: Procedimiento de recepción de mercadería
+doc_version: V001
+area: general
+doc_revision: R000          # opcional
+doc_type: procedimiento     # opcional
+effective_date: 2026-01-15  # opcional
+tags: [bodega, recepción]   # opcional
+---
+
+# Título
+
+## Sección
+...
+```
+
+- **`area`** decide quién lo lee: hace falta el permiso `docs.<area>.read`. De fábrica existe
+  `docs.general.read`, que tiene el rol `user`; las demás áreas se crean como permisos y se
+  asignan a roles. La carga por la API rechaza un área que no existe; `pnpm docs:load` no lo
+  verifica.
+- **Versiones**: los códigos que solo difieren en el sufijo `-V001`, `-V002`… son una familia (un
+  código sin sufijo cuenta como la versión 0 de la suya). Subir una versión mueve las demás de la
+  familia al core `docs_historical`, con su vector, y solo se busca en la vigente. Una versión
+  más vieja que la vigente se rechaza: volver atrás se hace subiendo una versión posterior.
+- Los PDF se convierten a markdown antes de subirlos; el PDF original puede subirse junto al
+  `.md` para descargarlo después. `<!-- page: N -->` en el texto marca dónde empieza cada página.
+
+Para cargar una carpeta sin pasar por el servidor:
+
+```bash
+docker compose up -d solr embed minio   # embed tarda un par de minutos en cargar el modelo
+pnpm docs:load demo/documents           # 13 documentos (14 archivos) de una distribuidora inventada
+```
+
+| Ruta | Permiso | Para qué |
+|---|---|---|
+| `POST /docs` | `docs.manage` | Sube el `.md` (campo `document`) y opcionalmente el PDF (`original`); responde 202 con el trabajo encolado |
+| `GET /docs/jobs/:id` | `docs.manage` | Estado del trabajo: `queued`, `running`, `done` (con los pedazos indexados) o `failed` (con el motivo) |
+| `GET /docs` | `chat.use` | Documentos vigentes que puedo leer |
+| `GET /docs/:code/original?kind=md\|pdf` | `chat.use` | Descarga el original de la versión vigente, si puedo leer su área |
+| `POST /docs/:code/reindex` | `docs.manage` | Vuelve a indexar la versión vigente desde el `.md` guardado |
+| `DELETE /docs/:code` | `docs.manage` | Retira la versión vigente de la búsqueda y borra sus originales; el histórico queda |
+
+Los trabajos los procesa un worker dentro del servidor (`DOCS_WORKER_ENABLED`), de a uno. Con
+varios servidores, el worker se deja encendido en uno solo.
+
+### Cómo busca
+
+Por palabras (con más peso en el código, el título y la sección) y por significado (vectores) en
+paralelo, y fusiona ambas listas. Una pregunta que es exactamente un código devuelve ese
+documento. Cada resultado se filtra por las áreas que la persona puede leer, también al pedir un
+pasaje por su id. Si el servicio de vectores no responde, sigue solo con palabras.
+
+El chat y los clientes externos tienen dos tools para esto, con los nombres que ChatGPT exige
+para conectar una fuente de conocimiento:
+
+- `search(query)`: hasta 10 pasajes con id, título y un fragmento.
+- `fetch(id)`: el pasaje con la sección completa a la que pertenece (hasta ~12.000 caracteres),
+  para que un paso nunca se lea sin sus condiciones.
+
+`pnpm test:golden` mide, con el modelo real, si el documento que responde cada una de 30
+preguntas sobre los documentos demo sale entre los tres primeros (hoy 30 de 30).
+
+El esquema de Solr vive en `docker/solr/docs/conf/`. Los cores se crean con él la primera vez;
+para aplicar un cambio de esquema hay que recrearlos (`docker compose down -v` borra los datos) y
+volver a cargar los documentos.
 
 ## Licencia
 

@@ -94,6 +94,8 @@ export interface CapabilityHit {
   description: string;
   // Absent for restricted ones: a schema that cannot be called only tempts a doomed call
   parameters_schema?: JsonSchema;
+  // Meaning similarity from 0 to 1 when ranked by meaning, word score otherwise; a restricted
+  // one is always ranked by words
   relevance: number;
   available?: false;
   how_to_get_access?: string;
@@ -194,11 +196,12 @@ export function howToGetAccess(contact: string): string {
  * Hiding what the person cannot use makes the only possible answer "that does not exist", which
  * is false; the scope names themselves are never revealed.
  *
- * @param   all       Every registered tool
- * @param   allowed   Tools the caller may run
- * @param   query     What the person needs
- * @param   topK      How many to return
- * @param   contact   Who grants access
+ * @param   all         Every registered tool
+ * @param   allowed     Tools the caller may run
+ * @param   query       What the person needs
+ * @param   topK        How many to return
+ * @param   contact     Who grants access
+ * @param   similarity  Meaning similarity of the usable tools by name, when available
  *
  * @return  The hits, usable first
  */
@@ -208,12 +211,17 @@ export function findCapabilities(
   query: string,
   topK: number,
   contact: string,
+  similarity: ReadonlyMap<string, number> | null = null,
 ): CapabilityHit[] {
   const usable = new Set(allowed.map((tool) => tool.name));
   const ranked = rankByWords(all, query);
+  const byMeaning = similarity
+    ? allowed
+        .map((tool) => ({ tool, score: similarity.get(tool.name) ?? 0 }))
+        .sort((a, b) => b.score - a.score)
+    : null;
 
-  const available = ranked
-    .filter(({ tool }) => usable.has(tool.name))
+  const available = (byMeaning ?? ranked.filter(({ tool }) => usable.has(tool.name)))
     .slice(0, topK)
     .map(({ tool, score }) => ({
       name: tool.name,
@@ -222,7 +230,8 @@ export function findCapabilities(
       relevance: score,
     }));
 
-  // Only those that earned a top place on their own, so a declaration never displaces a usable one
+  // Only those that earned a top place on their own words, so a declaration never displaces a
+  // usable one; meaning alone is too loose to announce a capability the person cannot use
   const restricted = ranked
     .slice(0, topK)
     // Without a shared word it is not what the person asked for, so declaring it would mislead

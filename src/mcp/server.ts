@@ -11,9 +11,11 @@ import type { Caller, ToolRegistry } from "../tools/registry.js";
 import { findCapabilities, howToGetAccess, META_DEFINITIONS, rankByWords } from "./capabilities.js";
 import { recordIntent } from "./intents.js";
 import { FIND_CAPABILITY, RUN_CAPABILITY } from "./names.js";
-import { type Channel, surfaceFor } from "./surface.js";
+import type { CapabilityRanker } from "./ranking.js";
+import { type Channel, DOCUMENT_TOOLS, surfaceFor } from "./surface.js";
 
-// Asked of every tool an external client sees, to learn what people need; never on the chat or runs
+// Asked of every tool an external client sees, to learn what people need; never on the chat or runs,
+// nor on the document search, whose query already is the question
 export const INTENT_PARAM = "original_question";
 
 const INTENT_SCHEMA = {
@@ -34,6 +36,8 @@ export interface McpSettings {
   organizationContext: string | null;
   timeZone: string;
   accessContact: () => Promise<string>;
+  // Ranks capabilities by meaning; without it, or when it fails, they are ranked by words
+  ranker?: CapabilityRanker;
 }
 
 /**
@@ -69,8 +73,8 @@ export function buildMcpServer(
 ): Server {
   const surface = surfaceFor(registry, caller.scopes, caller.channel, caller.runTools);
   const origin: ToolOrigin = caller.channel === "external" ? "mcp" : caller.channel;
-  const withIntent = (schema: JsonSchema): JsonSchema =>
-    caller.channel === "external"
+  const withIntent = (name: string, schema: JsonSchema): JsonSchema =>
+    caller.channel === "external" && !DOCUMENT_TOOLS.includes(name)
       ? {
           ...schema,
           properties: {
@@ -104,7 +108,10 @@ export function buildMcpServer(
       return {
         name,
         description: definition?.description ?? "",
-        inputSchema: withIntent((definition?.inputSchema ?? { type: "object" }) as JsonSchema),
+        inputSchema: withIntent(
+          name,
+          (definition?.inputSchema ?? { type: "object" }) as JsonSchema,
+        ),
         ...(direct?.outputSchema ? { outputSchema: direct.outputSchema } : {}),
         annotations: {
           readOnlyHint: definition?.readOnly ?? false,
@@ -150,7 +157,18 @@ export function buildMcpServer(
       });
 
       return {
-        content: [{ type: "text", text: asUntrustedData(target, outcome.text) }],
+        // ChatGPT reads its direct search and fetch calls as plain JSON; documents are curated by
+        // docs.manage holders and hidden characters are already removed. Any other path keeps the
+        // untrusted-data wrapper
+        content: [
+          {
+            type: "text",
+            text:
+              caller.channel === "external" && name === target && DOCUMENT_TOOLS.includes(target)
+                ? outcome.text
+                : asUntrustedData(target, outcome.text),
+          },
+        ],
         ...(outcome.ok && outcome.structured && name === target
           ? { structuredContent: outcome.structured }
           : {}),
@@ -165,12 +183,16 @@ export function buildMcpServer(
 
       const query = String(args.query ?? "");
       const topK = Math.min(15, Math.max(1, Math.trunc(Number(args.top_k) || 6)));
+      // The document tools are offered directly, so the capability search does not repeat them
+      const capabilities = registry.all().filter((tool) => !DOCUMENT_TOOLS.includes(tool.name));
+      const usable = surface.allowed.filter((tool) => !DOCUMENT_TOOLS.includes(tool.name));
       const hits = findCapabilities(
-        registry.all(),
-        surface.allowed,
+        capabilities,
+        usable,
         query,
         topK,
         await settings.accessContact(),
+        (await settings.ranker?.rank(usable, query)) ?? null,
       );
 
       return {
