@@ -189,6 +189,7 @@ export function cleanDefinition(definition: Definition): Definition {
       ...filter,
       description: text(filter.description),
     })),
+    time_zone: text(definition.time_zone),
     meaning: {
       ...definition.meaning,
       synonyms: definition.meaning.synonyms.map((word) => word.trim()).filter(Boolean),
@@ -224,6 +225,9 @@ export function argument(schema: JsonSchema, value: string | boolean): unknown {
     return value;
   }
   const type = typeOf(schema);
+  if (type === "boolean") {
+    return value === "true";
+  }
   if (type === "array") {
     const items = value
       .split(",")
@@ -233,4 +237,40 @@ export function argument(schema: JsonSchema, value: string | boolean): unknown {
     return numeric ? items.map(Number) : items;
   }
   return type === "number" || type === "integer" ? Number(value) : value;
+}
+
+/**
+ * Drops the choices that no longer fit what the tool reads and returns: grouping and totals over
+ * columns no longer chosen, filters over columns the base no longer has, and an order over a
+ * column the result no longer has
+ *
+ * @param   definition  Definition after a change
+ * @param   base        Columns of the base, when they were read
+ *
+ * @return  The definition the form shows and saves
+ */
+export function prune(definition: Definition, base: BaseColumn[]): Definition {
+  const chosen = new Set(definition.columns.map((column) => column.name));
+  const known = new Set(base.map((column) => column.name));
+  const summary = definition.summary && {
+    ...definition.summary,
+    group_by: definition.summary.group_by.filter((column) => chosen.has(column)),
+    // A count counts rows; any other total needs a column that is still chosen
+    aggregates: definition.summary.aggregates.map((aggregate) =>
+      aggregate.fn === "count" || (aggregate.column && !chosen.has(aggregate.column))
+        ? { ...aggregate, column: undefined }
+        : aggregate,
+    ),
+  };
+  const kept = {
+    ...definition,
+    summary,
+    filters:
+      base.length > 0
+        ? definition.filters.filter((filter) => known.has(filter.column))
+        : definition.filters,
+  };
+  const outputs = new Set(outputNames(kept));
+
+  return { ...kept, order_by: kept.order_by.filter((order) => outputs.has(order.column)) };
 }

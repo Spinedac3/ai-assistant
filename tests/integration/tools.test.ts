@@ -281,7 +281,7 @@ describe("tool creator", () => {
     expect(before).toBe(true);
     expect(edited.body.data.status).toBe("draft");
     expect(after).toBe(false);
-    expect(moved).toMatchObject({ status: 409, body: { error: "source_changed" } });
+    expect(moved).toMatchObject({ status: 409, body: { error: "name_taken" } });
   });
 
   it("keeps every tool of a source away from someone who manages tools but not that source", async () => {
@@ -306,6 +306,7 @@ describe("tool creator", () => {
   it("tells the columns of a base before anything is saved, only over a source the person may use", async () => {
     // Performs the test.
     const source = `demo-${available[0]}`;
+    const before = await api("GET", "/admin/tools");
     const table = await api("POST", "/admin/tools/describe", {
       source,
       base: { kind: "table", name: "entregas" },
@@ -328,7 +329,7 @@ describe("tool creator", () => {
       { source, base: { kind: "table", name: "entregas" } },
       managerToken,
     );
-    const listed = await api("GET", "/admin/tools");
+    const after = await api("GET", "/admin/tools");
 
     // Performs assertions.
     expect(table.body.data.columns).toEqual(
@@ -346,7 +347,32 @@ describe("tool creator", () => {
     expect(missing.body).toMatchObject({ error: "base_unreadable" });
     expect(foreign.status).toBe(403);
     // Nothing was saved
-    expect(listed.body.data.map((tool: { name: string }) => tool.name)).not.toContain("describe");
+    expect(after.body.data).toEqual(before.body.data);
+  });
+
+  it("never lets a new tool replace one of the same name, nor tells of one on another source", async () => {
+    // Performs the test.
+    const url = "/admin/tools/entregas_unicas";
+    const first = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: deliveries,
+      create: true,
+    });
+    const again = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: deliveries,
+      create: true,
+    });
+    const edited = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: deliveries,
+    });
+    await api("DELETE", url);
+
+    // Performs assertions.
+    expect(first.status).toBe(200);
+    expect(again).toMatchObject({ status: 409, body: { error: "name_taken" } });
+    expect(edited.status).toBe(200);
   });
 
   it("publishes only the version that was checked, never one saved in the meantime", async () => {

@@ -235,6 +235,8 @@ function SourceForm({ existing, onSaved }: { existing?: Source; onSaved: () => v
           password: form.password,
           timeZone: form.timeZone || null,
           tls: form.tls,
+          // Only changing an existing source may replace it
+          ...(existing ? { replace: true } : {}),
         },
       });
       setOpen(false);

@@ -34,7 +34,7 @@ import {
 import type { Database } from "../db/client.js";
 import { conversations, messages, toolDefinitions } from "../db/schema.js";
 import { removeHiddenDeep } from "../lib/hiddenText.js";
-import { oneAtATime } from "../lib/oneAtATime.js";
+import { isRunning, oneAtATime } from "../lib/oneAtATime.js";
 import { cliToolName } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
@@ -58,11 +58,24 @@ const GUIDE_SAMPLES = 5;
 
 // Checks read the base several times; each read gets the time a slow report would
 const CHECK_LIMITS = { timeoutMs: 60_000, maxRows: 200_000 };
+// Naming the columns reads no row, so anything longer is a base that will not answer
+const DESCRIBE_LIMITS = { timeoutMs: 15_000, maxRows: 1 };
+// Said whenever a name cannot be used, so it never tells whether a tool of another source exists
+const NAME_TAKEN = {
+  ok: false,
+  error: "name_taken",
+  message: "Ya hay una herramienta con ese nombre; usa otro",
+};
 
 const nameParams = z.object({ name: z.string().regex(TOOL_NAME) });
 const describeBody = z.object({ source: z.string().regex(SOURCE_CODE), base: baseSchema }).strict();
 const saveBody = z
-  .object({ source: z.string().regex(SOURCE_CODE), definition: z.unknown() })
+  .object({
+    source: z.string().regex(SOURCE_CODE),
+    definition: z.unknown(),
+    // A new tool never replaces an existing one of the same name
+    create: z.boolean().default(false),
+  })
   .strict();
 const runBody = z.object({ args: z.record(z.string(), z.unknown()).default({}) }).strict();
 const guideBody = z.object({ question: z.string().trim().min(1).max(2_000).optional() }).strict();
@@ -226,7 +239,19 @@ export default async function toolsRoutes(
     }
     const connection = await connectionFor(db, options.secrets, source);
     if (!connection) {
-      return reply.code(404).send({ ok: false, error: "source_not_found" });
+      return reply
+        .code(404)
+        .send({ ok: false, error: "source_not_found", message: "Esa fuente ya no existe" });
+    }
+    // One reading of a source's columns at a time; a person who clicks again is told to wait
+    // instead of queueing reads that block the checks of everyone else
+    const key = `describe:${source}`;
+    if (isRunning(key)) {
+      return reply.code(429).send({
+        ok: false,
+        error: "busy",
+        message: "Ya se están leyendo columnas de esa fuente; espera un momento",
+      });
     }
     let pasted: string | null = null;
     if (base.kind === "query") {
@@ -240,8 +265,8 @@ export default async function toolsRoutes(
     }
     try {
       // Reads no row: the source only says which columns the base has
-      const columns = await oneAtATime(`checks:${source}`, () =>
-        describeBase(connection.info, base, pasted, CHECK_LIMITS),
+      const columns = await oneAtATime(key, () =>
+        describeBase(connection.info, base, pasted, DESCRIBE_LIMITS),
       );
       return { ok: true, data: { columns } };
     } catch (error) {
@@ -291,12 +316,8 @@ export default async function toolsRoutes(
     }
     // A tool moves to another source only by being made again over it
     const existing = await findDefinition(db, name);
-    if (existing && existing.tool.sourceCode !== source) {
-      return reply.code(409).send({
-        ok: false,
-        error: "source_changed",
-        message: "La herramienta ya existe sobre otra fuente; bórrala o usa otro nombre",
-      });
+    if (existing && (body.data.create || existing.tool.sourceCode !== source)) {
+      return reply.code(409).send(NAME_TAKEN);
     }
 
     const connection = await connectionFor(db, options.secrets, source);

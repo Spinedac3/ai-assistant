@@ -2,11 +2,11 @@ import {
   Badge,
   Box,
   Button,
-  Checkbox,
   Code,
   Field,
   HStack,
   Input,
+  NativeSelect,
   SegmentGroup,
   Stack,
   Tabs,
@@ -40,7 +40,8 @@ export function ToolLab({
   onApply,
 }: {
   name: string;
-  onApply: (definition: Definition) => void;
+  // Whether the suggestion was loaded; the person may keep the changes they had instead
+  onApply: (definition: Definition) => boolean;
 }) {
   return (
     <Box bg="bg.surface" borderWidth="1px" rounded="panel" p={4}>
@@ -75,7 +76,7 @@ export function ToolLab({
  *
  * @return  The guide
  */
-function Guide({ name, onApply }: { name: string; onApply: (definition: Definition) => void }) {
+function Guide({ name, onApply }: { name: string; onApply: (definition: Definition) => boolean }) {
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<{
     explanation: string;
@@ -137,7 +138,7 @@ function Guide({ name, onApply }: { name: string; onApply: (definition: Definiti
             <Markdown remarkPlugins={[remarkGfm]}>{answer.explanation}</Markdown>
           </Box>
           {answer.chips.map((chip) => (
-            <Box key={chip.label} borderWidth="1px" rounded="md" p={3}>
+            <Box key={`${chip.label}:${chip.why}`} borderWidth="1px" rounded="md" p={3}>
               <HStack justify="space-between" align="start" gap={3}>
                 <Stack gap={0}>
                   <Text fontSize="sm" fontWeight="semibold">
@@ -152,8 +153,9 @@ function Guide({ name, onApply }: { name: string; onApply: (definition: Definiti
                   variant="subtle"
                   colorPalette="brand"
                   onClick={() => {
-                    onApply(chip.definition);
-                    setApplied(chip.label);
+                    if (onApply(chip.definition)) {
+                      setApplied(chip.label);
+                    }
                   }}
                 >
                   {applied === chip.label ? <FiCheck /> : null}
@@ -198,12 +200,20 @@ function Run({ name }: { name: string }) {
   const required = new Set(detail.data?.input_schema.required ?? []);
 
   const run = async () => {
-    setBusy(true);
     const args = Object.fromEntries(
       properties
         .filter(([key]) => values[key] !== undefined && values[key] !== "")
         .map(([key, schema]) => [key, argument(schema, values[key] ?? "")]),
     );
+    // A number that does not read as one is said here, not sent as nothing
+    const wrong = Object.entries(args).find(([, value]) =>
+      [value].flat().some((item) => typeof item === "number" && Number.isNaN(item)),
+    );
+    if (wrong) {
+      setResult(`«${wrong[0]}» lleva un número que no se entiende`);
+      return;
+    }
+    setBusy(true);
     try {
       const response = await request(`/admin/tools/${name}/run`, {
         method: "POST",
@@ -231,15 +241,17 @@ function Run({ name }: { name: string }) {
             {key}
           </Field.Label>
           {typeOf(schema) === "boolean" ? (
-            <Checkbox.Root
-              checked={values[key] === true}
-              onCheckedChange={(details) =>
-                setValues({ ...values, [key]: Boolean(details.checked) })
-              }
-            >
-              <Checkbox.HiddenInput />
-              <Checkbox.Control />
-            </Checkbox.Root>
+            // Three choices: an optional yes or no can also be left out
+            <NativeSelect.Root size="sm">
+              <NativeSelect.Field
+                value={String(values[key] ?? "")}
+                onChange={(event) => setValues({ ...values, [key]: event.target.value })}
+              >
+                <option value="">sin indicar</option>
+                <option value="true">sí</option>
+                <option value="false">no</option>
+              </NativeSelect.Field>
+            </NativeSelect.Root>
           ) : (
             <Input
               size="sm"
@@ -355,7 +367,7 @@ function TrialChat({ name }: { name: string }) {
                   {entry.tool.replace(/^mcp__[^_]+__/, "")}
                 </Text>
                 {entry.bytes !== null && <Badge size="xs">{entry.bytes} bytes</Badge>}
-                {entry.excel && (
+                {entry.excel && sameOrigin(entry.excel) && (
                   <a href={entry.excel} target="_blank" rel="noopener noreferrer">
                     Excel
                   </a>
@@ -462,4 +474,16 @@ function ModelView({ name }: { name: string }) {
       </Code>
     </Stack>
   );
+}
+
+/**
+ * Tells whether a link from a tool result points to this server, the only place an Excel of the
+ * assistant comes from
+ *
+ * @param   url  Link
+ *
+ * @return  Whether it is safe to show
+ */
+function sameOrigin(url: string): boolean {
+  return URL.canParse(url) && new URL(url).origin === window.location.origin;
 }

@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FiPlus } from "react-icons/fi";
 import { Link, useNavigate } from "react-router";
 import { api } from "../api/http";
+import { NEW_TOOL } from "./ToolEditor";
 import type { ToolSummary } from "./types";
 
 /**
@@ -21,7 +22,11 @@ export function ToolsPage() {
           Herramientas que responden preguntas con los datos de una fuente. Nacen como borrador y el
           asistente solo las usa una vez publicadas, con sus chequeos en verde.
         </Text>
-        <Button colorPalette="brand" size="sm" onClick={() => navigate("/herramientas/nueva")}>
+        <Button
+          colorPalette="brand"
+          size="sm"
+          onClick={() => navigate(`/herramientas/${NEW_TOOL}`)}
+        >
           <FiPlus /> Nueva herramienta
         </Button>
       </HStack>

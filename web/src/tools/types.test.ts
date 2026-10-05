@@ -5,6 +5,7 @@ import {
   cleanDefinition,
   type Definition,
   outputNames,
+  prune,
   withDefaults,
 } from "./types";
 
@@ -71,5 +72,48 @@ describe("tool definitions in the form", () => {
     expect(argument({ type: ["number", "null"] }, "3.5")).toBe(3.5);
     expect(argument({ type: "string" }, "2026-03-01")).toBe("2026-03-01");
     expect(argument({ type: "boolean" }, true)).toBe(true);
+    expect(argument({ type: "boolean" }, "false")).toBe(false);
+    expect(argument({ type: "boolean" }, "true")).toBe(true);
+  });
+
+  it("drops the choices that no longer fit, so the form never shows one thing and saves another", () => {
+    // Performs the test.
+    const base = [
+      { name: "ruta", kind: "text" as const },
+      { name: "piloto", kind: "text" as const },
+      { name: "total", kind: "number" as const },
+    ];
+    const before: Definition = {
+      ...blankDefinition(),
+      columns: [{ name: "ruta" }, { name: "total" }],
+      filters: [
+        { column: "ruta", op: "in", required: false },
+        { column: "zona", op: "=", required: false },
+      ],
+      summary: {
+        group_by: ["ruta", "piloto"],
+        aggregates: [
+          { fn: "sum", column: "total", as: "vendido" },
+          { fn: "count", column: "ruta", as: "entregas" },
+        ],
+      },
+      order_by: [
+        { column: "vendido", direction: "desc" },
+        { column: "piloto", direction: "asc" },
+      ],
+    };
+    // Total is no longer chosen
+    const after = prune({ ...before, columns: [{ name: "ruta" }] }, base);
+
+    // Performs assertions.
+    expect(after.filters.map((filter) => filter.column)).toEqual(["ruta"]);
+    expect(after.summary?.group_by).toEqual(["ruta"]);
+    expect(after.summary?.aggregates).toEqual([
+      { fn: "sum", column: undefined, as: "vendido" },
+      { fn: "count", column: undefined, as: "entregas" },
+    ]);
+    expect(after.order_by).toEqual([{ column: "vendido", direction: "desc" }]);
+    // Before the base is read, no filter is judged
+    expect(prune(before, []).filters).toHaveLength(2);
   });
 });
