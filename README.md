@@ -142,10 +142,12 @@ tags: [bodega, recepción]   # opcional
 
 - **`area`** decide quién lo lee: hace falta el permiso `docs.<area>.read`. De fábrica existe
   `docs.general.read`, que tiene el rol `user`; las demás áreas se crean como permisos y se
-  asignan a roles. Un documento con un área que no existe se rechaza.
-- **Versiones**: si el código termina en `-V001`, `-V002`…, subir una versión nueva mueve las
-  anteriores de la misma familia al core `docs_historical`, con su vector. Solo se busca en la
-  vigente.
+  asignan a roles. La carga por la API rechaza un área que no existe; `pnpm docs:load` no lo
+  verifica.
+- **Versiones**: los códigos que solo difieren en el sufijo `-V001`, `-V002`… son una familia (un
+  código sin sufijo cuenta como la versión 0 de la suya). Subir una versión mueve las demás de la
+  familia al core `docs_historical`, con su vector, y solo se busca en la vigente. Una versión
+  más vieja que la vigente se rechaza: volver atrás se hace subiendo una versión posterior.
 - Los PDF se convierten a markdown antes de subirlos; el PDF original puede subirse junto al
   `.md` para descargarlo después. `<!-- page: N -->` en el texto marca dónde empieza cada página.
 
@@ -153,7 +155,7 @@ Para cargar una carpeta sin pasar por el servidor:
 
 ```bash
 docker compose up -d solr embed minio   # embed tarda un par de minutos en cargar el modelo
-pnpm docs:load demo/documents           # 14 documentos de una distribuidora inventada
+pnpm docs:load demo/documents           # 13 documentos (14 archivos) de una distribuidora inventada
 ```
 
 | Ruta | Permiso | Para qué |
@@ -161,11 +163,12 @@ pnpm docs:load demo/documents           # 14 documentos de una distribuidora inv
 | `POST /docs` | `docs.manage` | Sube el `.md` (campo `document`) y opcionalmente el PDF (`original`); responde 202 con el trabajo encolado |
 | `GET /docs/jobs/:id` | `docs.manage` | Estado del trabajo: `queued`, `running`, `done` (con los pedazos indexados) o `failed` (con el motivo) |
 | `GET /docs` | `chat.use` | Documentos vigentes que puedo leer |
-| `GET /docs/:code/original?kind=md\|pdf` | `chat.use` | Descarga el original, si puedo leer el documento |
-| `POST /docs/:code/reindex` | `docs.manage` | Vuelve a indexar desde el `.md` guardado |
-| `DELETE /docs/:code` | `docs.manage` | Lo saca de la búsqueda y borra los originales |
+| `GET /docs/:code/original?kind=md\|pdf` | `chat.use` | Descarga el original de la versión vigente, si puedo leer su área |
+| `POST /docs/:code/reindex` | `docs.manage` | Vuelve a indexar la versión vigente desde el `.md` guardado |
+| `DELETE /docs/:code` | `docs.manage` | Retira la versión vigente de la búsqueda y borra sus originales; el histórico queda |
 
-Los trabajos los procesa un worker dentro del servidor (`DOCS_WORKER_ENABLED`), de a uno.
+Los trabajos los procesa un worker dentro del servidor (`DOCS_WORKER_ENABLED`), de a uno. Con
+varios servidores, el worker se deja encendido en uno solo.
 
 ### Cómo busca
 
