@@ -46,4 +46,16 @@ describe("env", () => {
       "DATABASE_URL",
     );
   });
+
+  it("asks for the sender address and the password file a mail server needs", () => {
+    // Performs the test.
+    const smtp = { ...required, SMTP_HOST: "smtp.example.com" };
+
+    // Performs assertions.
+    expect(() => loadEnv(smtp)).toThrow("SMTP_FROM");
+    expect(() => loadEnv({ ...smtp, SMTP_FROM: "a@example.com", SMTP_USER: "a" })).toThrow(
+      "SMTP_PASSWORD_FILE",
+    );
+    expect(loadEnv({ ...smtp, SMTP_FROM: "a@example.com" }).SMTP_PORT).toBe(587);
+  });
 });

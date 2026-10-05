@@ -13,12 +13,15 @@ import { askOnce } from "./llm/oneShot.js";
 import { DEFAULT_ACCESS_CONTACT } from "./mcp/capabilities.js";
 import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
+import { smtpMailer } from "./notices/mailer.js";
+import { startNoticeWorker } from "./notices/outbox.js";
 import { startWorker } from "./rag/jobs.js";
 import { indexFrom, s3Config, storageFrom } from "./rag/services.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
 import { ingestTool } from "./tools/native/ingest.js";
+import { sendNoticeTool } from "./tools/native/sendNotice.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { Secrets } from "./vault/envelope.js";
 
@@ -42,6 +45,19 @@ registry.register(calculateTool);
 registry.register(searchTool(index));
 registry.register(fetchTool(index));
 registry.register(ingestTool({ db: database.db, index, storage }));
+// Without a mail server there is nowhere to deliver; queuing notices nobody gets would only hide it
+const mailer = env.SMTP_HOST
+  ? smtpMailer({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      from: env.SMTP_FROM ?? "",
+      user: env.SMTP_USER,
+      passwordFile: env.SMTP_PASSWORD_FILE,
+    })
+  : null;
+if (mailer) {
+  registry.register(sendNoticeTool(database.db));
+}
 const createdTools = new CreatedTools(registry, {
   db: database.db,
   secrets,
@@ -162,10 +178,21 @@ const stopWorker = env.DOCS_WORKER_ENABLED
     })
   : async () => {};
 
+const stopNotices = mailer
+  ? startNoticeWorker({
+      db: database.db,
+      send: mailer,
+      assistantName: env.ASSISTANT_NAME,
+      logger: app.log,
+      pollMs: env.NOTICES_WORKER_POLL_MS,
+    })
+  : async () => {};
+
 app.addHook("onClose", async () => {
   clearInterval(purgeTimer);
   clearInterval(exportsTimer);
   await stopWorker();
+  await stopNotices();
   await database.close();
 });
 
