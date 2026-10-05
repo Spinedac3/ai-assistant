@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 const ALGORITHM = "aes-256-gcm";
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
+// The full GCM tag; a shorter one accepted on decrypt would make forgeries far cheaper
+const TAG_BYTES = 16;
 
 interface Sealed {
   v: 1;
@@ -49,7 +51,11 @@ function decrypt(
   parts: { iv: Buffer; tag: Buffer; data: Buffer },
   context: string,
 ): Buffer {
-  const decipher = createDecipheriv(ALGORITHM, key, parts.iv);
+  if (parts.iv.length !== IV_BYTES || parts.tag.length !== TAG_BYTES) {
+    throw new Error("Secreto sellado con un formato inválido");
+  }
+
+  const decipher = createDecipheriv(ALGORITHM, key, parts.iv, { authTagLength: TAG_BYTES });
   decipher.setAAD(Buffer.from(context, "utf8"));
   decipher.setAuthTag(parts.tag);
 
@@ -131,6 +137,10 @@ export class Secrets {
    */
   open(stored: string, context: string): string {
     const sealed = JSON.parse(stored) as Sealed;
+    if (sealed.v !== 1) {
+      throw new Error("Secreto sellado con una versión desconocida");
+    }
+
     const from = (value: string) => Buffer.from(value, "base64");
     const dek = decrypt(
       this.kek,
