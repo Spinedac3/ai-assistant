@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
+import { listConversations } from "../../src/chat/repository.js";
 import { DEMO_ENGINES } from "../../src/cli/demoEngines.js";
 import { CreatedTools } from "../../src/creator/store.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
@@ -139,7 +140,13 @@ describe("trial chat", () => {
           accessContact: async () => "admin@example.com",
         },
       },
-      tools: { secrets, appTimeZone: "UTC", created, trial: { chat, mcpUrl, registry } },
+      tools: {
+        secrets,
+        appTimeZone: "UTC",
+        created,
+        trial: { chat, mcpUrl, registry },
+        ask: async () => JSON.stringify({ explanation: "ok", chips: [] }),
+      },
     });
     await app.listen({ port, host: "127.0.0.1" });
     token = (
@@ -261,12 +268,47 @@ describe("trial chat", () => {
     // Every message of the hour already spent
     await database.db.update(rateLimits).set({ msgCount: 10_000 });
     const limited = await api("POST", "/admin/tools/entregas_prueba/chat", { message: "Otra" });
+    const guideLimited = await api("POST", "/admin/tools/entregas_prueba/guide", {});
     await database.db.update(rateLimits).set({ msgCount: 0 });
+    const [beto] = await database.db
+      .select()
+      .from(users)
+      .where(eq(users.email, "beto@example.com"));
+    const chatList = await listConversations(database.db, beto?.id ?? 0);
 
     // Performs assertions.
     expect(other.status).toBe(200);
     expect(crossed).toMatchObject({ status: 404, body: { error: "conversation_not_found" } });
     expect(badId.status).toBe(400);
     expect(limited).toMatchObject({ status: 429, body: { error: "rate_limited" } });
+    expect(guideLimited).toMatchObject({ status: 429, body: { error: "rate_limited" } });
+    // Trials never show up among the person's chats
+    expect(chatList).toEqual([]);
+  });
+
+  it("shows only the calls of the attempt that answered", async () => {
+    // Performs the test.
+    script([
+      {
+        steps: [
+          {
+            tool: "mcp__assistant__entregas_prueba",
+            id: "t9",
+            mcp: true,
+            input: { ruta: ["R-Sur-2"] },
+          },
+        ],
+        // An attempt that ends without an answer is discarded and the turn retried
+        result: "",
+      },
+      { steps: [{ text: "No hay datos para eso." }], result: "No hay datos para eso." },
+    ]);
+    const answered = await api("POST", "/admin/tools/entregas_prueba/chat", {
+      message: "¿Y la ruta sur 2?",
+    });
+
+    // Performs assertions.
+    expect(answered.status).toBe(200);
+    expect(answered.body.data.trace).toEqual([]);
   });
 });
