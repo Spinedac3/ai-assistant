@@ -335,6 +335,11 @@ describe("users, roles and permissions", () => {
 
     // Performs the test.
     const toAdmin = await as("dani", "PATCH", `/admin/users/${ids.dani}`, { role: "admin" });
+    const createdAdmin = await as("dani", "POST", "/admin/users", {
+      email: "gina@example.com",
+      displayName: "Gina",
+      role: "admin",
+    });
     const extra = await as("dani", "PUT", `/admin/users/${ids.dani}/scopes/settings.manage`, {
       reason: "x",
     });
@@ -362,7 +367,7 @@ describe("users, roles and permissions", () => {
     ]);
 
     // Performs assertions.
-    for (const refused of [toAdmin, extra, stripAdmin, offAdmin, widened, madeRole]) {
+    for (const refused of [toAdmin, createdAdmin, extra, stripAdmin, offAdmin, widened, madeRole]) {
       expect(refused.body).toMatchObject({ error: "beyond_own_scopes" });
     }
     expect(ownRoleOff.body).toMatchObject({ error: "locked_out" });
