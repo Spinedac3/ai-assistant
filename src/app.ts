@@ -7,6 +7,7 @@ import authPlugin from "./plugins/auth.js";
 import adminRoutes from "./routes/admin.js";
 import authRoutes from "./routes/auth.js";
 import chatRoutes, { type ChatRoutesOptions } from "./routes/chat.js";
+import diagnosticsRoutes, { type DiagnosticsRoutesOptions } from "./routes/diagnostics.js";
 import docsRoutes, { type DocsRoutesOptions } from "./routes/docs.js";
 import exportsRoutes, { type ExportsRoutesOptions } from "./routes/exports.js";
 import mcpRoutes from "./routes/mcp.js";
@@ -35,6 +36,8 @@ export interface AppDependencies {
   tools?: Omit<ToolsRoutesOptions, "db">;
   // Without it the document routes are not mounted
   docs?: Omit<DocsRoutesOptions, "db">;
+  // Without it there are no diagnostics
+  diagnostics?: Omit<DiagnosticsRoutesOptions, "db">;
   // Without it the web panel is not served
   panel?: PanelRoutesOptions;
   // Without it there is no usage report
@@ -62,6 +65,9 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   await app.register(authRoutes, { db: deps.db, signer: deps.signer, systems: deps.systems });
   await app.register(adminRoutes, { db: deps.db });
   await app.register(usersRoutes, { db: deps.db });
+  if (deps.diagnostics) {
+    await app.register(diagnosticsRoutes, { ...deps.diagnostics, db: deps.db });
+  }
   if (deps.panel) {
     await app.register(panelRoutes, deps.panel);
   }

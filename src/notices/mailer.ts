@@ -12,6 +12,9 @@ export interface Mail {
 
 export type SendMail = (mail: Mail) => Promise<void>;
 
+// A sender that can also say whether its server answers, for the diagnostics
+export type SmtpMailer = SendMail & { verify: () => Promise<void> };
+
 export interface SmtpConfig {
   host: string;
   port: number;
@@ -52,7 +55,7 @@ export function textToHtml(text: string): string {
  *
  * @return  A function that sends one mail and throws when the server refuses it
  */
-export function smtpMailer(config: SmtpConfig): SendMail {
+export function smtpMailer(config: SmtpConfig): SmtpMailer {
   const transport = nodemailer.createTransport({
     host: config.host,
     port: config.port,
@@ -72,7 +75,7 @@ export function smtpMailer(config: SmtpConfig): SendMail {
     socketTimeout: SMTP_TIMEOUT_MS,
   });
 
-  return async (mail) => {
+  const send: SendMail = async (mail) => {
     let timer: NodeJS.Timeout | undefined;
     const sending = transport.sendMail({
       from: config.from,
@@ -96,4 +99,10 @@ export function smtpMailer(config: SmtpConfig): SendMail {
       clearTimeout(timer);
     }
   };
+
+  return Object.assign(send, {
+    verify: async () => {
+      await transport.verify();
+    },
+  });
 }
