@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
@@ -352,5 +352,36 @@ describe("mcp", () => {
     expect(during).toBe(200);
     expect(after).toBe(401);
     expect(existsSync(join(workspace, ".mcp.json"))).toBe(false);
+  });
+
+  it("revokes a token born in the same second as the revocation", async () => {
+    // Performs the test.
+    await database.db.update(users).set({ tokensRevokedAt: null }).where(eq(users.id, userId));
+    const token = await externalToken();
+    await database.db
+      .update(users)
+      .set({ tokensRevokedAt: sql`date_trunc('second', now())` })
+      .where(eq(users.id, userId));
+    const response = await rpc(token, "tools/list");
+
+    // Performs assertions.
+    expect(response.statusCode).toBe(401);
+  });
+
+  it("revokes the turn token when its config cannot be written", async () => {
+    // Performs the test.
+    await database.db.update(users).set({ tokensRevokedAt: null }).where(eq(users.id, userId));
+    const missing = join(tmpdir(), `no-such-dir-${Date.now()}`, "nested");
+    const attempt = chatMcpConfig(database.db, "http://127.0.0.1:3000/mcp")(missing, userId, 10);
+    await expect(attempt).rejects.toThrow();
+    const [latest] = await database.db
+      .select({ kind: accessTokens.kind, revokedAt: accessTokens.revokedAt })
+      .from(accessTokens)
+      .orderBy(desc(accessTokens.id))
+      .limit(1);
+
+    // Performs assertions.
+    expect(latest?.kind).toBe("run");
+    expect(latest?.revokedAt).toEqual(expect.any(Date));
   });
 });

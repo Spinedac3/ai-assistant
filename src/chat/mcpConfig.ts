@@ -20,25 +20,31 @@ export function chatMcpConfig(db: Database, serverUrl: string) {
   return async (workspace: string, userId: number, conversationId: number) => {
     const token = await mintRunToken(db, userId, TOKEN_MINUTES, { tools: null, conversationId });
     const path = join(workspace, ".mcp.json");
-
-    writeFileSync(
-      path,
-      JSON.stringify({
-        mcpServers: {
-          [MCP_SERVER]: {
-            type: "http",
-            url: serverUrl,
-            headers: { Authorization: `Bearer ${token}` },
-            // Loaded before the first request; a lazily connected server left turns without tools
-            alwaysLoad: true,
-          },
-        },
-      }),
-    );
-
-    return async () => {
+    const release = async () => {
       rmSync(path, { force: true });
       await revokeRunToken(db, token);
     };
+
+    try {
+      writeFileSync(
+        path,
+        JSON.stringify({
+          mcpServers: {
+            [MCP_SERVER]: {
+              type: "http",
+              url: serverUrl,
+              headers: { Authorization: `Bearer ${token}` },
+              // Loaded before the first request; a lazily connected server left turns without tools
+              alwaysLoad: true,
+            },
+          },
+        }),
+      );
+    } catch (error) {
+      await release();
+      throw error;
+    }
+
+    return release;
   };
 }

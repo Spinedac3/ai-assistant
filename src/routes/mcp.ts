@@ -74,9 +74,12 @@ export function acceptableOrigin(origin: string | undefined, publicBaseUrl: stri
  * @param   db       Own database
  * @param   request  Incoming request
  *
- * @return  The caller, or null when the token is missing, unknown, expired or revoked
+ * @return  The caller, "rate_limited", or null when the token is missing, unknown, expired or revoked
  */
-async function resolveCaller(db: Database, request: FastifyRequest): Promise<McpCaller | null> {
+async function resolveCaller(
+  db: Database,
+  request: FastifyRequest,
+): Promise<McpCaller | "rate_limited" | null> {
   const header = request.headers.authorization;
   const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
   if (token === "") {
@@ -89,6 +92,7 @@ async function resolveCaller(db: Database, request: FastifyRequest): Promise<Mcp
       userId: accessTokens.userId,
       kind: accessTokens.kind,
       createdAt: accessTokens.createdAt,
+      lastUsedAt: accessTokens.lastUsedAt,
     })
     .from(accessTokens)
     .where(
@@ -104,18 +108,31 @@ async function resolveCaller(db: Database, request: FastifyRequest): Promise<Mcp
     return null;
   }
 
-  const user = await resolveUser(db, row.userId);
-  // Revoking a person's sessions must end MCP sessions too, refreshed or not
-  if (!user?.active || (user.tokensRevokedAt && row.createdAt <= user.tokensRevokedAt)) {
-    return null;
-  }
-
-  await db.update(accessTokens).set({ lastUsedAt: sql`now()` }).where(eq(accessTokens.id, row.id));
-
   const run = row.kind === "run" ? runInfo(token) : null;
   // A run token unknown to this process belongs to a run that died with a previous one
   if (row.kind === "run" && !run) {
     return null;
+  }
+
+  // Cheap refusals first, before resolving the person or writing anything
+  if (overRate(row.userId)) {
+    return "rate_limited";
+  }
+
+  const user = await resolveUser(db, row.userId);
+  // Revoking a person's sessions must end MCP sessions too, refreshed or not. The cut-off is
+  // stored in whole seconds, so a token born in that same second is revoked as well
+  const bornAt = Math.floor(row.createdAt.getTime() / 1000) * 1000;
+  if (!user?.active || (user.tokensRevokedAt && bornAt <= user.tokensRevokedAt.getTime())) {
+    return null;
+  }
+
+  // Once a minute is enough to tell a live session from an abandoned one
+  if (!row.lastUsedAt || Date.now() - row.lastUsedAt.getTime() > 60_000) {
+    await db
+      .update(accessTokens)
+      .set({ lastUsedAt: sql`now()` })
+      .where(eq(accessTokens.id, row.id));
   }
 
   return {
@@ -154,12 +171,12 @@ export default async function mcpRoutes(
     }
 
     const caller = await resolveCaller(options.db, request);
-    if (!caller) {
-      return unauthorized(reply);
+    if (caller === "rate_limited") {
+      return reply.code(429).header("Retry-After", "60").send({ ok: false, error: "rate_limited" });
     }
 
-    if (overRate(caller.userId)) {
-      return reply.code(429).header("Retry-After", "60").send({ ok: false, error: "rate_limited" });
+    if (!caller) {
+      return unauthorized(reply);
     }
 
     const server = buildMcpServer(options.db, options.registry, caller, options.settings);
@@ -174,8 +191,23 @@ export default async function mcpRoutes(
       void server.close();
     });
 
-    await server.connect(transport);
-    await transport.handleRequest(request.raw, reply.raw, request.body);
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(request.raw, reply.raw, request.body);
+    } catch (error) {
+      // Fastify can no longer answer a hijacked reply, so this one must, or the client hangs
+      request.log.error({ err: error }, "mcp request failed");
+      if (!reply.raw.headersSent) {
+        reply.raw.writeHead(500, { "Content-Type": "application/json" });
+      }
+      reply.raw.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32603, message: "Internal error" },
+        }),
+      );
+    }
   });
 
   // Stateless: no server-to-client stream and no sessions to end
