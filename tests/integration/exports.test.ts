@@ -55,6 +55,11 @@ function download(url: string) {
 describe("exports", () => {
   beforeAll(async () => {
     database = await freshDatabase();
+    // The bucket would otherwise exist only if the document tests ran first
+    const client = s3Client(STORAGE);
+    if (!(await client.bucketExists(STORAGE.bucket))) {
+      await client.makeBucket(STORAGE.bucket);
+    }
     store = new ExportStore(database.db, STORAGE, randomBytes(32), BASE);
     registry = new ToolRegistry(database.db);
     registry.useExports(store);
