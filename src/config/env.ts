@@ -19,6 +19,22 @@ const ragSchema = z.object({
   DOCS_WORKER_POLL_MS: z.coerce.number().int().positive().default(5_000),
 });
 
+/**
+ * Tells whether an address can go in a mail: https, or http only to this machine
+ *
+ * @param   url  Public address of the server
+ *
+ * @return  Whether links to it may be mailed
+ */
+function mailableBase(url: string | undefined): boolean {
+  if (!url) {
+    return false;
+  }
+  const { protocol, hostname } = new URL(url);
+
+  return protocol === "https:" || ["localhost", "127.0.0.1", "[::1]"].includes(hostname);
+}
+
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -94,16 +110,13 @@ const envSchema = z
         message: "En producción el correo siempre va cifrado",
       });
     }
-    // The reset link points here; over http or to localhost it would leak or lead nowhere
-    if (
-      env.NODE_ENV === "production" &&
-      env.SMTP_HOST &&
-      !env.PUBLIC_BASE_URL?.startsWith("https://")
-    ) {
+    // Mailed reset links point here, whatever NODE_ENV says: without it they would lead to
+    // localhost, and over http the token would travel in clear text
+    if (env.SMTP_HOST && !mailableBase(env.PUBLIC_BASE_URL)) {
       context.addIssue({
         code: "custom",
         path: ["PUBLIC_BASE_URL"],
-        message: "Con correo en producción hace falta PUBLIC_BASE_URL con https",
+        message: "Con correo hace falta PUBLIC_BASE_URL con https (http solo en esta máquina)",
       });
     }
     if (env.SMTP_USER && !env.SMTP_PASSWORD_FILE) {

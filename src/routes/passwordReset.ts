@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, eq, gt, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, lt, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
@@ -20,6 +20,7 @@ export interface PasswordResetRoutesOptions {
 
 // Long enough to read the mail, short enough that a forgotten one is useless soon
 const LINK_MINUTES = 60;
+const REVOKE_WAIT_CAP_MS = 2_000;
 
 const userParams = z.object({ id: z.coerce.number().int().positive() });
 const resetBody = z.object({
@@ -82,6 +83,9 @@ export default async function passwordResetRoutes(
         createdBy: request.authUser?.id ?? 0,
       })
       .returning({ id: passwordResets.id });
+    if (!link) {
+      throw new Error("El enlace no se guardó");
+    }
 
     try {
       // In the fragment, the token never reaches a server log or a Referer header
@@ -94,7 +98,7 @@ export default async function passwordResetRoutes(
           "Si no lo pediste, ignora este correo; tu contraseña actual sigue igual.",
       });
     } catch (error) {
-      await db.delete(passwordResets).where(eq(passwordResets.id, link?.id ?? 0));
+      await db.delete(passwordResets).where(eq(passwordResets.id, link.id));
       request.log.warn({ err: error }, "password reset mail failed");
       return reply.code(502).send({
         ok: false,
@@ -103,15 +107,16 @@ export default async function passwordResetRoutes(
       });
     }
 
-    // Only the newest link works, so a mail sent by mistake is undone by sending another; dropped
-    // only once the new one went out, so a failed send leaves the person the link they had
+    // Only the newest link works, so a mail sent by mistake is undone by sending another. Dropped
+    // only once the new one went out, so a failed send leaves the person the link they had; and
+    // only the older ones, so two sends at once never cancel each other
     await db
       .delete(passwordResets)
       .where(
         and(
           eq(passwordResets.userId, user.id),
           isNull(passwordResets.usedAt),
-          ne(passwordResets.id, link?.id ?? 0),
+          lt(passwordResets.id, link.id),
         ),
       );
     await logAudit(db, {
@@ -164,8 +169,6 @@ export default async function passwordResetRoutes(
     }
 
     const passwordHash = await hashPassword(body.data.password);
-    // Whole seconds, as tokens carry their issue time; whoever held the account is logged out
-    const revokedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
     // Spending the link and saving the password happen together or not at all, and the spend is
     // conditional, so two requests with one link cannot both pass
     const done = await db.transaction(async (tx) => {
@@ -175,13 +178,21 @@ export default async function passwordResetRoutes(
         .where(usable)
         .returning({ id: passwordResets.id });
       if (spent.length === 0) {
-        return false;
+        return null;
       }
-      await tx
+      // Whole seconds of the database clock, as the sessions revoke stores it; whoever held the
+      // account is logged out
+      const [user] = await tx
         .update(users)
-        .set({ passwordHash, failedLogins: 0, lockedUntil: null, tokensRevokedAt: revokedAt })
-        .where(eq(users.id, found.userId));
-      return true;
+        .set({
+          passwordHash,
+          failedLogins: 0,
+          lockedUntil: null,
+          tokensRevokedAt: sql`date_trunc('second', now())`,
+        })
+        .where(eq(users.id, found.userId))
+        .returning({ revokedAt: users.tokensRevokedAt });
+      return user?.revokedAt ?? null;
     });
     if (!done) {
       return invalid();
@@ -195,8 +206,12 @@ export default async function passwordResetRoutes(
       ip: request.ip,
     });
     // A token issued in the revoked second would be born revoked; the answer waits that second out
-    // so the login that usually follows works
-    await new Promise((resolve) => setTimeout(resolve, revokedAt.getTime() + 1_000 - Date.now()));
+    // so the login that usually follows works. Timers may fire a little early, hence the loop, and a
+    // database clock far ahead of this one never holds the answer longer than the cap
+    const until = Math.min(done.getTime() + 1_000, Date.now() + REVOKE_WAIT_CAP_MS);
+    while (Date.now() < until) {
+      await new Promise((resolve) => setTimeout(resolve, until - Date.now() + 5));
+    }
 
     return { ok: true };
   });

@@ -24,6 +24,9 @@ export interface SmtpConfig {
 
 // A server that accepts the connection and then never answers would hold the worker forever
 const SMTP_TIMEOUT_MS = 30_000;
+// A whole send, however the server drips its answers; shorter than the outbox lease, so a slow
+// send is never claimed and sent again by another worker while still in flight
+const SEND_TIMEOUT_MS = 120_000;
 
 /**
  * Writes plain text as HTML that shows the same: escaped, with its line breaks
@@ -70,7 +73,8 @@ export function smtpMailer(config: SmtpConfig): SendMail {
   });
 
   return async (mail) => {
-    await transport.sendMail({
+    let timer: NodeJS.Timeout | undefined;
+    const sending = transport.sendMail({
       from: config.from,
       to: mail.to,
       subject: mail.subject,
@@ -78,5 +82,18 @@ export function smtpMailer(config: SmtpConfig): SendMail {
       html: textToHtml(mail.text),
       replyTo: mail.replyTo,
     });
+    try {
+      await Promise.race([
+        sending,
+        new Promise((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("El servidor de correo no terminó a tiempo")),
+            SEND_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   };
 }

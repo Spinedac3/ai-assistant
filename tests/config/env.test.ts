@@ -49,7 +49,11 @@ describe("env", () => {
 
   it("asks for the sender address and the password file a mail server needs", () => {
     // Performs the test.
-    const smtp = { ...required, SMTP_HOST: "smtp.example.com" };
+    const smtp = {
+      ...required,
+      SMTP_HOST: "smtp.example.com",
+      PUBLIC_BASE_URL: "https://asistente.example.com",
+    };
 
     // Performs assertions.
     expect(() => loadEnv(smtp)).toThrow("SMTP_FROM");
@@ -73,6 +77,15 @@ describe("env", () => {
     // Performs assertions.
     expect(() => loadEnv({ ...required, SMTP_HOST: "x", SMTP_FROM: "sin-arroba" })).toThrow(
       "SMTP_FROM",
+    );
+    // Whatever NODE_ENV says, a mailed link needs an address that is not this machine over http
+    const development = { ...required, SMTP_HOST: "x", SMTP_FROM: "a@example.com" };
+    expect(() => loadEnv(development)).toThrow("PUBLIC_BASE_URL");
+    expect(() =>
+      loadEnv({ ...development, PUBLIC_BASE_URL: "http://asistente.example.com" }),
+    ).toThrow("PUBLIC_BASE_URL");
+    expect(loadEnv({ ...development, PUBLIC_BASE_URL: "http://localhost:3000" }).SMTP_HOST).toBe(
+      "x",
     );
     expect(() => loadEnv(production)).toThrow("PUBLIC_BASE_URL");
     expect(() =>

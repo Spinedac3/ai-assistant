@@ -21,6 +21,7 @@ let database: DatabaseHandle;
 let app: FastifyInstance;
 let quiet: FastifyInstance;
 let failing: FastifyInstance;
+let racing: FastifyInstance;
 let adminToken: string;
 let anaId: number;
 
@@ -128,6 +129,22 @@ describe("password reset by mail", () => {
         assistantName: "Lumen",
       },
     });
+    // While its mail goes out, another send for the same person stores a newer link
+    racing = await buildApp({
+      ...deps,
+      passwordReset: {
+        mailer: async () => {
+          await database.db.insert(passwordResets).values({
+            userId: anaId,
+            tokenHash: "c".repeat(64),
+            expiresAt: sql`now() + interval '1 hour'`,
+            createdBy: anaId,
+          });
+        },
+        publicBaseUrl: "https://assistant.example.com",
+        assistantName: "Lumen",
+      },
+    });
     await createUser(`admin-${run}@example.com`, "admin");
     anaId = await createUser(ana, "user");
     adminToken = (await login(`admin-${run}@example.com`)).json().data.token;
@@ -137,6 +154,7 @@ describe("password reset by mail", () => {
     await app.close();
     await quiet.close();
     await failing.close();
+    await racing.close();
     await database.close();
   });
 
@@ -180,22 +198,38 @@ describe("password reset by mail", () => {
     const second = await lastLinkToken(ana);
     const replaced = await reset(first);
     const failedSend = await sendLink(anaId, adminToken, failing);
-    const kept = await database.db
-      .select({ id: passwordResets.id })
-      .from(passwordResets)
-      .where(and(eq(passwordResets.userId, anaId), isNull(passwordResets.usedAt)));
+    // The link the person already had still works
+    const kept = await reset(second);
+    await sendLink(anaId);
+    const third = await lastLinkToken(ana);
     await database.db
       .update(passwordResets)
       .set({ expiresAt: sql`now() - interval '1 minute'` })
       .where(eq(passwordResets.userId, anaId));
-    const expired = await reset(second);
+    const expired = await reset(third);
 
     // Performs assertions.
     expect(first).not.toBe(second);
     expect(replaced.json()).toMatchObject({ error: "invalid_link" });
     expect(failedSend.json()).toMatchObject({ error: "mail_failed" });
-    expect(kept).toHaveLength(1);
+    expect(kept.json()).toEqual({ ok: true });
     expect(expired.json()).toMatchObject({ error: "invalid_link" });
+  });
+
+  it("lets a link set one password even when used twice at once, and never cancels a newer send", async () => {
+    // Performs the test.
+    await sendLink(anaId);
+    const token = await lastLinkToken(ana);
+    const both = await Promise.all([reset(token), reset(token)]);
+    await sendLink(anaId, adminToken, racing);
+    const newer = await database.db
+      .select({ id: passwordResets.id })
+      .from(passwordResets)
+      .where(and(eq(passwordResets.tokenHash, "c".repeat(64)), isNull(passwordResets.usedAt)));
+
+    // Performs assertions.
+    expect(both.map((response) => response.json().ok ?? false).sort()).toEqual([false, true]);
+    expect(newer).toHaveLength(1);
   });
 
   it("opens a page that reads the link and runs only its own script", async () => {
@@ -209,7 +243,10 @@ describe("password reset by mail", () => {
     expect(page.headers["referrer-policy"]).toBe("no-referrer");
     expect(nonce).toBeTruthy();
     expect(page.body).toContain(`<script nonce="${nonce}">`);
-    expect(page.body).toContain('fetch("/auth/password-reset"');
+    // Relative to /reset-password, so it reaches /auth/password-reset under any published path
+    expect(page.body).toContain('fetch("auth/password-reset"');
+    expect(page.headers["x-content-type-options"]).toBe("nosniff");
+    expect(page.body).toContain("Este enlace no sirve");
     expect(page.body).toContain("Nueva contraseña para Lumen");
   });
 

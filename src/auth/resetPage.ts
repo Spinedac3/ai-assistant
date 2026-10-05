@@ -10,6 +10,7 @@ export function resetHeaders(nonce: string): Record<string, string> {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'`,
     "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
   };
@@ -71,6 +72,10 @@ export function resetPage(assistantName: string, nonce: string): string {
   history.replaceState(null, "", location.pathname);
   const form = document.getElementById("reset");
   const message = document.getElementById("message");
+  if (!token) {
+    form.remove();
+    message.textContent = "Este enlace no sirve. Pide uno nuevo a quien administra el asistente.";
+  }
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const password = document.getElementById("password").value;
@@ -78,12 +83,14 @@ export function resetPage(assistantName: string, nonce: string): string {
       message.textContent = "Las dos contraseñas no coinciden.";
       return;
     }
-    const response = await fetch("/auth/password-reset", {
+    // Relative, so it works under whatever path the server is published
+    const body = await fetch("auth/password-reset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token, password }),
-    });
-    const body = await response.json().catch(() => ({}));
+    })
+      .then((response) => response.json())
+      .catch(() => ({ message: "No hubo conexión con el servidor; vuelve a intentarlo." }));
     if (body.ok) {
       form.remove();
       message.textContent = "Listo. Ya puedes entrar con tu contraseña nueva.";

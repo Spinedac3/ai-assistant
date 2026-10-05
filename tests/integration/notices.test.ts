@@ -108,7 +108,7 @@ describe("notices", () => {
     expect(triedAgain).toBe(0);
     expect(mails).toHaveLength(1);
     expect(mails[0]).toMatchObject({
-      subject: "[Agente de entregas] Entregas tardías",
+      subject: `[Aviso de ${agent}] Entregas tardías`,
       text: `Aviso de Agente de entregas (${agent}), enviado por Lumen:\n\nHubo 3.`,
       replyTo: agent,
     });
@@ -159,7 +159,7 @@ describe("notices", () => {
     // Performs assertions.
     expect(waits).toEqual([1, 2, 4]);
     expect(afterThree).toMatchObject({ status: "pending", attempts: 3 });
-    expect(delivered.map((mail) => mail.subject)).toEqual(["[Agente de entregas] Servidor caído"]);
+    expect(delivered.map((mail) => mail.subject)).toEqual([`[Aviso de ${agent}] Servidor caído`]);
     expect(lost).toEqual({ status: "failed", attempts: MAX_ATTEMPTS, lastError: "no es un Error" });
     expect(retried.map((result) => result.outcome)).toEqual(["already_failed"]);
     expect(audited.map((row) => row.message)).toEqual([
@@ -200,8 +200,15 @@ describe("notices", () => {
       attempts: MAX_ATTEMPTS,
       lastError: "El envío se cortó sin resultado",
     });
+    const audited = await database.db
+      .select({ message: auditLogs.message })
+      .from(auditLogs)
+      .where(eq(auditLogs.eventCode, "notices.failed"));
+    expect(audited.at(-1)?.message).toContain(
+      "quedó sin resultado en su último intento: El envío se cortó sin resultado",
+    );
     expect((await mailsTo(carla)).map((mail) => mail.subject)).toEqual([
-      "[Agente de entregas] Cortado",
+      `[Aviso de ${agent}] Cortado`,
     ]);
   });
 
@@ -224,32 +231,125 @@ describe("notices", () => {
     expect(after).toEqual({ status: "pending", attempts: 2, lastError: "otro worker" });
   });
 
-  it("sends nothing twice when two workers look at the same time, and stops between notices", async () => {
+  it("lets two workers send in parallel without sharing a notice, and stops between notices", async () => {
     // Performs the test.
-    let sent = 0;
-    const counting = async () => {
-      sent++;
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    };
     await enqueueNotices(
       database.db,
       senderId,
-      [1, 2, 3].map((n) => ({ key: `par-${n}`, to: carla, subject: "x", message: "x" })),
+      [1, 2].map((n) => ({ key: `par-${n}`, to: carla, subject: `par-${n}`, message: "x" })),
     );
+    // Each send waits until both are in flight, so each worker must hold a different notice
+    const subjects: string[] = [];
+    let release: () => void = () => {};
+    const both = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const together = async (mail: { subject: string }) => {
+      subjects.push(mail.subject);
+      if (subjects.length === 2) {
+        release();
+      }
+      await Promise.race([both, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+    };
     await Promise.all([
-      deliverDue(database.db, counting, "Lumen"),
-      deliverDue(database.db, counting, "Lumen"),
+      deliverDue(database.db, together, "Lumen"),
+      deliverDue(database.db, together, "Lumen"),
     ]);
     await enqueueNotices(
       database.db,
       senderId,
       [1, 2].map((n) => ({ key: `alto-${n}`, to: carla, subject: "x", message: "x" })),
     );
-    const afterStop = await deliverDue(database.db, counting, "Lumen", () => true);
+    let sent = 0;
+    const tried = await deliverDue(
+      database.db,
+      async () => {
+        sent++;
+      },
+      "Lumen",
+      () => sent === 1,
+    );
 
     // Performs assertions.
-    expect(sent).toBe(3);
-    expect(afterStop).toBe(0);
+    expect(subjects.sort()).toEqual([`[Aviso de ${agent}] par-1`, `[Aviso de ${agent}] par-2`]);
+    expect(tried).toBe(1);
+    expect(sent).toBe(1);
+  });
+
+  it("drops a notice whose sender or recipient closed meanwhile, and keeps the sender's name to one plain line", async () => {
+    // Performs the test.
+    const [dora, fede] = await database.db
+      .insert(users)
+      .values([
+        {
+          email: `dora-${run}@example.com`,
+          displayName: `Dora${String.fromCharCode(10)}Administración${String.fromCharCode(0x202e)} del asistente`,
+        },
+        { email: `fede-${run}@example.com`, displayName: "Fede" },
+        { email: `gabi-${run}@example.com`, displayName: "Gabi" },
+      ])
+      .returning({ id: users.id });
+    await enqueueNotices(database.db, dora?.id ?? 0, [
+      { key: "a-fede", to: `fede-${run}@example.com`, subject: "Hola", message: "x" },
+      { key: "a-gabi", to: `gabi-${run}@example.com`, subject: "Hola", message: "x" },
+    ]);
+    await database.db
+      .update(users)
+      .set({ active: false })
+      .where(eq(users.id, fede?.id ?? 0));
+    await deliverDue(database.db, mailer, "Lumen");
+    const toFede = await noticeOf("a-fede");
+    const toGabi = await mailsTo(`gabi-${run}@example.com`);
+    await enqueueNotices(database.db, dora?.id ?? 0, [
+      { key: "a-gabi-2", to: `gabi-${run}@example.com`, subject: "Otra", message: "x" },
+    ]);
+    await database.db
+      .update(users)
+      .set({ deletedAt: new Date() })
+      .where(eq(users.id, dora?.id ?? 0));
+    await deliverDue(database.db, mailer, "Lumen");
+    const fromDeleted = await noticeOf("a-gabi-2");
+
+    // Performs assertions.
+    expect(toFede).toMatchObject({
+      status: "failed",
+      lastError: "La cuenta de quien envía o de quien recibe ya no está activa",
+    });
+    expect(toGabi).toHaveLength(1);
+    expect(toGabi[0]?.text.split(String.fromCharCode(10))[0]).toBe(
+      `Aviso de Dora Administración del asistente (dora-${run}@example.com), enviado por Lumen:`,
+    );
+    expect(fromDeleted?.status).toBe("failed");
+    expect(await mailsTo(`fede-${run}@example.com`)).toEqual([]);
+  });
+
+  it("never claims a notice past its last attempt, even one that came due mid-round", async () => {
+    // Performs the test.
+    await enqueueNotices(database.db, senderId, [
+      { key: "primero", to: carla, subject: "x", message: "x" },
+      { key: "agotado", to: carla, subject: "x", message: "x" },
+    ]);
+    await database.db
+      .update(notices)
+      .set({ nextAttemptAt: sql`now() + interval '1 hour'` })
+      .where(eq(notices.key, "agotado"));
+    // While the first one is sent, the other comes due with every attempt already spent
+    const sent: string[] = [];
+    await deliverDue(
+      database.db,
+      async (mail) => {
+        sent.push(mail.subject);
+        await database.db
+          .update(notices)
+          .set({ attempts: MAX_ATTEMPTS, nextAttemptAt: sql`now()` })
+          .where(eq(notices.key, "agotado"));
+      },
+      "Lumen",
+    );
+
+    // Performs assertions.
+    expect(sent).toHaveLength(1);
+    expect((await noticeOf("agotado"))?.attempts).toBe(MAX_ATTEMPTS);
   });
 
   it("stops at the hourly quota of the person who receives and of the one who sends", async () => {
@@ -325,6 +425,11 @@ describe("notices", () => {
     await enqueueNotices(database.db, senderId, [
       { key: "fondo", to: ana, subject: "En segundo plano", message: "Llegó solo." },
     ]);
+    // Only this notice is due, so the round is short whatever earlier tests left pending
+    await database.db
+      .update(notices)
+      .set({ nextAttemptAt: sql`now() + interval '1 day'` })
+      .where(sql`${notices.status} = 'pending' and ${notices.key} <> 'fondo'`);
     const errors: unknown[] = [];
     const stop = startNoticeWorker({
       db: database.db,
@@ -340,7 +445,7 @@ describe("notices", () => {
     const mails = await mailsTo(ana);
 
     // Performs assertions.
-    expect(mails.map((mail) => mail.subject)).toContain("[Agente de entregas] En segundo plano");
+    expect(mails.map((mail) => mail.subject)).toContain(`[Aviso de ${agent}] En segundo plano`);
     expect(errors).toEqual([]);
   });
 

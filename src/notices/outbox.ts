@@ -2,6 +2,7 @@ import { and, count, eq, gte, isNull, lt, or, sql } from "drizzle-orm";
 import { logAudit } from "../audit.js";
 import type { Database } from "../db/client.js";
 import { notices, passwordResets, users } from "../db/schema.js";
+import { removeHidden } from "../lib/hiddenText.js";
 import type { SendMail } from "./mailer.js";
 
 export interface NoticeRequest {
@@ -35,8 +36,12 @@ export const MAX_ATTEMPTS = 9;
 // Longer than the slowest single send (three SMTP timeouts); a notice claimed and never resolved,
 // because the process died mid-send, is tried again after it
 const CLAIM_LEASE_MINUTES = 5;
-// Namespace of the advisory locks that serialize the quota of each recipient
+// Namespaces of the advisory locks that serialize the quotas of each sender and each recipient;
+// always taken in that order, so two of them never wait on each other
+const SENDER_LOCK = 7_400;
 const RECIPIENT_LOCK = 7_401;
+// A display name is the sender's own text; in a subject or a first line it is kept short
+const NAME_CHARS = 60;
 // Sent and failed notices are kept this long, then dropped with their text
 const KEEP_DAYS = 30;
 
@@ -85,15 +90,15 @@ export async function enqueueNotices(
     }
 
     const outcome = await db.transaction(async (tx) => {
-      // Parallel senders to one person wait here, so the count below is the real one
+      // Parallel calls of one sender, and parallel senders to one person, wait here, so the
+      // counts below are the real ones
+      await tx.execute(sql`select pg_advisory_xact_lock(${SENDER_LOCK}, ${senderId})`);
       await tx.execute(sql`select pg_advisory_xact_lock(${RECIPIENT_LOCK}, ${recipient.id})`);
       const hour = sql`now() - interval '1 hour'`;
       const [received] = await tx
         .select({ total: count() })
         .from(notices)
         .where(and(eq(notices.recipientUserId, recipient.id), gte(notices.createdAt, hour)));
-      // ponytail: parallel calls of one sender can pass this by their number; a lock per sender
-      // if that ever matters
       const [sent] = await tx
         .select({ total: count() })
         .from(notices)
@@ -157,13 +162,17 @@ async function closeAbandoned(db: Database): Promise<void> {
         sql`${notices.nextAttemptAt} <= now()`,
       ),
     )
-    .returning({ id: notices.id, senderUserId: notices.senderUserId });
+    .returning({
+      id: notices.id,
+      senderUserId: notices.senderUserId,
+      lastError: notices.lastError,
+    });
   for (const notice of closed) {
     await logAudit(db, {
       userId: notice.senderUserId,
       level: "error",
       eventCode: "notices.failed",
-      message: `El aviso ${notice.id} se cortó en cada uno de sus ${MAX_ATTEMPTS} intentos`,
+      message: `El aviso ${notice.id} quedó sin resultado en su último intento: ${notice.lastError}`,
     });
   }
 }
@@ -189,11 +198,12 @@ async function deliverNext(db: Database, send: SendMail, assistantName: string):
       where status = 'pending' and next_attempt_at <= now() and attempts < ${MAX_ATTEMPTS}
       order by next_attempt_at, id limit 1 for update skip locked
     )
-    returning id, sender_user_id, recipient_email, subject, message, attempts`);
+    returning id, sender_user_id, recipient_user_id, recipient_email, subject, message, attempts`);
   const row = claimed.rows[0] as
     | {
         id: number;
         sender_user_id: number;
+        recipient_user_id: number;
         recipient_email: string;
         subject: string;
         message: string;
@@ -210,26 +220,47 @@ async function deliverNext(db: Database, send: SendMail, assistantName: string):
     eq(notices.attempts, row.attempts),
     eq(notices.status, "pending"),
   );
+  const live = and(eq(users.active, true), isNull(users.deletedAt));
   const [sender] = await db
     .select({ name: users.displayName, email: users.email })
     .from(users)
-    .where(eq(users.id, row.sender_user_id));
-  // Who sends comes first and in the subject, written by the server: the text is the sender's, so
-  // it must never pass for a mail of the assistant itself
-  const name = sender?.name ?? "una cuenta borrada";
+    .where(and(eq(users.id, row.sender_user_id), live));
+  const [recipient] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.id, row.recipient_user_id), live));
+  // An account closed while its notice waited neither sends nor receives any more
+  if (!sender || !recipient) {
+    await db
+      .update(notices)
+      .set({
+        status: "failed",
+        lastError: "La cuenta de quien envía o de quien recibe ya no está activa",
+      })
+      .where(own);
+    return true;
+  }
+
+  // Who sends comes first, and in the subject as the address the server knows: the text and the
+  // display name are the sender's own, so they must never pass for a mail of the assistant
+  const name = removeHidden(sender.name)
+    .replace(/\p{Cc}/gu, " ")
+    .slice(0, NAME_CHARS);
   let failure: string | null = null;
   try {
     await send({
       to: row.recipient_email,
-      subject: `[${name}] ${row.subject}`,
-      text: `Aviso de ${name}${sender ? ` (${sender.email})` : ""}, enviado por ${assistantName}:\n\n${row.message}`,
-      replyTo: sender?.email,
+      subject: `[Aviso de ${sender.email}] ${row.subject}`,
+      text: `Aviso de ${name} (${sender.email}), enviado por ${assistantName}:\n\n${row.message}`,
+      replyTo: sender.email,
     });
   } catch (error) {
     failure = String(error instanceof Error ? error.message : error).slice(0, 500);
   }
 
   if (failure === null) {
+    // Delivery is at least once: should this update fail after the mail went out, the lease runs
+    // out and the notice is sent again
     await db
       .update(notices)
       .set({ status: "sent", sentAt: sql`now()`, lastError: null })
