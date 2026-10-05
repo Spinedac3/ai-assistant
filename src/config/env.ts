@@ -5,7 +5,13 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().url(),
   ASSISTANT_NAME: z.string().min(1).default("Asistente"),
-  TZ: z.string().min(1).default("UTC"),
+  // Not TZ: that one would shift every Date in the process; storage stays in UTC
+  APP_TIMEZONE: z
+    .string()
+    .refine((zone) => Intl.supportedValuesOf("timeZone").includes(zone) || zone === "UTC", {
+      message: "Zona horaria IANA desconocida",
+    })
+    .default("UTC"),
   JWT_PRIVATE_KEY_FILE: z.string().min(1),
   JWT_ISSUER: z.string().min(1).default("ai-assistant"),
   JWT_TTL_SECONDS: z.coerce.number().int().positive().default(900),
