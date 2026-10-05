@@ -1,7 +1,7 @@
-import { Text } from "@chakra-ui/react";
 import { createBrowserRouter, Navigate } from "react-router";
 import { useSession } from "./api/session";
 import { ChatPage } from "./chat/ChatPage";
+import { DocsPage } from "./docs/DocsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { Layout } from "./shell/Layout";
 
@@ -23,7 +23,7 @@ export const router = createBrowserRouter(
         { index: true, element: <Navigate to="/chat" replace /> },
         { path: "chat", handle: { title: "Chat" }, element: <ChatPage /> },
         { path: "chat/:id", handle: { title: "Chat" }, element: <ChatPage /> },
-        { path: "documentos", handle: { title: "Documentos" }, element: <Text>Documentos</Text> },
+        { path: "documentos", handle: { title: "Documentos" }, element: <DocsPage /> },
       ],
     },
   ],
