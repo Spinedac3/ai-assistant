@@ -53,6 +53,13 @@ const envSchema = z
     RATE_LIMIT_MSGS_PER_HOUR: z.coerce.number().int().positive().default(60),
     RATE_LIMIT_MSGS_PER_DAY: z.coerce.number().int().positive().default(300),
     RATE_LIMIT_TOKENS_PER_DAY: z.coerce.number().int().positive().default(2_000_000),
+    // Mail for notices and password resets; without a host there are none
+    SMTP_HOST: z.string().min(1).optional(),
+    SMTP_PORT: z.coerce.number().int().positive().default(587),
+    SMTP_USER: z.string().min(1).optional(),
+    SMTP_PASSWORD_FILE: z.string().min(1).optional(),
+    SMTP_FROM: z.string().min(3).optional(),
+    NOTICES_WORKER_POLL_MS: z.coerce.number().int().positive().default(10_000),
     ...ragSchema.shape,
   })
   // The storage defaults match docker-compose and are public; in production they would open every
@@ -66,6 +73,20 @@ const envSchema = z
         code: "custom",
         path: ["S3_SECRET_KEY"],
         message: "En producción las credenciales de S3 no pueden ser las de ejemplo",
+      });
+    }
+    if (env.SMTP_HOST && !env.SMTP_FROM) {
+      context.addIssue({
+        code: "custom",
+        path: ["SMTP_FROM"],
+        message: "Con SMTP_HOST hace falta la dirección que envía (SMTP_FROM)",
+      });
+    }
+    if (env.SMTP_USER && !env.SMTP_PASSWORD_FILE) {
+      context.addIssue({
+        code: "custom",
+        path: ["SMTP_PASSWORD_FILE"],
+        message: "Con SMTP_USER hace falta el archivo de su contraseña (SMTP_PASSWORD_FILE)",
       });
     }
   });
