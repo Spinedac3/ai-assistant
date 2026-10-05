@@ -88,14 +88,20 @@ URL `https://<tu-dominio>/mcp`:
 2. Abre en el navegador la página de consentimiento: la persona entra con su correo y contraseña
    y decide si permite o rechaza.
 3. El cliente canjea el código con PKCE (S256) y recibe un token de 1 hora y un refresh de 90
-   días, que rota en cada uso. Si un refresh ya usado vuelve a aparecer, la sesión entera se
-   revoca: alguien tiene una copia robada.
+   días, que rota en cada uso. Si el refresh anterior vuelve a aparecer pasados unos segundos de
+   la rotación, la sesión entera se revoca: alguien tiene una copia robada. Dentro de esos
+   segundos se toma como el mismo cliente pidiendo dos veces y solo se rechaza.
 
 El token nunca da más de lo que la persona ya puede hacer: sus permisos salen de su rol en cada
 llamada. Revocar sus sesiones (`POST /auth/sessions/revoke`) también corta estos tokens.
 
-El registro está abierto a cualquier redirect `https` o a `localhost`, porque cada cliente igual
-necesita que una persona real entre y acepte; cada registro queda en la auditoría. Para que los
+El registro está abierto a cualquier redirect `https` o a `localhost` (en `localhost` el puerto
+puede cambiar entre intentos), porque cada cliente igual necesita que una persona real entre y
+acepte; cada registro queda en la auditoría y hay un máximo de 10 por IP cada 10 minutos.
+
+Detrás de un proxy (nginx, un balanceador) hay que poner `TRUST_PROXY_HOPS` con la cantidad de
+proxies; sin eso se ignora `X-Forwarded-For`, porque cualquiera puede escribirlo y elegiría la IP
+que ven los límites y la auditoría. Para que los
 clientes en la nube lleguen, el servidor tiene que estar publicado con HTTPS y `PUBLIC_BASE_URL`
 tiene que tener esa dirección.
 
