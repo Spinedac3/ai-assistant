@@ -10,6 +10,7 @@ import {
   CHAT_MAX_BYTES,
   capResult,
   EXTERNAL_MAX_BYTES,
+  PROGRAM_MAX_BYTES,
   withCapFields,
 } from "./cap.js";
 import type { Tool, ToolDefinition, ToolOrigin } from "./contract.js";
@@ -30,6 +31,14 @@ export const DENIAL_NOTE =
 // Arguments are audited to learn how tools are used; a long text, such as a whole document, only
 // grows the table, so its length stands in for it
 const AUDITED_TEXT_CHARS = 1_000;
+// What a result may weigh for whoever reads it: a model in the chat or a trial, a client's model
+// over MCP, or a program that reads it in code
+const MAX_BYTES_OF: Record<ToolOrigin, number> = {
+  chat: CHAT_MAX_BYTES,
+  trial: CHAT_MAX_BYTES,
+  mcp: EXTERNAL_MAX_BYTES,
+  run: PROGRAM_MAX_BYTES,
+};
 
 /**
  * Prepares a call's arguments for the audit, keeping every key and the length of long texts
@@ -349,7 +358,7 @@ export class ToolRegistry {
     const target = filtered ? null : filterable(clean);
     const capped = await capResult(
       filtered ? filtered.data : clean,
-      context.origin === "mcp" ? EXTERNAL_MAX_BYTES : CHAT_MAX_BYTES,
+      MAX_BYTES_OF[context.origin],
       this.archiveFor(name, caller, context.origin),
       target ? filterHint(target) : "",
       result.main,

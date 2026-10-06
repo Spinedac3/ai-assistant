@@ -101,6 +101,25 @@ describe("run tokens for another system", () => {
       },
       execute: async () => ({ ok: true, data: { total: 1 } }),
     });
+    registry.register({
+      definition: {
+        name: "every_order",
+        description: "Lists every order.",
+        inputSchema: { type: "object", properties: {} },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({
+        ok: true,
+        data: {
+          orders: Array.from({ length: 6_000 }, (_, index) => ({
+            order: index,
+            customer: `Cliente número ${index}`,
+            amount: index * 3,
+          })),
+        },
+      }),
+    });
     const clients = new Map<string, MachineClient>(
       ["agent-factory", "other-system"].map((clientId) => [
         clientId,
@@ -235,6 +254,35 @@ describe("run tokens for another system", () => {
     expect(before).toEqual({ status: 200, names: ["calculate"] });
     expect(afterRole).toEqual({ status: 200, names: [] });
     expect(afterLeaving.status).toBe(401);
+  });
+
+  it("hands a program the whole result, which the chat would cut", async () => {
+    // Performs the test.
+    const token = (
+      await issue({ owner_id: ownerId, tools: ["every_order"], minutes: 5, run_id: "run-5" })
+    ).json().data.token;
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "every_order", arguments: {} },
+      },
+    });
+    const result = response.json().result;
+    const orders = result.structuredContent.orders as unknown[];
+
+    // Performs assertions.
+    expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeGreaterThan(250_000);
+    expect(orders).toHaveLength(6_000);
+    expect(result.structuredContent).not.toHaveProperty("archivo");
   });
 
   it("lets only the system that asked for a token end it", async () => {

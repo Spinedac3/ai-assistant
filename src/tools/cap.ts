@@ -5,6 +5,9 @@ import type { JsonSchema } from "./contract.js";
 export const CHAT_MAX_BYTES = 40_000;
 // External clients take larger results; past this, rows stop helping a model that reads them all
 export const EXTERNAL_MAX_BYTES = 250_000;
+// A program counts, classifies and joins in code, so it needs whole lists and no model reads them;
+// this only stops a result that would overflow the process
+export const PROGRAM_MAX_BYTES = 20_000_000;
 // Lists this small are summaries; they are the last thing to give way
 const SMALL_LIST_BYTES = 1_000;
 // What one sheet keeps; Excel holds about a million, nobody reads that from a chat link
