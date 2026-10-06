@@ -241,7 +241,9 @@ export class ExportStore {
     const failed = new Set(
       failures.map((item) => (item as { Key?: string } | null)?.Key ?? item?.Error?.Key),
     );
-    const removed = expired.filter((row) => !failed.has(objectKey(row.id)));
+    const removed = expired.filter(
+      (row) => !failed.has(objectKey(row.id)) && !failed.has(objectKey(row.id, "preview")),
+    );
     if (removed.length > 0) {
       await this.db.delete(exportFiles).where(
         inArray(

@@ -59,7 +59,7 @@ function columnName(index: number): string {
 const STYLE = { header: 1, decimal: 2, date: 3, dateTime: 4 } as const;
 // Days between Excel's day zero and the Unix epoch
 const EXCEL_EPOCH_DAYS = 25_569;
-const DATE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+const DATE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/;
 
 /**
  * Reads a date as the sources write it, naive, into Excel's day count

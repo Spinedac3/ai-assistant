@@ -56,6 +56,56 @@ const DESCRIPTION_CHARS = 600;
 const SAMPLE_CHARS = 100;
 
 /**
+ * Cuts each sample value to its start, which tells the model as much as the whole of it
+ *
+ * @param   samples  Values by column
+ *
+ * @return  The same values, shortened
+ */
+function shortened(samples: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(
+    Object.entries(samples).map(([column, values]) => [
+      column,
+      values.map((value) => value.slice(0, SAMPLE_CHARS)),
+    ]),
+  );
+}
+
+/**
+ * Finds the JSON object in a model's answer, which may come with words around it
+ *
+ * @param   answer  What the model replied
+ *
+ * @return  Its fields, or none when there is no readable object
+ */
+function jsonIn(answer: string): Record<string, unknown> {
+  const json = /\{[\s\S]*\}/.exec(answer)?.[0];
+  try {
+    const parsed: unknown = json ? JSON.parse(json) : {};
+    return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Reads a text the model wrote: trimmed, cut and with nothing hidden
+ *
+ * @param   value  Field of the answer
+ * @param   max    Most characters kept
+ *
+ * @return  The text, or null when there is none
+ */
+function text(value: unknown, max: number): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const clean = removeHidden(value).trim();
+
+  return clean === "" ? null : clean.slice(0, max);
+}
+
+/**
  * Lists the tables and views a source's user may read, with the comment each has in the database
  *
  * @param   info    Connection of the source
@@ -102,12 +152,7 @@ export function explainPrompt(
   columns: BaseColumn[],
   samples: Record<string, string[]>,
 ): string {
-  const cut = Object.fromEntries(
-    Object.entries(samples).map(([column, values]) => [
-      column,
-      values.map((value) => value.slice(0, SAMPLE_CHARS)),
-    ]),
-  );
+  const cut = shortened(samples);
 
   // Hidden characters could carry instructions no person sees; with its angle brackets escaped,
   // still valid JSON, no value can close the block of data it sits in
@@ -200,17 +245,7 @@ export function readSuggestion(answer: string): {
   grain: string | null;
   synonyms: string[];
 } {
-  const json = /\{[\s\S]*\}/.exec(answer)?.[0];
-  let parsed: { name?: unknown; definition?: unknown; grain?: unknown; synonyms?: unknown } = {};
-  try {
-    parsed = json ? JSON.parse(json) : {};
-  } catch {
-    parsed = {};
-  }
-  const text = (value: unknown, max: number) =>
-    typeof value === "string" && removeHidden(value).trim() !== ""
-      ? removeHidden(value).trim().slice(0, max)
-      : null;
+  const parsed = jsonIn(answer);
   const name = text(parsed.name, 64);
 
   return {
@@ -305,12 +340,7 @@ export function totalsPrompt(
   columns: BaseColumn[],
   samples: Record<string, string[]>,
 ): string {
-  const cut = Object.fromEntries(
-    Object.entries(samples).map(([column, values]) => [
-      column,
-      values.map((value) => value.slice(0, SAMPLE_CHARS)),
-    ]),
-  );
+  const cut = shortened(samples);
 
   return removeHidden(
     [
@@ -349,18 +379,8 @@ export function totalsPrompt(
  */
 export function readTotals(answer: string, columns: BaseColumn[]): TotalsIdea[] {
   const kinds = new Map(columns.map((column) => [column.name, column.kind]));
-  const json = /\{[\s\S]*\}/.exec(answer)?.[0];
-  let ideas: unknown[] = [];
-  try {
-    const parsed = json ? (JSON.parse(json) as { ideas?: unknown }) : {};
-    ideas = Array.isArray(parsed.ideas) ? parsed.ideas : [];
-  } catch {
-    ideas = [];
-  }
-  const text = (value: unknown, max: number) =>
-    typeof value === "string" && removeHidden(value).trim() !== ""
-      ? removeHidden(value).trim().slice(0, max)
-      : null;
+  const parsed = jsonIn(answer);
+  const ideas = Array.isArray(parsed.ideas) ? parsed.ideas : [];
 
   const kept: TotalsIdea[] = [];
   for (const idea of ideas) {

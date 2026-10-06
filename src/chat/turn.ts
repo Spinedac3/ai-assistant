@@ -286,38 +286,32 @@ async function* runCli(
 }
 
 /**
- * Reads the context size the previous turn of a workspace measured
+ * Reads what the previous turn of a workspace left: the context it measured and its session
  *
- * @param   path  Measurement file
+ * @param   path  Workspace's context file
  *
- * @return  Tokens, or zero without a measurement
+ * @return  The context size, and the session id when there is one to resume
  */
-function previousContext(path: string): number {
+function previousTurn(path: string): { context: number; session: string | null } {
   try {
-    return Number((JSON.parse(readFileSync(path, "utf8")) as { context?: unknown }).context) || 0;
+    const stored = JSON.parse(readFileSync(path, "utf8")) as {
+      context?: unknown;
+      session?: unknown;
+    };
+    return {
+      context: Number(stored.context) || 0,
+      session:
+        typeof stored.session === "string" && SESSION_ID.test(stored.session)
+          ? stored.session
+          : null,
+    };
   } catch {
-    return 0;
+    return { context: 0, session: null };
   }
 }
 
 // A session id as the CLI writes it; anything else never reaches its arguments
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-/**
- * Reads the session the previous turn of a workspace ran
- *
- * @param   path  Workspace's context file
- *
- * @return  The session id, or null when there is none to resume
- */
-function previousSession(path: string): string | null {
-  try {
-    const session = (JSON.parse(readFileSync(path, "utf8")) as { session?: unknown }).session;
-    return typeof session === "string" && SESSION_ID.test(session) ? session : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Answers one chat message, streaming what happens and storing the final answer
@@ -401,9 +395,10 @@ export async function* chatTurn(
     yield { type: "start", conversationId: conversation, userMessageId };
 
     const contextPath = join(workspace, "context.json");
-    const resetByContext = !freshSession && previousContext(contextPath) > CONTEXT_CAP_TOKENS;
+    const previous = freshSession ? { context: 0, session: null } : previousTurn(contextPath);
+    const resetByContext = previous.context > CONTEXT_CAP_TOKENS;
     // Only the conversation's own session is resumed; without one, the thread seeds a new one
-    const session = freshSession || resetByContext ? null : previousSession(contextPath);
+    const session = resetByContext ? null : previous.session;
     const summary = threadSummary(earlier);
     // Any new session on an existing conversation starts from the thread, not from nothing
     const seeded = summary ? `${summary}\n\n${content}` : content;

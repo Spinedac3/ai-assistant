@@ -96,6 +96,9 @@ export async function capResult(
   }
 
   const heavy = lists.filter((entry) => entry.bytes > SMALL_LIST_BYTES);
+  // The file holds the main list first, then every other one with rows, the small ones included,
+  // so the totals sit beside the detail
+  const archived = [main, ...lists.filter((entry) => entry !== main && entry.list.length > 0)];
   // Rows of each archived list that do not fit in its sheet
   const outOfFile = Object.fromEntries(
     heavy
@@ -135,7 +138,7 @@ export async function capResult(
             archivo: {
               url: saved.url,
               filas: Object.fromEntries(
-                heavy.map((entry) => [entry.name, Math.min(entry.list.length, MAX_SHEET_ROWS)]),
+                archived.map((entry) => [entry.name, Math.min(entry.list.length, MAX_SHEET_ROWS)]),
               ),
               ...(partial ? { filas_fuera_del_archivo: outOfFile } : {}),
               vence_en_dias: saved.expiresInDays,
@@ -144,7 +147,7 @@ export async function capResult(
         : {}),
       filas_omitidas: omitted,
       nota: saved
-        ? `Comparte PRIMERO este link de Excel con las filas de ${heavy.map((entry) => entry.name).join(", ")}${partial}, ` +
+        ? `Comparte PRIMERO este link de Excel con las filas de ${archived.map((entry) => entry.name).join(", ")}${partial}, ` +
           `vence en ${saved.expiresInDays} días: ${saved.url}. Recortado aquí: ${cut}. Los ` +
           "totales están completos. No vuelvas a llamar para reconstruir las filas que faltan." +
           hint
@@ -198,11 +201,7 @@ export async function capResult(
   }
 
   if (saved && archive) {
-    // The small lists go along as sheets of their own, so the file has the totals beside the detail
-    const small = lists.filter((entry) => entry.bytes <= SMALL_LIST_BYTES && entry.list.length > 0);
-    // The main list leads the file, whatever its size
-    const sheets = [main, ...[...heavy, ...small].filter((entry) => entry !== main)];
-    saved = await archive.save(sheets.map((entry) => sheetOf(entry.name, entry.list)));
+    saved = await archive.save(archived.map((entry) => sheetOf(entry.name, entry.list)));
     shrink();
     // A real link longer than the room kept for it can still push the result over
     if (!fits()) {

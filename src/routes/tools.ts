@@ -30,6 +30,7 @@ import {
   FILTER_OPS,
   MAX_FILTER_VALUES,
   TOOL_NAME,
+  type ToolDefinitionSpec,
   VALUE_OPS,
 } from "../creator/definition.js";
 import { canonical, guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
@@ -57,7 +58,7 @@ import { removeHiddenDeep } from "../lib/hiddenText.js";
 import { isRunning, oneAtATime } from "../lib/oneAtATime.js";
 import { cliToolName } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
-import { type ColumnKind, runQuery } from "../sources/engines.js";
+import { type ColumnKind, type ConnectionInfo, runQuery } from "../sources/engines.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
 import { ToolRegistry } from "../tools/registry.js";
 
@@ -452,8 +453,79 @@ export default async function toolsRoutes(
     }
   });
 
+  /**
+   * Asks the model one question for the creator, counted as a message of the person; a quota
+   * reached or a model that fails leaves a note instead of an answer, and the message is theirs
+   * again when nothing came back
+   *
+   * @param   request  Request of the person
+   * @param   prompt   Question
+   * @param   failure  What the person reads when the model fails
+   *
+   * @return  The answer, or the note to show
+   */
+  const askCounted = async (
+    request: FastifyRequest,
+    prompt: string,
+    failure: string,
+  ): Promise<{ answer: string } | { note: string }> => {
+    const ask = options.ask;
+    if (!ask) {
+      return { note: "El asistente no está disponible ahora; complétalo tú" };
+    }
+    const userId = request.authUser?.id;
+    let reservation: Reservation | null = null;
+    try {
+      const limits = options.trial?.chat.limits;
+      if (limits && userId !== undefined) {
+        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
+      }
+      return { answer: await ask(prompt) };
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return { note: error.message };
+      }
+      if (reservation && userId !== undefined) {
+        await refundMessage(db, userId, reservation).catch(() => undefined);
+      }
+      request.log.warn({ err: error }, "creator model call failed");
+      return { note: failure };
+    }
+  };
+
+  /**
+   * Reads the columns of a base and a few values of each, in one read of a few rows so the source
+   * is not held long
+   *
+   * @param   connection  Source connection
+   * @param   base        Base of the tool
+   * @param   pasted      Checked pasted query, when the base is one
+   *
+   * @return  The columns and their sample values
+   */
+  const readSamples = async (
+    connection: { info: ConnectionInfo },
+    base: ToolDefinitionSpec["base"],
+    pasted: string | null,
+  ): Promise<{ columns: BaseColumn[]; samples: Record<string, string[]> }> => {
+    const columns = await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS);
+    const kinds = new Map(columns.map((column) => [column.name, column.kind]));
+    const runner = runnerFor(connection.info, base, pasted, DESCRIBE_SAMPLE_LIMITS, kinds);
+    const rows = await runner.sample(
+      columns.map((column) => column.name),
+      false,
+    );
+
+    return {
+      columns,
+      samples: Object.fromEntries(
+        columns.map((column) => [column.name, valuesOf(rows, column.name).slice(0, GUIDE_SAMPLES)]),
+      ),
+    };
+  };
+
   // The columns of a base with a short description the model writes from a few of its values,
-  // for a base whose database gives none; without the model, only the columns
+  // for a base whose database gives none
   app.post("/admin/tools/explain", guard, async (request, reply) => {
     const opened = await openBase(request, reply, describeBody);
     if (!opened) {
@@ -464,68 +536,24 @@ export default async function toolsRoutes(
     if (busy(reply, key)) {
       return reply;
     }
-    const ask = options.ask;
     let read: { columns: BaseColumn[]; samples: Record<string, string[]> };
     try {
-      // One read of the columns and one of a few rows, so the source is not held long
-      read = await oneAtATime(key, async () => {
-        const columns = await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS);
-        if (!ask) {
-          return { columns, samples: {} };
-        }
-        const kinds = new Map(columns.map((column) => [column.name, column.kind]));
-        const runner = runnerFor(connection.info, base, pasted, DESCRIBE_SAMPLE_LIMITS, kinds);
-        const rows = await runner.sample(
-          columns.map((column) => column.name),
-          false,
-        );
-        const samples = Object.fromEntries(
-          columns.map((column) => [
-            column.name,
-            valuesOf(rows, column.name).slice(0, GUIDE_SAMPLES),
-          ]),
-        );
-        return { columns, samples };
-      });
+      read = await oneAtATime(key, () => readSamples(connection, base, pasted));
     } catch (error) {
       request.log.warn({ err: error, source }, "base could not be described");
       return reply.code(400).send(BASE_UNREADABLE);
     }
     const { columns, samples } = read;
-    if (!ask) {
-      return { ok: true, data: { columns, description: null } };
-    }
+    const asked = await askCounted(
+      request,
+      explainPrompt(base.kind === "table" ? base.name : null, columns, samples),
+      "No se pudo escribir la descripción ahora; escríbela tú",
+    );
 
-    const userId = request.authUser?.id;
-    let reservation: Reservation | null = null;
-    try {
-      // A call to the model counts as a message of the person, like a chat turn
-      const limits = options.trial?.chat.limits;
-      if (limits && userId !== undefined) {
-        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
-      }
-      const name = base.kind === "table" ? base.name : null;
-      const description = readExplanation(await ask(explainPrompt(name, columns, samples)));
-      return { ok: true, data: { columns, description } };
-    } catch (error) {
-      if (error instanceof RateLimitExceededError) {
-        return { ok: true, data: { columns, description: null, note: error.message } };
-      }
-      // The person did not get a description, so the message is theirs again
-      if (reservation && userId !== undefined) {
-        await refundMessage(db, userId, reservation).catch(() => undefined);
-      }
-      request.log.warn({ err: error, source }, "base description failed");
-      // The columns still serve: the person writes the description themselves
-      return {
-        ok: true,
-        data: {
-          columns,
-          description: null,
-          note: "No se pudo escribir la descripción ahora; escríbela tú",
-        },
-      };
-    }
+    // The columns serve either way: without a description the person writes it
+    return "answer" in asked
+      ? { ok: true, data: { columns, description: readExplanation(asked.answer) } }
+      : { ok: true, data: { columns, description: null, note: asked.note } };
   });
 
   // What a filter needs for the model to use it well: the column's real values, as a closed list
@@ -583,11 +611,12 @@ export default async function toolsRoutes(
     }
 
     const { kind, values } = read;
-    // A closed list makes sense for a few texts or numbers a person picks one of
-    // Long texts are not categories, and they would reach every model reading the tool
+    // A closed list is for a few short texts or numbers a person picks one of; long texts are not
+    // categories, and they would reach every model reading the tool
+    const listable = kind === "text" || kind === "number";
     const closed =
       VALUE_OPS.has(body.op) &&
-      (kind === "text" || kind === "number") &&
+      listable &&
       values.length > 0 &&
       values.length <= MAX_FILTER_VALUES &&
       values.every((value) => String(value).length <= MAX_LISTED_CHARS);
@@ -596,54 +625,27 @@ export default async function toolsRoutes(
     );
     const help = {
       values: closed ? sorted : null,
-      examples:
-        !closed && (kind === "text" || kind === "number") && values.length > 0
-          ? values.slice(0, 5)
-          : null,
+      examples: !closed && listable && values.length > 0 ? values.slice(0, 5) : null,
     };
-
-    const ask = options.ask;
-    if (!ask) {
-      return { ok: true, data: { ...help, description: null } };
-    }
-    const userId = request.authUser?.id;
-    let reservation: Reservation | null = null;
-    try {
-      // A call to the model counts as a message of the person, like a chat turn
-      const limits = options.trial?.chat.limits;
-      if (limits && userId !== undefined) {
-        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
-      }
-      const prompt = filterPrompt({
+    const asked = await askCounted(
+      request,
+      filterPrompt({
         column: body.column,
         kind,
         op: body.op,
         about: body.about ?? null,
         values: values.slice(0, MAX_FILTER_VALUES),
-      });
-      return { ok: true, data: { ...help, description: readExplanation(await ask(prompt)) } };
-    } catch (error) {
-      if (error instanceof RateLimitExceededError) {
-        return { ok: true, data: { ...help, description: null, note: error.message } };
-      }
-      // The person did not get an explanation, so the message is theirs again
-      if (reservation && userId !== undefined) {
-        await refundMessage(db, userId, reservation).catch(() => undefined);
-      }
-      request.log.warn({ err: error, source }, "filter explanation failed");
-      return {
-        ok: true,
-        data: {
-          ...help,
-          description: null,
-          note: "No se pudo escribir la explicación ahora; escríbela tú",
-        },
-      };
-    }
+      }),
+      "No se pudo escribir la explicación ahora; escríbela tú",
+    );
+
+    return "answer" in asked
+      ? { ok: true, data: { ...help, description: readExplanation(asked.answer) } }
+      : { ok: true, data: { ...help, description: null, note: asked.note } };
   });
 
-  // The last step's suggestions: a name, what a row is and other words for it; the person edits
-  // them before saving, and nothing here reads the source
+  // The last step's suggestions: a name, what it returns, what a row is and other words for it;
+  // the person edits them before saving, and nothing here reads the source
   app.post("/admin/tools/suggest", guard, async (request, reply) => {
     const body = suggestBody.safeParse(request.body);
     if (!body.success) {
@@ -651,30 +653,18 @@ export default async function toolsRoutes(
         .code(400)
         .send({ ok: false, error: "invalid_body", message: body.error.issues[0]?.message });
     }
-    const ask = options.ask;
-    if (!ask) {
-      return { ok: true, data: { name: null, definition: null, grain: null, synonyms: [] } };
-    }
-    const userId = request.authUser?.id;
-    let reservation: Reservation | null = null;
-    try {
-      // A call to the model counts as a message of the person, like a chat turn
-      const limits = options.trial?.chat.limits;
-      if (limits && userId !== undefined) {
-        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
-      }
-      return { ok: true, data: readSuggestion(await ask(suggestPrompt(body.data))) };
-    } catch (error) {
-      if (error instanceof RateLimitExceededError) {
-        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
-      }
-      if (reservation && userId !== undefined) {
-        await refundMessage(db, userId, reservation).catch(() => undefined);
-      }
-      request.log.warn({ err: error }, "tool suggestion failed");
-      // The person fills them in; nothing is lost
-      return { ok: true, data: { name: null, definition: null, grain: null, synonyms: [] } };
-    }
+    const asked = await askCounted(
+      request,
+      suggestPrompt(body.data),
+      "No se pudo sugerir ahora; complétalo tú",
+    );
+
+    return "answer" in asked
+      ? { ok: true, data: readSuggestion(asked.answer) }
+      : {
+          ok: true,
+          data: { name: null, definition: null, grain: null, synonyms: [], note: asked.note },
+        };
   });
 
   // Summaries a person would likely want from a base, read from its columns and a few values;
@@ -685,58 +675,27 @@ export default async function toolsRoutes(
       return reply;
     }
     const { source, connection, base, pasted, body } = opened;
-    const ask = options.ask;
-    if (!ask) {
-      return { ok: true, data: { ideas: [] } };
-    }
     const key = `describe:${source}`;
     if (busy(reply, key)) {
       return reply;
     }
     let read: { columns: BaseColumn[]; samples: Record<string, string[]> };
     try {
-      read = await oneAtATime(key, async () => {
-        const columns = await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS);
-        const kinds = new Map(columns.map((column) => [column.name, column.kind]));
-        const runner = runnerFor(connection.info, base, pasted, DESCRIBE_SAMPLE_LIMITS, kinds);
-        const rows = await runner.sample(
-          columns.map((column) => column.name),
-          false,
-        );
-        const samples = Object.fromEntries(
-          columns.map((column) => [
-            column.name,
-            valuesOf(rows, column.name).slice(0, GUIDE_SAMPLES),
-          ]),
-        );
-        return { columns, samples };
-      });
+      read = await oneAtATime(key, () => readSamples(connection, base, pasted));
     } catch (error) {
       request.log.warn({ err: error, source }, "base could not be described");
       return reply.code(400).send(BASE_UNREADABLE);
     }
+    const asked = await askCounted(
+      request,
+      totalsPrompt(body.about ?? null, read.columns, read.samples),
+      "No se pudieron sugerir resúmenes ahora; ármalo tú",
+    );
 
-    const userId = request.authUser?.id;
-    let reservation: Reservation | null = null;
-    try {
-      // A call to the model counts as a message of the person, like a chat turn
-      const limits = options.trial?.chat.limits;
-      if (limits && userId !== undefined) {
-        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
-      }
-      const answer = await ask(totalsPrompt(body.about ?? null, read.columns, read.samples));
-      return { ok: true, data: { ideas: readTotals(answer, read.columns) } };
-    } catch (error) {
-      if (error instanceof RateLimitExceededError) {
-        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
-      }
-      if (reservation && userId !== undefined) {
-        await refundMessage(db, userId, reservation).catch(() => undefined);
-      }
-      request.log.warn({ err: error, source }, "totals suggestion failed");
-      // The person builds the summary by hand; nothing is lost
-      return { ok: true, data: { ideas: [] } };
-    }
+    // The person builds the summary by hand when no idea comes
+    return "answer" in asked
+      ? { ok: true, data: { ideas: readTotals(asked.answer, read.columns) } }
+      : { ok: true, data: { ideas: [], note: asked.note } };
   });
 
   // Saving a published tool turns it back into a draft until it passes its checks again

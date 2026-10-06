@@ -358,13 +358,34 @@ export function toolFrom(
           args,
           kinds,
         );
-        const detail = normalizeRows(
-          await runQuery(source.info, detailQuery.sql, detailQuery.params, {
-            timeoutMs: QUERY_TIMEOUT_MS,
-            maxRows: MAX_ROWS,
-            timeZone,
-          }),
-        );
+        let detail: Array<Record<string, unknown>>;
+        try {
+          detail = normalizeRows(
+            await runQuery(source.info, detailQuery.sql, detailQuery.params, {
+              timeoutMs: QUERY_TIMEOUT_MS,
+              maxRows: MAX_ROWS,
+              timeZone,
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof TooManyRowsError)) {
+            throw error;
+          }
+          // The totals were read whole; only the detail behind them is too long to bring
+          return {
+            ok: true,
+            data: {
+              filas: rows,
+              total_filas: rows.length,
+              detalle: [],
+              total_detalle: 0,
+              nota_detalle:
+                "El detalle pasa del límite de filas; pide filtros más angostos para verlo.",
+            },
+            rows: rows.length,
+            main: "filas",
+          };
+        }
         return {
           ok: true,
           data: {
