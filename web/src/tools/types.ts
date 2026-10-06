@@ -73,6 +73,14 @@ export interface FilterHelp {
   note?: string;
 }
 
+// A summary the model proposes for a base: what to group by and which measures
+export interface TotalsIdea {
+  label: string;
+  why: string;
+  group_by: string[];
+  aggregates: { fn: Aggregate; column?: string; as: string }[];
+}
+
 export interface Definition {
   base: { kind: "table"; name: string } | { kind: "query"; sql: string };
   columns: { name: string; label?: string }[];

@@ -17,7 +17,9 @@ import {
   listRelations,
   readExplanation,
   readSuggestion,
+  readTotals,
   suggestPrompt,
+  totalsPrompt,
 } from "../creator/catalog.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
 import { type BaseColumn, describeBase, normalizeRows } from "../creator/columns.js";
@@ -113,6 +115,14 @@ const filterHelpBody = z
 
 type FilterValue = string | number | boolean;
 
+const totalsBody = z
+  .object({
+    source: z.string().regex(SOURCE_CODE),
+    base: baseSchema,
+    // What the person said the base holds, so the ideas speak of the same thing
+    about: z.string().trim().min(1).max(2_000).optional(),
+  })
+  .strict();
 const suggestBody = z
   .object({
     about: z.string().trim().min(1).max(2_000),
@@ -659,6 +669,68 @@ export default async function toolsRoutes(
       request.log.warn({ err: error }, "tool suggestion failed");
       // The person fills them in; nothing is lost
       return { ok: true, data: { name: null, definition: null, grain: null, synonyms: [] } };
+    }
+  });
+
+  // Summaries a person would likely want from a base, read from its columns and a few values;
+  // each one is applied as it is or left aside
+  app.post("/admin/tools/suggest-totals", guard, async (request, reply) => {
+    const opened = await openBase(request, reply, totalsBody);
+    if (!opened) {
+      return reply;
+    }
+    const { source, connection, base, pasted, body } = opened;
+    const ask = options.ask;
+    if (!ask) {
+      return { ok: true, data: { ideas: [] } };
+    }
+    const key = `describe:${source}`;
+    if (busy(reply, key)) {
+      return reply;
+    }
+    let read: { columns: BaseColumn[]; samples: Record<string, string[]> };
+    try {
+      read = await oneAtATime(key, async () => {
+        const columns = await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS);
+        const kinds = new Map(columns.map((column) => [column.name, column.kind]));
+        const runner = runnerFor(connection.info, base, pasted, DESCRIBE_SAMPLE_LIMITS, kinds);
+        const rows = await runner.sample(
+          columns.map((column) => column.name),
+          false,
+        );
+        const samples = Object.fromEntries(
+          columns.map((column) => [
+            column.name,
+            valuesOf(rows, column.name).slice(0, GUIDE_SAMPLES),
+          ]),
+        );
+        return { columns, samples };
+      });
+    } catch (error) {
+      request.log.warn({ err: error, source }, "base could not be described");
+      return reply.code(400).send(BASE_UNREADABLE);
+    }
+
+    const userId = request.authUser?.id;
+    let reservation: Reservation | null = null;
+    try {
+      // A call to the model counts as a message of the person, like a chat turn
+      const limits = options.trial?.chat.limits;
+      if (limits && userId !== undefined) {
+        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
+      }
+      const answer = await ask(totalsPrompt(body.about ?? null, read.columns, read.samples));
+      return { ok: true, data: { ideas: readTotals(answer, read.columns) } };
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
+      }
+      if (reservation && userId !== undefined) {
+        await refundMessage(db, userId, reservation).catch(() => undefined);
+      }
+      request.log.warn({ err: error, source }, "totals suggestion failed");
+      // The person builds the summary by hand; nothing is lost
+      return { ok: true, data: { ideas: [] } };
     }
   });
 

@@ -44,6 +44,7 @@ import {
   prune,
   type Relation,
   type ToolDetail,
+  type TotalsIdea,
   VALUE_OPS,
   withDefaults,
 } from "./types";
@@ -241,6 +242,55 @@ function ToolEditor({
       // Without a suggestion the person writes them; nothing else depends on it
       .catch(() => undefined)
       .finally(() => setBusy(null));
+  };
+
+  // Summaries the model proposes for the base, asked once when the totals step opens
+  const [ideas, setIdeas] = useState<TotalsIdea[]>([]);
+  const [ideasAsked, setIdeasAsked] = useState(false);
+  const [ideasLoading, setIdeasLoading] = useState(false);
+  useEffect(() => {
+    if (step !== 4 || ideasAsked || baseColumns.length === 0) {
+      return;
+    }
+    setIdeasAsked(true);
+    setIdeasLoading(true);
+    api<{ ideas: TotalsIdea[] }>("/admin/tools/suggest-totals", {
+      method: "POST",
+      body: {
+        source,
+        base: definition.base,
+        about: (autoDescription ?? definition.meaning.definition).trim() || undefined,
+      },
+    })
+      .then((answer) => setIdeas(answer.ideas))
+      // Without ideas the person builds the summary by hand
+      .catch(() => undefined)
+      .finally(() => setIdeasLoading(false));
+  });
+
+  /**
+   * Takes one of the model's summaries: its groups and measures, the columns they need, and the
+   * first measure as the order, largest first
+   *
+   * @param   idea  Summary proposed
+   */
+  const applyIdea = (idea: TotalsIdea) => {
+    const needed = [
+      ...idea.group_by,
+      ...idea.aggregates.flatMap((aggregate) => (aggregate.column ? [aggregate.column] : [])),
+    ];
+    const missing = [...new Set(needed)].filter(
+      (column) => !definition.columns.some((chosen) => chosen.name === column),
+    );
+    change({
+      columns: [...definition.columns, ...missing.map((name) => ({ name }))],
+      summary: {
+        group_by: idea.group_by,
+        aggregates: idea.aggregates,
+        with_detail: definition.summary?.with_detail ?? true,
+      },
+      order_by: idea.aggregates[0] ? [{ column: idea.aggregates[0].as, direction: "desc" }] : [],
+    });
   };
 
   // The meaning is written once, when the last step opens; the person can ask for it again
@@ -955,6 +1005,54 @@ function ToolEditor({
             </Section>
           )}
 
+          {step === 4 && (ideasLoading || ideas.length > 0) && (
+            <Section
+              title="Ideas de la IA"
+              hint="Resúmenes que suelen pedirse con estos datos. Un clic lo aplica y abajo lo ajustas."
+            >
+              {ideasLoading ? (
+                <HStack gap={2}>
+                  <Spinner size="sm" color="brand.solid" />
+                  <Text fontSize="sm" color="fg.muted">
+                    Buscando los resúmenes que tienen sentido para esta tabla…
+                  </Text>
+                </HStack>
+              ) : (
+                <Stack gap={2}>
+                  {ideas.map((idea) => (
+                    <Box
+                      key={idea.label}
+                      as="button"
+                      textAlign="start"
+                      p={3}
+                      borderWidth="1px"
+                      rounded="md"
+                      cursor="pointer"
+                      _hover={{ bg: "bg.muted" }}
+                      onClick={() => applyIdea(idea)}
+                    >
+                      <Text fontWeight="medium" fontSize="sm">
+                        {idea.label}
+                      </Text>
+                      <Text fontSize="sm" color="fg.muted">
+                        {idea.why}
+                      </Text>
+                      <Text fontSize="xs" color="fg.subtle" mt={1}>
+                        Por {idea.group_by.join(" y ") || "todo"}:{" "}
+                        {idea.aggregates
+                          .map((aggregate) =>
+                            aggregate.fn === "count"
+                              ? `${aggregate.as} (cantidad)`
+                              : `${aggregate.as} (${AGGREGATE_LABELS[aggregate.fn].toLowerCase()} de ${aggregate.column})`,
+                          )
+                          .join(", ")}
+                      </Text>
+                    </Box>
+                  ))}
+                </Stack>
+              )}
+            </Section>
+          )}
           {step === 4 && (
             <Section
               title="Resumen y orden"
