@@ -7,6 +7,20 @@ export interface BaseColumn {
   kind: ColumnKind;
 }
 
+// A table or view of a source, as the creator offers it
+export interface Relation {
+  name: string;
+  kind: "table" | "view";
+  comment: string | null;
+}
+
+// What reading a base gives: its columns, and what it holds when the database or the model says
+export interface DescribedBase {
+  columns: BaseColumn[];
+  description: string | null;
+  note?: string;
+}
+
 export const FILTER_OPS = [
   "=",
   "!=",

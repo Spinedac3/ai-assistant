@@ -10,7 +10,6 @@ import {
   IconButton,
   Input,
   NativeSelect,
-  SegmentGroup,
   Spinner,
   Stack,
   Switch,
@@ -32,17 +31,37 @@ import {
   blankDefinition,
   CHECK_LABELS,
   type CheckResult,
+  type ColumnKind,
   cleanDefinition,
   type Definition,
+  type DescribedBase,
   FILTER_OPS,
   OP_LABELS,
   outputNames,
   prune,
+  type Relation,
   type ToolDetail,
   withDefaults,
 } from "./types";
 
 const NAME = /^[a-z][a-z0-9_]{2,63}$/;
+// The creator's steps, in the order a person walks them
+const STEPS = [
+  "Fuente",
+  "Tabla o vista",
+  "Columnas",
+  "Filtros",
+  "Totales y orden",
+  "Nombre y significado",
+  "Guardar y publicar",
+];
+const KIND_LABELS: Record<ColumnKind, string> = {
+  number: "número",
+  text: "texto",
+  date: "fecha",
+  datetime: "fecha y hora",
+  boolean: "sí o no",
+};
 export const NEW_TOOL = "_nueva";
 
 /**
@@ -124,6 +143,27 @@ function ToolEditor({
     }
   }, [saved.data, loaded]);
 
+  // One step at a time for a new tool; a saved one opens at its review, any step a click away
+  const [step, setStep] = useState(initialName === null ? 0 : STEPS.length - 1);
+  // A pasted query is for whoever writes SQL; everyone else picks a table or a view
+  const [advanced, setAdvanced] = useState(false);
+  const [search, setSearch] = useState("");
+  // Why the model could not describe the base, when it could not
+  const [note, setNote] = useState<string | null>(null);
+  // The description last filled in for the person, replaced when they pick another base
+  const [autoDescription, setAutoDescription] = useState<string | null>(null);
+  const relations = useQuery({
+    queryKey: ["relations", source],
+    queryFn: () =>
+      api<{ relations: Relation[] }>(`/admin/tools/relations?source=${encodeURIComponent(source)}`),
+    enabled: source !== "" && step === 1,
+  });
+  useEffect(() => {
+    if (saved.data) {
+      setAdvanced(saved.data.definition.base.kind === "query");
+    }
+  }, [saved.data]);
+
   // Every change drops what no longer fits, so what the form shows is what gets saved
   const change = (patch: Partial<Definition>) =>
     setDefinition((current) => prune({ ...current, ...patch }, baseColumns));
@@ -139,26 +179,68 @@ function ToolEditor({
     }
   };
 
-  const readColumns = () =>
+  /**
+   * Takes what a base holds: its columns, and its description as what the tool returns unless
+   * the person already wrote their own
+   *
+   * @param   base       Base that was read
+   * @param   described  Its columns and description
+   */
+  const takeBase = (base: Definition["base"], described: DescribedBase) => {
+    setBaseColumns(described.columns);
+    setNote(described.note ?? null);
+    const names = new Set(described.columns.map((column) => column.name));
+    setDefinition((current) => {
+      // Reading the same base again keeps the choices that still exist; another one takes them all
+      const same = JSON.stringify(current.base) === JSON.stringify(base);
+      const kept = same ? current.columns.filter((column) => names.has(column.name)) : [];
+      const own =
+        current.meaning.definition.trim() !== "" && current.meaning.definition !== autoDescription;
+      return prune(
+        {
+          ...current,
+          base,
+          columns:
+            kept.length > 0 ? kept : described.columns.map((column) => ({ name: column.name })),
+          meaning:
+            described.description && !own
+              ? { ...current.meaning, definition: described.description }
+              : current.meaning,
+        },
+        described.columns,
+      );
+    });
+    setAutoDescription(described.description);
+  };
+
+  // A table with a comment in the database is described by it; any other base, by the model
+  const pickTable = (relation: Relation) =>
     guard("columns", async () => {
-      const data = await api<{ columns: BaseColumn[] }>("/admin/tools/describe", {
-        method: "POST",
-        body: { source, base: definition.base },
-      });
-      setBaseColumns(data.columns);
-      // A first read takes every column; later ones keep the choices that still exist
-      const names = new Set(data.columns.map((column) => column.name));
-      setDefinition((current) =>
-        prune(
-          {
-            ...current,
-            columns:
-              current.columns.length === 0
-                ? data.columns.map((column) => ({ name: column.name }))
-                : current.columns.filter((column) => names.has(column.name)),
-          },
-          data.columns,
-        ),
+      const base = { kind: "table" as const, name: relation.name };
+      const described = relation.comment
+        ? {
+            ...(await api<{ columns: BaseColumn[] }>("/admin/tools/describe", {
+              method: "POST",
+              body: { source, base },
+            })),
+            description: relation.comment,
+          }
+        : await api<DescribedBase>("/admin/tools/explain", {
+            method: "POST",
+            body: { source, base },
+          });
+      takeBase(base, described);
+    });
+
+  const readQuery = () =>
+    guard("columns", async () => {
+      const base = definition.base;
+      takeBase(
+        base,
+        await api<DescribedBase>("/admin/tools/explain", {
+          method: "POST",
+          body: { source, base },
+        }),
       );
     });
 
@@ -228,18 +310,43 @@ function ToolEditor({
   const isNew = initialName === null;
   const chosen = definition.columns.map((column) => column.name);
   const kindOf = (column: string) => baseColumns.find((base) => base.name === column)?.kind;
-  const canSave =
-    NAME.test(name) &&
-    source !== "" &&
-    definition.columns.length > 0 &&
-    definition.meaning.definition.trim() !== "" &&
-    definition.meaning.grain.trim() !== "" &&
+  // What each step needs before the next one opens
+  const ready = [
+    source !== "",
+    baseColumns.length > 0,
+    definition.columns.length > 0,
+    true,
     (definition.summary?.aggregates ?? []).every(
       (aggregate) => aggregate.as !== "" && (aggregate.fn === "count" || aggregate.column),
-    );
+    ),
+    NAME.test(name) &&
+      definition.meaning.definition.trim() !== "" &&
+      definition.meaning.grain.trim() !== "",
+  ];
+  const reachable = (index: number) => ready.slice(0, index).every(Boolean);
+  const canSave = ready.every(Boolean);
   const dirty = JSON.stringify(cleanDefinition(definition)) !== savedAs;
   // The server checks again before publishing; what matters here is that what is shown is saved
   const canPublish = savedAs !== null && !dirty && status === "draft";
+
+  const words = search.trim().toLowerCase();
+  const offered = (relations.data?.relations ?? []).filter(
+    (relation) =>
+      words === "" ||
+      relation.name.toLowerCase().includes(words) ||
+      (relation.comment ?? "").toLowerCase().includes(words),
+  );
+  // Ideas for the filters a person most often asks for, over the columns this base has
+  const filtered = new Set(definition.filters.map((filter) => filter.column));
+  const dateIdea = baseColumns.find(
+    (column) =>
+      (column.kind === "date" || column.kind === "datetime") && !filtered.has(column.name),
+  );
+  const textIdeas = baseColumns
+    .filter((column) => column.kind === "text" && !filtered.has(column.name))
+    .slice(0, 3);
+  const addFilter = (filter: Definition["filters"][number]) =>
+    change({ filters: [...definition.filters, filter] });
 
   return (
     <Flex gap={4} align="start" direction={{ base: "column", xl: "row" }}>
@@ -249,27 +356,47 @@ function ToolEditor({
         style={{ flex: 1, minWidth: 0, border: 0, padding: 0, margin: 0, width: "100%" }}
       >
         <Stack gap={4}>
-          <Section title="Qué es">
-            <HStack gap={3} align="start" wrap="wrap">
-              <Field.Root required maxW="sm" invalid={name !== "" && !NAME.test(name)}>
-                <Field.Label>Nombre</Field.Label>
-                <Input
-                  value={name}
-                  disabled={!isNew}
-                  fontFamily="mono"
-                  placeholder="entregas_por_ruta"
-                  onChange={(event) => setName(event.target.value)}
-                />
-                <Field.HelperText>
-                  Minúsculas y guion bajo; es como la llama el modelo.
-                </Field.HelperText>
-              </Field.Root>
-              <Field.Root required maxW="xs">
+          <HStack gap={1} wrap="wrap">
+            {STEPS.map((label, index) => (
+              <Button
+                key={label}
+                size="xs"
+                variant={index === step ? "solid" : "ghost"}
+                colorPalette={index === step ? "brand" : "gray"}
+                disabled={!reachable(index)}
+                onClick={() => setStep(index)}
+              >
+                {index !== step && reachable(index + 1) ? <FiCheck /> : `${index + 1}.`} {label}
+              </Button>
+            ))}
+            {status && (
+              <Badge
+                ms="auto"
+                variant="subtle"
+                colorPalette={status === "published" ? "green" : "gray"}
+              >
+                {status === "published" ? "Publicada" : "Borrador"}
+              </Badge>
+            )}
+          </HStack>
+
+          {step === 0 && (
+            <Section
+              title="¿De qué base de datos lee?"
+              hint="La herramienta lee de una fuente registrada en «Fuentes». Solo aparecen las que tienes permiso de usar."
+            >
+              <Field.Root required maxW="sm">
                 <Field.Label>Fuente</Field.Label>
                 <NativeSelect.Root disabled={!isNew}>
                   <NativeSelect.Field
                     value={source}
-                    onChange={(event) => setSource(event.target.value)}
+                    onChange={(event) => {
+                      setSource(event.target.value);
+                      // Another source has other tables: what was picked no longer applies
+                      setBaseColumns([]);
+                      setDefinition(blankDefinition());
+                      setAutoDescription(null);
+                    }}
                   >
                     {sources.length === 0 && <option value="">No tienes fuentes</option>}
                     {sources.map((code) => (
@@ -278,81 +405,172 @@ function ToolEditor({
                       </option>
                     ))}
                   </NativeSelect.Field>
+                  <NativeSelect.Indicator />
                 </NativeSelect.Root>
+                {!isNew && (
+                  <Field.HelperText>
+                    La fuente de una herramienta guardada no cambia.
+                  </Field.HelperText>
+                )}
               </Field.Root>
-              {status && (
-                <Badge
-                  alignSelf="center"
-                  variant="subtle"
-                  colorPalette={status === "published" ? "green" : "gray"}
-                >
-                  {status === "published" ? "Publicada" : "Borrador"}
-                </Badge>
+              {sources.length === 0 && (
+                <Text fontSize="sm" color="fg.muted" mt={3}>
+                  Todavía no tienes fuentes: regístrala en «Fuentes» o pide el permiso a quien
+                  administra el asistente.
+                </Text>
               )}
+            </Section>
+          )}
+
+          {step === 1 && (
+            <Section
+              title="¿Qué tabla o vista lee?"
+              hint="Estas son las tablas y vistas que la fuente deja leer. Elige una para ver qué guarda y sus columnas."
+            >
+              {!advanced ? (
+                <Stack gap={3}>
+                  <Input
+                    placeholder="Buscar por nombre o descripción"
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                  {relations.isLoading ? (
+                    <Spinner color="brand.solid" />
+                  ) : relations.isError ? (
+                    <Text role="alert" color="fg.error" fontSize="sm">
+                      {relations.error instanceof ApiError
+                        ? relations.error.message
+                        : "No se pudieron leer las tablas de la fuente"}
+                    </Text>
+                  ) : (
+                    <Stack gap={2} maxH="96" overflowY="auto">
+                      {offered.length === 0 && (
+                        <Text fontSize="sm" color="fg.muted">
+                          Nada coincide con la búsqueda.
+                        </Text>
+                      )}
+                      {offered.map((relation) => {
+                        const picked =
+                          definition.base.kind === "table" &&
+                          definition.base.name === relation.name;
+                        return (
+                          <Box
+                            key={relation.name}
+                            as="button"
+                            textAlign="start"
+                            p={3}
+                            borderWidth="1px"
+                            rounded="md"
+                            borderColor={picked ? "brand.solid" : "border"}
+                            bg={picked ? "bg.muted" : undefined}
+                            _hover={{ bg: "bg.muted" }}
+                            cursor="pointer"
+                            onClick={() => void pickTable(relation)}
+                          >
+                            <HStack gap={2}>
+                              <Text fontFamily="mono" fontWeight="medium" fontSize="sm">
+                                {relation.name}
+                              </Text>
+                              <Badge size="sm" variant="subtle">
+                                {relation.kind === "view" ? "vista" : "tabla"}
+                              </Badge>
+                              {picked && <FiCheck />}
+                            </HStack>
+                            <Text fontSize="sm" color="fg.muted">
+                              {relation.comment ??
+                                "Sin descripción en la base; al elegirla la escribe el asistente."}
+                            </Text>
+                          </Box>
+                        );
+                      })}
+                    </Stack>
+                  )}
+                </Stack>
+              ) : (
+                <Stack gap={3}>
+                  <Textarea
+                    fontFamily="mono"
+                    fontSize="sm"
+                    rows={6}
+                    placeholder="select ... from ...  (sin ORDER BY; el orden se elige en «Totales y orden»)"
+                    value={definition.base.kind === "query" ? definition.base.sql : ""}
+                    onChange={(event) =>
+                      change({ base: { kind: "query", sql: event.target.value } })
+                    }
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    alignSelf="start"
+                    loading={busy === "columns"}
+                    disabled={definition.base.kind !== "query" || !definition.base.sql.trim()}
+                    onClick={() => void readQuery()}
+                  >
+                    Leer columnas
+                  </Button>
+                </Stack>
+              )}
+              <Button
+                mt={3}
+                size="xs"
+                variant="plain"
+                disabled={!isNew}
+                onClick={() => {
+                  setAdvanced(!advanced);
+                  setBaseColumns([]);
+                  change({
+                    base: advanced ? { kind: "table", name: "" } : { kind: "query", sql: "" },
+                  });
+                }}
+              >
+                {advanced
+                  ? "Volver a elegir una tabla o vista"
+                  : "Avanzado: pegar una consulta SQL"}
+              </Button>
+            </Section>
+          )}
+          {step === 1 && busy === "columns" && (
+            <HStack gap={2}>
+              <Spinner size="sm" color="brand.solid" />
+              <Text fontSize="sm" color="fg.muted">
+                Leyendo la tabla y escribiendo qué guarda…
+              </Text>
             </HStack>
-          </Section>
-
-          <Section title="Qué lee">
-            <SegmentGroup.Root
-              size="sm"
-              value={definition.base.kind}
-              onValueChange={(details) =>
-                change({
-                  base:
-                    details.value === "query"
-                      ? { kind: "query", sql: "" }
-                      : { kind: "table", name: "" },
-                })
-              }
+          )}
+          {step === 1 && baseColumns.length > 0 && busy !== "columns" && (
+            <Section
+              title="Qué guarda"
+              hint="Puedes corregir la descripción: será lo que la herramienta dice que devuelve."
             >
-              <SegmentGroup.Indicator />
-              <SegmentGroup.Items
-                items={[
-                  { value: "table", label: "Una tabla o vista" },
-                  { value: "query", label: "Una consulta" },
-                ]}
-              />
-            </SegmentGroup.Root>
-            {definition.base.kind === "table" ? (
-              <Input
-                mt={3}
-                fontFamily="mono"
-                placeholder="esquema.tabla"
-                value={definition.base.name}
-                onChange={(event) => change({ base: { kind: "table", name: event.target.value } })}
-              />
-            ) : (
               <Textarea
-                mt={3}
-                fontFamily="mono"
-                fontSize="sm"
-                rows={6}
-                placeholder="select ... from ...  (sin ORDER BY; el orden se pone abajo)"
-                value={definition.base.sql}
-                onChange={(event) => change({ base: { kind: "query", sql: event.target.value } })}
+                rows={3}
+                value={definition.meaning.definition}
+                onChange={(event) =>
+                  change({ meaning: { ...definition.meaning, definition: event.target.value } })
+                }
               />
-            )}
-            <Button
-              mt={3}
-              size="sm"
-              variant="outline"
-              loading={busy === "columns"}
-              disabled={
-                !source ||
-                (definition.base.kind === "table"
-                  ? !definition.base.name
-                  : !definition.base.sql.trim())
-              }
-              onClick={() => void readColumns()}
-            >
-              Leer columnas
-            </Button>
-          </Section>
+              {note && (
+                <Text fontSize="sm" color="fg.muted" mt={2}>
+                  {note}
+                </Text>
+              )}
+              <Text fontSize="sm" color="fg.muted" mt={3} mb={2}>
+                Sus columnas ({baseColumns.length})
+              </Text>
+              <HStack wrap="wrap" gap={2}>
+                {baseColumns.map((column) => (
+                  <Badge key={column.name} variant="outline" fontFamily="mono">
+                    {column.name} · {KIND_LABELS[column.kind]}
+                  </Badge>
+                ))}
+              </HStack>
+            </Section>
+          )}
 
-          {baseColumns.length > 0 && (
+          {step === 2 && (
             <Section
               title="Qué columnas devuelve"
-              hint="Desmarca las que no aportan; la etiqueta es como las nombra una persona."
+              hint="Marca lo que la persona necesita ver en la respuesta. La etiqueta es como se le dice en el día a día, por ejemplo «Fecha de entrega» para entregado_en."
             >
               <Stack gap={1}>
                 {baseColumns.map((column) => {
@@ -403,10 +621,45 @@ function ToolEditor({
             </Section>
           )}
 
-          {baseColumns.length > 0 && (
+          {step === 3 && (dateIdea || textIdeas.length > 0) && (
+            <Section
+              title="Ideas para empezar"
+              hint="Un clic agrega el filtro; después lo ajustas abajo."
+            >
+              <HStack wrap="wrap" gap={2}>
+                {dateIdea && (
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() =>
+                      addFilter({
+                        column: dateIdea.name,
+                        op: "between",
+                        required: false,
+                        description: `Rango de ${dateIdea.name}`,
+                      })
+                    }
+                  >
+                    <FiPlus /> Pedir un rango de {dateIdea.name}
+                  </Button>
+                )}
+                {textIdeas.map((column) => (
+                  <Button
+                    key={column.name}
+                    size="xs"
+                    variant="outline"
+                    onClick={() => addFilter({ column: column.name, op: "=", required: false })}
+                  >
+                    <FiPlus /> Pedir un {column.name} en particular
+                  </Button>
+                ))}
+              </HStack>
+            </Section>
+          )}
+          {step === 3 && (
             <Section
               title="Por qué se puede filtrar"
-              hint="Cada filtro es algo que la persona puede pedir; uno obligatorio siempre se pide."
+              hint="Cada filtro es algo que la persona podrá pedir al preguntar, como un rango de fechas o un cliente. Marca obligatorio el que siempre debe venir, para no traer la tabla entera."
             >
               <Stack gap={2}>
                 {definition.filters.map((filter, index) => (
@@ -494,10 +747,10 @@ function ToolEditor({
             </Section>
           )}
 
-          {baseColumns.length > 0 && (
+          {step === 4 && (
             <Section
               title="Resumen y orden"
-              hint="Agrupar suma o cuenta por las columnas que elijas; sin resumen devuelve cada fila."
+              hint="Para totales, agrupa por lo que quieres comparar (zona, tipo de cliente…) y elige qué calcular (suma del total, cantidad de pedidos…). Sin resumen devuelve cada fila. El orden decide qué sale primero."
             >
               <Switch.Root
                 checked={definition.summary !== undefined}
@@ -696,10 +949,30 @@ function ToolEditor({
             </Section>
           )}
 
-          {baseColumns.length > 0 && (
+          {step === 5 && (
+            <Section
+              title="¿Cómo se llama?"
+              hint="Es el nombre con que el modelo la llama: corto, que diga lo que hace, como ventas_por_zona."
+            >
+              <Field.Root required maxW="sm" invalid={name !== "" && !NAME.test(name)}>
+                <Field.Label>Nombre</Field.Label>
+                <Input
+                  value={name}
+                  disabled={!isNew}
+                  fontFamily="mono"
+                  placeholder="ventas_por_zona"
+                  onChange={(event) => setName(event.target.value)}
+                />
+                <Field.HelperText>
+                  Minúsculas, números y guion bajo; empieza con una letra.
+                </Field.HelperText>
+              </Field.Root>
+            </Section>
+          )}
+          {step === 5 && (
             <Section
               title="Qué significa"
-              hint="Lo lee el modelo antes de usarla: dilo como se lo dirías a alguien nuevo."
+              hint="Lo lee el modelo antes de usarla: escríbelo como se lo explicarías a alguien nuevo. Ya trae la descripción de la tabla; ajústala a lo que devuelve la herramienta."
             >
               <Stack gap={3}>
                 <Field.Root required>
@@ -775,12 +1048,43 @@ function ToolEditor({
             </Section>
           )}
 
-          {error && (
-            <Text role="alert" color="fg.error" fontSize="sm">
-              {error}
-            </Text>
+          {step === 6 && (
+            <Section
+              title="Revisar, guardar y publicar"
+              hint="Guardar corre los chequeos sobre la base real. Si pasan, publícala: queda disponible en el chat y por MCP para quien tenga el permiso de la fuente."
+            >
+              <Stack gap={1} fontSize="sm">
+                <Text>
+                  Lee{" "}
+                  <Text as="span" fontFamily="mono">
+                    {definition.base.kind === "table" ? definition.base.name : "una consulta"}
+                  </Text>{" "}
+                  de la fuente{" "}
+                  <Text as="span" fontFamily="mono">
+                    {source}
+                  </Text>
+                  .
+                </Text>
+                <Text>
+                  {definition.summary
+                    ? `Devuelve totales${definition.summary.group_by.length > 0 ? ` por ${definition.summary.group_by.join(", ")}` : ""}: ${definition.summary.aggregates.map((aggregate) => aggregate.as).join(", ")}.`
+                    : `Devuelve ${definition.columns.length} columnas, una fila por registro.`}
+                </Text>
+                <Text>
+                  {definition.filters.length === 0
+                    ? "Sin filtros: siempre devuelve todo."
+                    : `Se puede pedir por ${definition.filters.map((filter) => `${filter.column}${filter.required ? " (obligatorio)" : ""}`).join(", ")}.`}
+                </Text>
+              </Stack>
+              {!canSave && (
+                <Text fontSize="sm" color="fg.error" mt={3}>
+                  Falta completar:{" "}
+                  {STEPS.filter((_, index) => index < ready.length && !ready[index]).join(", ")}.
+                </Text>
+              )}
+            </Section>
           )}
-          {checks && (
+          {step === 6 && checks && (
             <Section title="Chequeos de la versión guardada">
               <Stack gap={1}>
                 {checks.map((check) => (
@@ -802,35 +1106,65 @@ function ToolEditor({
               </Stack>
             </Section>
           )}
-          <HStack gap={2}>
-            <Button
-              colorPalette="brand"
-              loading={busy === "save"}
-              disabled={!canSave}
-              onClick={() => void save()}
-            >
-              Guardar y chequear
-            </Button>
-            <Button
-              variant="outline"
-              colorPalette="green"
-              loading={busy === "publish"}
-              disabled={!canPublish}
-              onClick={() => void publish()}
-            >
-              Publicar
-            </Button>
-            {!isNew && (
-              <Button
-                variant="ghost"
-                colorPalette="red"
-                loading={busy === "delete"}
-                onClick={() => void remove()}
-              >
-                <FiTrash2 /> Borrar
+
+          {error && (
+            <Text role="alert" color="fg.error" fontSize="sm">
+              {error}
+            </Text>
+          )}
+          {step === 6 ? (
+            <HStack gap={2}>
+              <Button variant="ghost" onClick={() => setStep(step - 1)}>
+                Atrás
               </Button>
-            )}
-          </HStack>
+              <Button
+                colorPalette="brand"
+                loading={busy === "save"}
+                disabled={!canSave}
+                onClick={() => void save()}
+              >
+                Guardar y chequear
+              </Button>
+              <Button
+                variant="outline"
+                colorPalette="green"
+                loading={busy === "publish"}
+                disabled={!canPublish}
+                onClick={() => void publish()}
+              >
+                Publicar
+              </Button>
+              {!isNew && (
+                <Button
+                  variant="ghost"
+                  colorPalette="red"
+                  loading={busy === "delete"}
+                  onClick={() => void remove()}
+                >
+                  <FiTrash2 /> Borrar
+                </Button>
+              )}
+            </HStack>
+          ) : (
+            <HStack justify="space-between">
+              <Button variant="ghost" disabled={step === 0} onClick={() => setStep(step - 1)}>
+                Atrás
+              </Button>
+              <Button
+                colorPalette="brand"
+                disabled={!ready[step] || busy === "columns"}
+                onClick={() => setStep(step + 1)}
+              >
+                Siguiente: {STEPS[step + 1]}
+              </Button>
+            </HStack>
+          )}
+          {step === 6 && savedAs !== null && (
+            <Text fontSize="xs" color="fg.muted">
+              Al lado tienes la guía, que sugiere mejoras con un clic, y un chat de prueba para ver
+              cómo la usa el modelo.
+            </Text>
+          )}
         </Stack>
       </fieldset>
       {!isNew && status && (
