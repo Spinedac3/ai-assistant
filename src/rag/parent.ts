@@ -19,10 +19,6 @@ export interface ParentBlock {
 /**
  * Rebuilds the section a chunk belongs to, centered on the chunk that was asked for
  *
- * A step of a procedure usually depends on a condition a few lines before it, so a lone chunk can
- * answer a right step out of context. The window grows from the requested chunk, forward first,
- * so the requested text is always inside even when the section does not fit.
- *
  * @param   siblings   Chunks of the same section
  * @param   requested  chunk_index of the chunk asked for
  * @param   maxChars   Size limit
@@ -34,6 +30,9 @@ export function parentBlock(
   requested: number,
   maxChars = PARENT_MAX_CHARS,
 ): ParentBlock {
+  // A step of a procedure usually depends on a condition a few lines before it, so a lone chunk can
+  // answer a right step out of context. The window grows from the requested chunk, forward first,
+  // so the requested text is always inside even when the section does not fit.
   const ordered = siblings
     .filter((sibling) => sibling.text.trim() !== "")
     .sort((a, b) => a.chunk_index - b.chunk_index);

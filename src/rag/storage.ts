@@ -340,9 +340,6 @@ export interface PartUpload {
 /**
  * Builds the key of a part, or the folder of an upload or of a person's document
  *
- * The folder holds a slash, which no document code can, so a part never overwrites or joins a real
- * document; the number of parts is part of it, so an attempt split differently never mixes in.
- *
  * @param   upload  Who sends which document, and in how many parts when known
  * @param   part    Part number, for the key of one part
  *
@@ -352,6 +349,8 @@ export function partKey(
   upload: Omit<PartUpload, "parts"> & { parts?: number },
   part?: number,
 ): string {
+  // The folder holds a slash, which no document code can, so a part never overwrites or joins a real
+  // document; the number of parts is part of it, so an attempt split differently never mixes in.
   const { owner, docCode, parts } = upload;
   if (!DOC_CODE.test(docCode) || !Number.isInteger(owner)) {
     throw new Error(`Código de documento inválido: ${docCode}`);

@@ -28,10 +28,6 @@ export const CHAT_CLI_ALLOWED = [
 /**
  * The single answer to what a caller sees and may run
  *
- * The chat and external clients get the two meta tools, a fixed catalog that scales past client
- * tool limits, plus the document search when they may use it. An agent run gets only its own
- * tools, direct, and an empty list means no tools at all, never the full catalog.
- *
  * @param   registry  Registered tools
  * @param   scopes    Effective scopes of the caller
  * @param   channel   Where the call comes from
@@ -45,6 +41,9 @@ export function surfaceFor(
   channel: Channel,
   runTools: readonly string[] = [],
 ): Surface {
+  // The chat and external clients get the two meta tools, a fixed catalog that scales past client
+  // tool limits, plus the document search when they may use it. An agent run gets only its own
+  // tools, direct, and an empty list means no tools at all, never the full catalog.
   const visible = registry.visibleTo(scopes);
 
   if (channel === "run") {

@@ -127,11 +127,6 @@ function rangeOf(scores: readonly number[]): { min: number; max: number } | null
 /**
  * Runs the hybrid search and returns the candidates best first
  *
- * The word query starts while the question is embedded; both rankings merge by position (RRF),
- * which ignores their unrelated scales, and the normalized score of each is then added on top,
- * because position alone ranks the first place of a 0.95 match the same as one of 0.55. Without
- * the embedding service, or when the vector query fails, the search goes on with words only.
- *
  * @param   index     Solr, embedder and cores
  * @param   filter    Row filter of the person
  * @param   question  Question as written
@@ -139,6 +134,10 @@ function rangeOf(scores: readonly number[]): { min: number; max: number } | null
  * @return  The ranked hits
  */
 async function hybrid(index: Index, filter: string, question: string): Promise<Hit[]> {
+  // The word query starts while the question is embedded; both rankings merge by position (RRF),
+  // which ignores their unrelated scales, and the normalized score of each is then added on top,
+  // because position alone ranks the first place of a 0.95 match the same as one of 0.55. Without
+  // the embedding service, or when the vector query fails, the search goes on with words only.
   const { solr, embedder, cores } = index;
 
   // A question that is exactly one code asks for that document; it is a filter, not a ranking
@@ -238,9 +237,6 @@ function titleOf(hit: Hit): string {
 /**
  * Searches the documents a person can read and returns short passages to choose from
  *
- * There is no relevance floor on purpose: the reader is a model that sees the snippets and
- * decides which to fetch, and the statuses tell an empty result from a failure to check.
- *
  * @param   index     Solr, embedder and cores
  * @param   scopes    Effective scopes of the person
  * @param   question  Question as written
@@ -254,6 +250,8 @@ export async function searchDocuments(
   question: string,
   limit = 10,
 ): Promise<{ status: SearchStatus; results: SearchResult[] }> {
+  // There is no relevance floor on purpose: the reader is a model that sees the snippets and
+  // decides which to fetch, and the statuses tell an empty result from a failure to check.
   const filter = scopeFilter(scopes);
   if (!filter) {
     return { status: "no_access", results: [] };
@@ -279,9 +277,6 @@ export async function searchDocuments(
 /**
  * Returns a passage by id together with the section it belongs to
  *
- * The id is checked with the same row filter as the search, so an id the person cannot read
- * resolves to nothing, exactly like one that does not exist.
- *
  * @param   index   Solr, embedder and cores
  * @param   scopes  Effective scopes of the person
  * @param   id      Passage id
@@ -293,6 +288,8 @@ export async function fetchPassage(
   scopes: ReadonlySet<string>,
   id: string,
 ): Promise<{ status: SearchStatus | "not_found"; document: FetchedDocument | null }> {
+  // The id is checked with the same row filter as the search, so an id the person cannot read
+  // resolves to nothing, exactly like one that does not exist.
   const filter = scopeFilter(scopes);
   if (!filter) {
     return { status: "no_access", document: null };

@@ -57,11 +57,6 @@ export function sheetOf(name: string, list: unknown[]): Sheet {
 /**
  * Fits a tool result under the size its reader takes
  *
- * The totals stay intact: they are values outside the lists. The heavy lists go whole into an
- * Excel whose link leads the result, so the model hands over the file instead of rebuilding it
- * call by call. Then the result shrinks until it fits: secondary heavy lists first, the main
- * list as little as possible, and the small summary lists only as a last resort.
- *
  * @param   data      Tool result
  * @param   maxBytes  Size limit
  * @param   archive   Where the full lists can go, if anywhere
@@ -77,6 +72,10 @@ export async function capResult(
   hint = "",
   prefer?: string,
 ): Promise<Capped> {
+  // The totals stay intact: they are values outside the lists. The heavy lists go whole into an
+  // Excel whose link leads the result, so the model hands over the file instead of rebuilding it
+  // call by call. Then the result shrinks until it fits: secondary heavy lists first, the main
+  // list as little as possible, and the small summary lists only as a last resort.
   if (size(data) <= maxBytes) {
     return { ok: true, data, truncated: false };
   }

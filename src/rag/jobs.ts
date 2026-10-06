@@ -147,15 +147,14 @@ export async function runJob(deps: Omit<WorkerDependencies, "pollMs">, job: Job)
 /**
  * Starts the worker that drains the queue, one job at a time
  *
- * The next round is scheduled only after the previous one ends, so a slow document never
- * overlaps with the next poll. There is one worker per deployment: at start it fails whatever a
- * previous process left running.
- *
  * @param   deps  Database, storage, index, logger and poll interval
  *
  * @return  A function that stops it and resolves once the job in progress ends
  */
 export function startWorker(deps: WorkerDependencies): () => Promise<void> {
+  // The next round is scheduled only after the previous one ends, so a slow document never
+  // overlaps with the next poll. There is one worker per deployment: at start it fails whatever a
+  // previous process left running.
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
   let current: Promise<void> = Promise.resolve();

@@ -7,10 +7,6 @@ const queues = new Map<string, Promise<void>>();
 /**
  * Waits until no earlier turn of the same conversation is running, then holds the turn
  *
- * Two turns resuming the same CLI session at once would interleave its transcript, so the second
- * waits and then runs seeing the first one's answer. The queue lives in this process; more than one
- * server instance would need a lock in the database.
- *
  * @param   key          Conversation key
  * @param   abortSignal  Gives up the place in the queue when the client leaves
  * @param   maxWaitMs    Longest wait for the turn ahead
@@ -22,6 +18,9 @@ export async function holdTurn(
   abortSignal?: AbortSignal,
   maxWaitMs: number = MAX_WAIT_MS,
 ): Promise<(() => void) | null> {
+  // Two turns resuming the same CLI session at once would interleave its transcript, so the second
+  // waits and then runs seeing the first one's answer. The queue lives in this process; more than one
+  // server instance would need a lock in the database.
   const ahead = queues.get(key) ?? Promise.resolve();
   let release = () => {};
   const mine = new Promise<void>((resolve) => {
