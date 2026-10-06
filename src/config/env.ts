@@ -54,6 +54,8 @@ const envSchema = z
     JWT_ISSUER: z.string().min(1).default("ai-assistant"),
     JWT_TTL_SECONDS: z.coerce.number().int().positive().default(900),
     EXTERNAL_SYSTEMS_FILE: z.string().min(1).optional(),
+    // Systems allowed to ask for a run token for a person, such as the agent factory
+    MACHINE_CLIENTS_FILE: z.string().min(1).optional(),
     // Markdown with what the organization is, its vocabulary and what the assistant covers
     ASSISTANT_CONTEXT_FILE: z.string().min(1).optional(),
     // Public address of this server, used in OAuth metadata and the MCP 401 challenge

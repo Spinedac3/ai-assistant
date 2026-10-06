@@ -263,6 +263,8 @@ export const accessTokens = pgTable(
     // When it last rotated; a client racing two refreshes is not mistaken for a thief
     rotatedAt: timestamptz("rotated_at"),
     kind: varchar("kind", { length: 20, enum: ["oauth", "run"] }).notNull(),
+    // Tools of a run another system asked for, kept so the run outlives a restart of this server
+    runTools: jsonb("run_tools").$type<string[]>(),
     accessExpiresAt: timestamptz("access_expires_at").notNull(),
     refreshExpiresAt: timestamptz("refresh_expires_at"),
     revokedAt: timestamptz("revoked_at"),

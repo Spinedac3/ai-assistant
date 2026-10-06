@@ -306,6 +306,22 @@ para no repetirse, una persona recibe hasta 25 por hora, y la cola reintenta un 
 esperando cada vez el doble. El mismo correo sirve para mandar un enlace de cambio de contraseña
 (`POST /admin/users/:id/password-reset`).
 
+## Agentes programados
+
+[agent-factory](https://github.com/Spinedac3/agent-factory) corre agentes a nombre de una persona.
+Se declara como cliente de máquina:
+
+```bash
+pnpm machine:create agent-factory   # deja el secreto en secrets/agent-factory.secret
+```
+
+con `MACHINE_CLIENTS_FILE=secrets/machine-clients.json` en el `.env`, y el secreto se copia a la
+fábrica. Por cada corrida, la fábrica pide un token en `POST /runs/tokens` (HTTP Basic con su
+secreto) con la persona dueña, las herramientas del agente y la duración, hasta 60 minutos. El
+token solo alcanza las herramientas que esa persona puede usar en ese momento; las demás vuelven
+en `denied`. Cada pedido queda en la auditoría, y la fábrica cierra el token al terminar
+(`POST /runs/tokens/revoke`). Un token de corrida sobrevive a un reinicio del asistente.
+
 ## Personas, permisos y uso
 
 En **Usuarios** (`users.manage`) se dan de alta personas con un rol y, si hace falta, permisos

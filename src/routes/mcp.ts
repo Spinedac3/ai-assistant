@@ -91,6 +91,7 @@ async function resolveCaller(
       id: accessTokens.id,
       userId: accessTokens.userId,
       kind: accessTokens.kind,
+      runTools: accessTokens.runTools,
       createdAt: accessTokens.createdAt,
       lastUsedAt: accessTokens.lastUsedAt,
     })
@@ -108,8 +109,9 @@ async function resolveCaller(
     return null;
   }
 
-  const run = row.kind === "run" ? runInfo(token) : null;
-  // A run token unknown to this process belongs to a run that died with a previous one
+  const run =
+    row.kind === "run" ? (runInfo(token) ?? (row.runTools ? { tools: row.runTools } : null)) : null;
+  // A run token unknown to this process and not kept belongs to a run that died with a previous one
   if (row.kind === "run" && !run) {
     return null;
   }

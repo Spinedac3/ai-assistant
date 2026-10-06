@@ -1,0 +1,1 @@
+ALTER TABLE "access_tokens" ADD COLUMN "run_tools" jsonb;
