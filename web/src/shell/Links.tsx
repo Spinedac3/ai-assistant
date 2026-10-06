@@ -31,7 +31,8 @@ export async function downloadFile(path: string): Promise<void> {
   anchor.href = url;
   anchor.download = name;
   anchor.click();
-  URL.revokeObjectURL(url);
+  // Some browsers start the download after the click returns; the file must still be there
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 /**
@@ -93,7 +94,13 @@ export function ExportActions({ path }: { path: string }) {
     if (preview) {
       return;
     }
-    const response = await request(`${path}/preview`);
+    let response: Response;
+    try {
+      response = await request(`${path}/preview`);
+    } catch {
+      setProblem("No se pudo traer la vista previa; revisa la conexión o descárgalo");
+      return;
+    }
     if (!response.ok) {
       // Files made before previews existed, or already expired, have none
       setProblem(
@@ -101,7 +108,11 @@ export function ExportActions({ path }: { path: string }) {
       );
       return;
     }
-    setPreview((await response.json()) as Preview);
+    try {
+      setPreview((await response.json()) as Preview);
+    } catch {
+      setProblem("La vista previa llegó incompleta; descárgalo");
+    }
   };
 
   return (

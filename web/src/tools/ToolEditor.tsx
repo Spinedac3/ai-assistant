@@ -18,7 +18,7 @@ import {
   Textarea,
 } from "@chakra-ui/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { FiCheck, FiMinus, FiPlus, FiTrash2, FiX } from "react-icons/fi";
 import { useLocation, useNavigate, useParams } from "react-router";
 import { ApiError, api } from "../api/http";
@@ -160,6 +160,10 @@ function ToolEditor({
   const [more, setMore] = useState(false);
   const [trying, setTrying] = useState(false);
   const [suggested, setSuggested] = useState(false);
+  // The last help asked for each column's filter, so only the latest one is applied
+  const helpAsked = useRef(new Map<string, number>());
+  // Why the model could not explain a filter, shown in the filters step
+  const [filterNote, setFilterNote] = useState<string | null>(null);
   // Columns whose values are being read for their filter
   const [helping, setHelping] = useState<string[]>([]);
   // The description last filled in for the person, replaced when they pick another base
@@ -251,13 +255,25 @@ function ToolEditor({
   // The idea in use leaves the list, so what remains are the ones still to choose from
   const [appliedIdea, setAppliedIdea] = useState<string | null>(null);
   const [usedIdeas, setUsedIdeas] = useState<string[]>([]);
+  const [ideasNote, setIdeasNote] = useState<string | null>(null);
+  /**
+   * Forgets the ideas of a base, so the totals step asks again for the one now picked
+   */
+  const forgetIdeas = () => {
+    setIdeas([]);
+    setIdeasAsked(false);
+    setUsedIdeas([]);
+    setAppliedIdea(null);
+    setIdeasNote(null);
+  };
   useEffect(() => {
     if (step !== 4 || ideasAsked || baseColumns.length === 0) {
       return;
     }
     setIdeasAsked(true);
     setIdeasLoading(true);
-    api<{ ideas: TotalsIdea[] }>("/admin/tools/suggest-totals", {
+    setIdeasNote(null);
+    api<{ ideas: TotalsIdea[]; note?: string }>("/admin/tools/suggest-totals", {
       method: "POST",
       body: {
         source,
@@ -265,9 +281,16 @@ function ToolEditor({
         about: (autoDescription ?? definition.meaning.definition).trim() || undefined,
       },
     })
-      .then((answer) => setIdeas(answer.ideas))
-      // Without ideas the person builds the summary by hand
-      .catch(() => undefined)
+      .then((answer) => {
+        setIdeas(answer.ideas);
+        setIdeasNote(answer.note ?? null);
+      })
+      // Without ideas the person builds the summary by hand, or asks again
+      .catch((failure) =>
+        setIdeasNote(
+          failure instanceof ApiError ? failure.message : "No se pudieron traer ideas ahora",
+        ),
+      )
       .finally(() => setIdeasLoading(false));
   });
 
@@ -331,6 +354,9 @@ function ToolEditor({
   const takeBase = (base: Definition["base"], described: DescribedBase) => {
     setBaseColumns(described.columns);
     setNote(described.note ?? null);
+    if (JSON.stringify(definition.base) !== JSON.stringify(base)) {
+      forgetIdeas();
+    }
     const names = new Set(described.columns.map((column) => column.name));
     setDefinition((current) => {
       // Reading the same base again keeps the choices that still exist; another one takes them all
@@ -357,22 +383,24 @@ function ToolEditor({
 
   // A table with a comment in the database is described by it; any other base, by the model
   const pickTable = (relation: Relation) =>
-    guard("columns", async () => {
-      const base = { kind: "table" as const, name: relation.name };
-      const described = relation.comment
-        ? {
-            ...(await api<{ columns: BaseColumn[] }>("/admin/tools/describe", {
-              method: "POST",
-              body: { source, base },
-            })),
-            description: relation.comment,
-          }
-        : await api<DescribedBase>("/admin/tools/explain", {
-            method: "POST",
-            body: { source, base },
-          });
-      takeBase(base, described);
-    });
+    busy === "columns"
+      ? undefined
+      : guard("columns", async () => {
+          const base = { kind: "table" as const, name: relation.name };
+          const described = relation.comment
+            ? {
+                ...(await api<{ columns: BaseColumn[] }>("/admin/tools/describe", {
+                  method: "POST",
+                  body: { source, base },
+                })),
+                description: relation.comment,
+              }
+            : await api<DescribedBase>("/admin/tools/explain", {
+                method: "POST",
+                body: { source, base },
+              });
+          takeBase(base, described);
+        });
 
   const readQuery = () =>
     guard("columns", async () => {
@@ -389,7 +417,11 @@ function ToolEditor({
   const save = () =>
     guard("save", async () => {
       const sent = cleanDefinition(definition);
-      const data = await api<{ status: "draft"; checks: CheckResult[]; columns: BaseColumn[] }>(
+      const data = await api<{
+        status: "draft" | "published";
+        checks: CheckResult[];
+        columns: BaseColumn[];
+      }>(
         `/admin/tools/${name}`,
         // A new tool never replaces another of the same name
         { method: "PUT", body: { source, definition: sent, create: savedAs === null } },
@@ -498,6 +530,8 @@ function ToolEditor({
    * @param   redo    Whether to replace the explanation already there
    */
   const helpFilter = async (column: string, op: FilterOp, redo = false) => {
+    const asked = (helpAsked.current.get(column) ?? 0) + 1;
+    helpAsked.current.set(column, asked);
     setHelping((current) => [...current, column]);
     try {
       const help = await api<FilterHelp>("/admin/tools/filter-help", {
@@ -510,11 +544,14 @@ function ToolEditor({
           about: definition.meaning.definition.trim() || undefined,
         },
       });
-      setNote(help.note ?? null);
+      if (helpAsked.current.get(column) !== asked) {
+        return;
+      }
+      setFilterNote(help.note ?? null);
       setDefinition((current) => ({
         ...current,
         filters: current.filters.map((filter) =>
-          filter.column !== column
+          filter.column !== column || filter.op !== op
             ? filter
             : {
                 ...filter,
@@ -1002,9 +1039,9 @@ function ToolEditor({
                     </Box>
                   );
                 })}
-                {note && (
+                {filterNote && (
                   <Text fontSize="sm" color="fg.muted">
-                    {note}
+                    {filterNote}
                   </Text>
                 )}
                 <Button
@@ -1024,7 +1061,7 @@ function ToolEditor({
             </Section>
           )}
 
-          {step === 4 && (ideasLoading || shownIdeas.length > 0 || inUse) && (
+          {step === 4 && (ideasLoading || shownIdeas.length > 0 || inUse || ideasNote) && (
             <Section
               title="Ideas de la IA"
               hint="Resúmenes que suelen pedirse con estos datos. Un clic lo aplica y abajo lo ajustas."
@@ -1038,6 +1075,16 @@ function ToolEditor({
                     Una herramienta lleva un solo resumen: elegir otra idea lo reemplaza.
                   </Text>
                 </Text>
+              )}
+              {ideasNote && !ideasLoading && (
+                <HStack gap={2} mb={3}>
+                  <Text fontSize="sm" color="fg.muted">
+                    {ideasNote}
+                  </Text>
+                  <Button size="xs" variant="outline" onClick={() => setIdeasAsked(false)}>
+                    Reintentar
+                  </Button>
+                </HStack>
               )}
               {ideasLoading ? (
                 <HStack gap={2}>
@@ -1188,7 +1235,12 @@ function ToolEditor({
                             options={[
                               ["", "columna…"],
                               ...chosen
-                                .filter((column) => kindOf(column) === "number")
+                                .filter(
+                                  (column) =>
+                                    aggregate.fn === "min" ||
+                                    aggregate.fn === "max" ||
+                                    kindOf(column) === "number",
+                                )
                                 .map((column) => [column, column] as [string, string]),
                             ]}
                             onChange={(value) => set({ column: value || undefined })}
@@ -1596,6 +1648,7 @@ function ToolEditor({
               // A suggestion over another base needs that base's columns read again
               if (JSON.stringify(next.base) !== JSON.stringify(definition.base)) {
                 setBaseColumns([]);
+                forgetIdeas();
               }
               setDefinition(next);
               setChecks(null);
