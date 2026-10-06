@@ -115,10 +115,6 @@ export async function isCurrent(index: Index, docCode: string): Promise<boolean>
 /**
  * Indexes a document as the current version of its family
  *
- * Its previous chunks go first, so a shorter new upload leaves no leftovers; the other versions of
- * the same family then move to the history with their vectors, so nothing is embedded twice. A
- * version older than the current one is refused: indexing it would roll the document back.
- *
  * @param   index     Solr, embedder and cores
  * @param   document  Parsed document
  *
@@ -128,6 +124,9 @@ export async function ingestDocument(
   index: Index,
   document: ParsedDocument,
 ): Promise<IngestResult> {
+  // Its previous chunks go first, so a shorter new upload leaves no leftovers; the other versions of
+  // the same family then move to the history with their vectors, so nothing is embedded twice. A
+  // version older than the current one is refused: indexing it would roll the document back.
   const { solr, embedder, cores } = index;
   const docCode = document.frontmatter.doc_code;
   const chunks = chunkDocument(document);

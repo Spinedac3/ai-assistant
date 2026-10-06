@@ -120,8 +120,6 @@ function words(text: string): string[] {
 /**
  * Ranks tools against a query by shared words, each weighted by how rare it is in the catalog
  *
- * A plain word count ties every tool that says "analyze"; the rare word is the one that discriminates.
- *
  * @param   tools  Candidates
  * @param   query  What the person needs
  *
@@ -131,6 +129,7 @@ export function rankByWords(
   tools: ToolDefinition[],
   query: string,
 ): Array<{ tool: ToolDefinition; score: number }> {
+  // A plain word count ties every tool that says "analyze"; the rare word is the one that discriminates.
   const terms = new Set(words(query));
   const bags = tools.map((tool) => ({
     tool,
@@ -193,9 +192,6 @@ export function howToGetAccess(contact: string): string {
 /**
  * Finds capabilities for a query, declaring at most two that exist but the caller cannot use
  *
- * Hiding what the person cannot use makes the only possible answer "that does not exist", which
- * is false; the scope names themselves are never revealed.
- *
  * @param   all         Every registered tool
  * @param   allowed     Tools the caller may run
  * @param   query       What the person needs
@@ -213,6 +209,8 @@ export function findCapabilities(
   contact: string,
   similarity: ReadonlyMap<string, number> | null = null,
 ): CapabilityHit[] {
+  // Hiding what the person cannot use makes the only possible answer "that does not exist", which
+  // is false; the scope names themselves are never revealed.
   const usable = new Set(allowed.map((tool) => tool.name));
   const ranked = rankByWords(all, query);
   const byMeaning = similarity

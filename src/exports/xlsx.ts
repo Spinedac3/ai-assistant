@@ -82,7 +82,7 @@ function excelDate(text: string): { serial: number; timed: boolean } | null {
     Number(minute ?? 0),
     Number(second ?? 0),
   );
-  // A date that does not exist, as 2026-02-30, stays text
+  // A date that does not exist, as February 30, stays text
   if (Number.isNaN(ms) || new Date(ms).getUTCDate() !== Number(day)) {
     return null;
   }

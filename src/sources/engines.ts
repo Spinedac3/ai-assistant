@@ -440,11 +440,6 @@ export function startsAsRead(sql: string): boolean {
 /**
  * Runs a read-only query on a source
  *
- * Postgres and MySQL take one statement per query, so refusing anything that does not start as
- * a read keeps out every statement that commits on its own: a password change, a GRANT, a DO
- * that the server timeout would not stop. SQL Server takes batches, so there the read-only user,
- * checked when the source is registered, is the barrier.
- *
  * @param   info    Connection
  * @param   sql     Query in the engine's own placeholder style
  * @param   params  Values
@@ -458,6 +453,10 @@ export function runQuery(
   params: unknown[],
   limits: QueryLimits,
 ): Promise<QueryResult> {
+  // Postgres and MySQL take one statement per query, so refusing anything that does not start as
+  // a read keeps out every statement that commits on its own: a password change, a GRANT, a DO
+  // that the server timeout would not stop. SQL Server takes batches, so there the read-only user,
+  // checked when the source is registered, is the barrier.
   if (info.engine !== "mssql" && !startsAsRead(sql)) {
     return Promise.reject(new Error("Solo se ejecutan consultas de lectura (SELECT o WITH)"));
   }

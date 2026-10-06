@@ -201,15 +201,14 @@ function lex(sql: string, engine: EngineName): Lexed | string {
  * Checks a query pasted by a person before it becomes the base of a tool: one read statement that
  * the creator can wrap, filter and order
  *
- * The query that runs is the one read here with its comments blanked out, so an engine that reads
- * a comment differently from this check still sees exactly what was checked.
- *
  * @param   sql     Pasted query
  * @param   engine  Engine of the source
  *
  * @return  The query to run, or why it is refused
  */
 export function checkPasted(sql: string, engine: EngineName): PastedCheck {
+  // The query that runs is the one read here with its comments blanked out, so an engine that reads
+  // a comment differently from this check still sees exactly what was checked.
   const refuse = (message: string): PastedCheck => ({ ok: false, message });
   const lexed = lex(sql, engine);
   if (typeof lexed === "string") {

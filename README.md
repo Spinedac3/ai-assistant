@@ -8,25 +8,38 @@ declarativo, expuesto por MCP para que cualquier cliente lo use. Su pareja es
 [agent-factory](https://github.com/Spinedac3/agent-factory), que arma agentes programados sobre
 estas tools.
 
-**En construcción.** Este README crece con cada rebanada.
+## Levantarlo en cinco minutos
 
-## Cómo se corre
-
-Necesitás Node 22, pnpm, Docker y el [CLI de Claude](https://docs.claude.com/en/docs/claude-code) instalado y con sesión iniciada: el chat corre cada turno como `claude -p`.
+Necesitas Node 22, pnpm, Docker y el [CLI de Claude](https://docs.claude.com/en/docs/claude-code)
+instalado y con sesión iniciada: el chat corre cada turno como `claude -p`.
 
 ```bash
 pnpm install
 cp .env.example .env
 docker compose --profile engines up -d   # postgres, solr, embed, minio y las bases demo
-pnpm keys:generate              # llave RS256 en secrets/, nunca en variables
-pnpm kek:generate               # llave maestra de las contraseñas de las fuentes
+pnpm keys:generate                       # llave RS256 en secrets/, nunca en variables
+pnpm kek:generate                        # llave maestra de las contraseñas de las fuentes
 pnpm db:migrate
-pnpm admin:create --email tu@empresa.com --name "Tu Nombre"
-pnpm dev                        # http://localhost:3000/health
-pnpm --filter ai-assistant-web build   # el panel, que el servidor sirve en http://localhost:3000/panel
-pnpm check                      # typecheck + lint + tests unitarios
-pnpm demo:seed                  # base demo de la distribuidora
-pnpm test:integration           # también los que usan Postgres, Solr, MinIO y las bases demo
+pnpm admin:create --email tu@empresa.com --name "Tu Nombre"   # pide la contraseña
+pnpm --filter ai-assistant-web build     # el panel
+pnpm dev                                 # http://localhost:3000/panel
+```
+
+Entra al panel con ese correo. Para tener algo que consultar desde el primer minuto:
+
+```bash
+pnpm demo:seed               # la base demo de una distribuidora, en los tres motores
+pnpm docs:load demo/documents   # sus documentos
+```
+
+y registra la fuente demo en **Fuentes**: Postgres en `localhost`, puerto `5433`, base `demo`,
+usuario `demo_reader` y contraseña `demo-reader`.
+La primera vez, `docker compose` construye la imagen de vectores, que trae el modelo bge-m3 y
+tarda unos minutos más.
+
+```bash
+pnpm check              # typecheck, Biome, tests unitarios y gates de arquitectura
+pnpm test:integration   # también los que usan Postgres, Solr, MinIO y las bases demo
 ```
 
 ## Panel
@@ -162,8 +175,14 @@ tags: [bodega, recepción]   # opcional
   código sin sufijo cuenta como la versión 0 de la suya). Subir una versión mueve las demás de la
   familia al core `docs_historical`, con su vector, y solo se busca en la vigente. Una versión
   más vieja que la vigente se rechaza: volver atrás se hace subiendo una versión posterior.
-- Los PDF se convierten a markdown antes de subirlos; el PDF original puede subirse junto al
-  `.md` para descargarlo después. `<!-- page: N -->` en el texto marca dónde empieza cada página.
+- `<!-- page: N -->` en el texto marca dónde empieza cada página; el PDF original puede subirse
+  junto al `.md` para descargarlo después.
+
+En el panel basta con **subir el PDF**: la IA lo lee por partes de diez páginas en segundo plano,
+lo escribe en Markdown con sus marcas de página y propone el encabezado con un área que la persona
+puede leer. La persona revisa el encabezado y una vista previa del texto, y lo publica; el PDF
+queda como original. Hasta 300 páginas y dos PDF convirtiéndose a la vez por persona; lo que nadie
+publica se borra a los 7 días.
 
 Para cargar una carpeta sin pasar por el servidor:
 
@@ -176,6 +195,10 @@ pnpm docs:load demo/documents           # 13 documentos (14 archivos) de una dis
 |---|---|---|
 | `POST /docs` | `docs.manage` | Sube el `.md` (campo `document`) y opcionalmente el PDF (`original`); responde 202 con el trabajo encolado |
 | `GET /docs/jobs/:id` | `docs.manage` | Estado del trabajo: `queued`, `running`, `done` (con los pedazos indexados) o `failed` (con el motivo) |
+| `POST /docs/conversions` | `docs.manage` | Sube solo el PDF (`original`) para que la IA lo convierta |
+| `GET /docs/conversions` · `GET /docs/conversions/:id` | `docs.manage` | Mis conversiones con su avance; la de un id trae además el texto y el encabezado sugerido |
+| `POST /docs/conversions/:id/publish` | `docs.manage` | Publica la conversión con el encabezado revisado (`header`) |
+| `DELETE /docs/conversions/:id` | `docs.manage` | La descarta con su PDF |
 | `GET /docs` | `chat.use` | Documentos vigentes que puedo leer |
 | `GET /docs/:code/original?kind=md\|pdf` | `chat.use` | Descarga el original de la versión vigente, si puedo leer su área |
 | `POST /docs/:code/reindex` | `docs.manage` | Vuelve a indexar la versión vigente desde el `.md` guardado |
@@ -259,6 +282,49 @@ motores, con un usuario `demo_reader` de solo lectura:
 docker compose --profile engines up -d demo-mysql demo-mssql   # demo-db (Postgres) ya está arriba
 pnpm demo:seed                                                  # o solo: pnpm demo:seed postgres
 ```
+
+## Crear herramientas
+
+Quien tiene `tools.manage` y el permiso de una fuente (`sources.<código>.use`, que nace al
+registrarla) arma herramientas sobre ella sin escribir SQL. En el panel, **Herramientas** guía
+paso a paso: fuente → tabla o vista → columnas → filtros → totales y orden → nombre → guardar y
+publicar. La IA propone lo que puede deducir (qué es cada tabla, cómo usar cada filtro, el nombre,
+los resúmenes) y la persona lo revisa; una consulta pegada queda como modo avanzado.
+
+La IA nunca escribe el SQL: el código lo genera desde la definición, con parámetros. Antes de
+publicar, cada versión pasa sus chequeos sobre la fuente real: que corra, que su resultado tenga la
+forma declarada, que un filtro solo quite filas, que los grupos sumen el total y que las dos mitades
+de un rango tengan las filas del rango entero. Se prueba en un chat que la usa por MCP antes de
+publicarla. Las rutas están bajo `/admin/tools` (`GET`, `PUT /:name`, `POST /:name/check`,
+`/run`, `/publish`, `/guide`, `/chat`).
+
+## Avisos por correo
+
+Con `SMTP_HOST`, `SMTP_FROM` y la contraseña en un archivo (`SMTP_PASSWORD_FILE`), la tool
+`send_notice` (permiso `notices.send`) manda correos a cuentas activas: cada aviso lleva una llave
+para no repetirse, una persona recibe hasta 25 por hora, y la cola reintenta un aviso que no salió
+esperando cada vez el doble. El mismo correo sirve para mandar un enlace de cambio de contraseña
+(`POST /admin/users/:id/password-reset`).
+
+## Personas, permisos y uso
+
+En **Usuarios** (`users.manage`) se dan de alta personas con un rol y, si hace falta, permisos
+extra; los roles y los permisos se crean ahí mismo (`/admin/users`, `/admin/roles`,
+`/admin/scopes`). De fábrica hay dos roles: `admin`, con todo, y `user`, que conversa y lee los
+documentos generales.
+
+**Uso** (`usage.read`, `GET /admin/usage`) cuenta preguntas, llamadas por MCP, herramientas,
+tokens y costo por canal, persona, rol y día, con las cuentas de servicio aparte; nunca lo que
+alguien preguntó. **Configuración**
+(`settings.manage`) elige el modelo del chat y muestra el diagnóstico de cada servicio.
+
+## Cómo se trabaja en este repo
+
+`CLAUDE.md` describe la forma del código: carpetas, piezas con su ejemplar medido, reglas de
+dirección y estilo. Las reglas son tests (`tests/architecture/`) que corren con `pnpm check`. Un
+cambio nace como issue con su spec (`docs/plantilla-7ejes.md`) y termina en una PR con su recibo
+(`tools/harness/recibo.sh`): los comandos `/grill`, `/implementar` y `/pr` de `.claude/` guían
+cada paso.
 
 ## Licencia
 

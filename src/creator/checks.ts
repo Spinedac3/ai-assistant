@@ -139,15 +139,14 @@ async function guarded(
  * expected answer: a filter only removes rows, the sums of the groups add up to the total, and the
  * two halves of a range hold the rows of the whole
  *
- * They compare counts and sums the source computes, so a base of any size is checked without
- * bringing its rows over.
- *
  * @param   tool    Created tool
  * @param   runner  Runs variants of the definition and reads samples
  *
  * @return  One result per check
  */
 export async function runChecks(tool: CreatedTool, runner: Runner): Promise<CheckResult[]> {
+  // The checks compare counts and sums the source computes, so a base of any size is checked
+  // without bringing its rows over.
   const { spec } = tool;
   const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
 
@@ -342,10 +341,6 @@ async function sumAddsUp(
 /**
  * Checks that two halves of a range hold the rows of the whole range
  *
- * Days split into halves that meet without overlap, which also catches a source that drops the
- * last day of every range. Numbers may have decimals between any two, so their halves share the
- * middle and it is counted once.
- *
  * @param   spec    Definition
  * @param   count   Counts the rows of a call
  * @param   base    Arguments of the required filters
@@ -361,6 +356,9 @@ async function rangeSplits(
   kinds: Map<string, ColumnKind>,
   values: Map<string, unknown>,
 ): Promise<CheckResult> {
+  // Days split into halves that meet without overlap, which also catches a source that drops the
+  // last day of every range. Numbers may have decimals between any two, so their halves share the
+  // middle and it is counted once.
   const range = spec.filters.find((filter) => {
     const kind = kinds.get(filter.column);
     const value = values.get(filter.column) as [unknown, unknown] | undefined;

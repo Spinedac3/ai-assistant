@@ -21,7 +21,7 @@ type Token =
  * @param   literal   ISO date or "today"
  * @param   timeZone  Zone where today is measured
  *
- * @return  Days since 1970-01-01
+ * @return  Days since the Unix epoch
  */
 function toDays(literal: string, timeZone: string): number {
   const iso =
@@ -31,7 +31,7 @@ function toDays(literal: string, timeZone: string): number {
   const [year = 0, month = 1, day = 1] = iso.split("-").map(Number);
   const moment = new Date(Date.UTC(year, month - 1, day));
 
-  // Date.UTC rolls 2026-02-30 over into March; a date that does not exist is an error, not a guess
+  // Date.UTC rolls February 30 over into March; a date that does not exist is an error, not a guess
   if (moment.getUTCMonth() !== month - 1 || moment.getUTCDate() !== day) {
     throw new Error(`La fecha ${iso} no existe`);
   }

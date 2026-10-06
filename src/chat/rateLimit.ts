@@ -105,9 +105,6 @@ export interface Reservation {
 /**
  * Counts a new message, rejecting it without counting when the user is already over a quota
  *
- * The check before counting keeps rejected messages out of the counters; the check after counting
- * is atomic, so parallel messages cannot all take the same last unit.
- *
  * @param   db        Own database
  * @param   userId    Person sending
  * @param   limits    Quotas
@@ -123,6 +120,8 @@ export async function reserveMessage(
   limits: RateLimits,
   timeZone: string,
 ): Promise<Reservation> {
+  // The check before counting keeps rejected messages out of the counters; the check after counting
+  // is atomic, so parallel messages cannot all take the same last unit.
   const current = await db
     .select({
       windowType: rateLimits.windowType,

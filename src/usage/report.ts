@@ -147,9 +147,6 @@ async function totalsBetween(
 /**
  * Builds the usage report of the last days: only counts, never what anyone asked
  *
- * The window is the last days counted back from now, so its first and last calendar days are
- * partial
- *
  * @param   database  Own database
  * @param   days      Length of the window
  * @param   timeZone  Zone where days are cut
@@ -163,6 +160,8 @@ export async function usageReport(
   timeZone: string,
   now: Date = new Date(),
 ): Promise<UsageReport> {
+  // The window is the last days counted back from now, so its first and last calendar days are
+  // partial
   const from = new Date(now.getTime() - days * 86_400_000);
   const before = new Date(from.getTime() - days * 86_400_000);
   const events = eventsBetween(from, now);
