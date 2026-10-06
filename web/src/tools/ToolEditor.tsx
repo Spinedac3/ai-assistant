@@ -248,6 +248,8 @@ function ToolEditor({
   const [ideas, setIdeas] = useState<TotalsIdea[]>([]);
   const [ideasAsked, setIdeasAsked] = useState(false);
   const [ideasLoading, setIdeasLoading] = useState(false);
+  // The idea in use leaves the list, so what remains are the ones still to choose from
+  const [appliedIdea, setAppliedIdea] = useState<string | null>(null);
   useEffect(() => {
     if (step !== 4 || ideasAsked || baseColumns.length === 0) {
       return;
@@ -275,6 +277,7 @@ function ToolEditor({
    * @param   idea  Summary proposed
    */
   const applyIdea = (idea: TotalsIdea) => {
+    setAppliedIdea(idea.label);
     const needed = [
       ...idea.group_by,
       ...idea.aggregates.flatMap((aggregate) => (aggregate.column ? [aggregate.column] : [])),
@@ -530,6 +533,8 @@ function ToolEditor({
       setHelping((current) => current.filter((item) => item !== column));
     }
   };
+
+  const shownIdeas = ideas.filter((idea) => !(definition.summary && idea.label === appliedIdea));
 
   const addFilter = (filter: Definition["filters"][number]) => {
     change({ filters: [...definition.filters, filter] });
@@ -861,7 +866,13 @@ function ToolEditor({
                       <HStack gap={2} wrap="wrap">
                         <Select
                           value={filter.column}
-                          options={baseColumns.map((column) => [column.name, column.name])}
+                          // A column takes one filter, so the others already filtered are not offered
+                          options={baseColumns
+                            .filter(
+                              (column) =>
+                                column.name === filter.column || !filtered.has(column.name),
+                            )
+                            .map((column) => [column.name, column.name])}
                           onChange={(value) => {
                             // Another column has other values and means something else
                             set({
@@ -1005,7 +1016,7 @@ function ToolEditor({
             </Section>
           )}
 
-          {step === 4 && (ideasLoading || ideas.length > 0) && (
+          {step === 4 && (ideasLoading || shownIdeas.length > 0) && (
             <Section
               title="Ideas de la IA"
               hint="Resúmenes que suelen pedirse con estos datos. Un clic lo aplica y abajo lo ajustas."
@@ -1019,7 +1030,7 @@ function ToolEditor({
                 </HStack>
               ) : (
                 <Stack gap={2}>
-                  {ideas.map((idea) => (
+                  {shownIdeas.map((idea) => (
                     <Box
                       key={idea.label}
                       as="button"
