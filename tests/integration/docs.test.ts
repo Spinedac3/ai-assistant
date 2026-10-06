@@ -725,6 +725,7 @@ describe("docs", () => {
       const [first, second] = await Promise.all([publish(id, header), publish(id, header)]);
       await drainQueue();
       const running = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
       await database.db.execute(
         sql`update pdf_conversions set status = 'running' where id = ${running}`,
       );
