@@ -39,6 +39,7 @@ const MAX_BYTES_OF: Record<ToolOrigin, number> = {
   mcp: EXTERNAL_MAX_BYTES,
   run: PROGRAM_MAX_BYTES,
 };
+const PROGRAM_TOO_LARGE = `El resultado pasa de ${PROGRAM_MAX_BYTES / 1_000_000} MB: el programa necesita una consulta más angosta`;
 
 /**
  * Prepares a call's arguments for the audit, keeping every key and the length of long texts
@@ -363,20 +364,10 @@ export class ToolRegistry {
       target ? filterHint(target) : "",
       result.main,
     );
-    if (!capped.ok) {
-      return this.fail(name, args, caller, context, started, "result_too_large", capped.message);
-    }
     // A program counts what it reads: a cut list would give it wrong totals without a word
-    if (context.origin === "run" && capped.truncated) {
-      return this.fail(
-        name,
-        args,
-        caller,
-        context,
-        started,
-        "result_too_large",
-        `El resultado pasa de ${PROGRAM_MAX_BYTES / 1_000_000} MB: el programa necesita una consulta más angosta`,
-      );
+    if (!capped.ok || (context.origin === "run" && capped.truncated)) {
+      const message = capped.ok ? PROGRAM_TOO_LARGE : capped.message;
+      return this.fail(name, args, caller, context, started, "result_too_large", message);
     }
 
     const text = JSON.stringify(capped.data);
