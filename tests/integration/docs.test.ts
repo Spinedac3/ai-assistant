@@ -1,11 +1,13 @@
 import { eq, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
+import { PDFDocument } from "pdf-lib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { generateToken, hashToken } from "../../src/auth/opaqueTokens.js";
 import { hashPassword } from "../../src/auth/password.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
 import { accessTokens, roleScopes, roles, scopes, users } from "../../src/db/schema.js";
+import { PdfConverter } from "../../src/rag/convert.js";
 import { Embedder } from "../../src/rag/embeddings.js";
 import type { Index } from "../../src/rag/ingest.js";
 import { claimNext, runJob } from "../../src/rag/jobs.js";
@@ -30,6 +32,47 @@ let app: FastifyInstance;
 let embed: FakeEmbed;
 let index: Index;
 let storage: DocumentStorage;
+let converter: PdfConverter;
+// What the fake model writes for each part of a PDF, and how many parts it was asked for
+let pageAnswer: (from: number, to: number) => string;
+const parts: Array<{ from: number; to: number; pages: number }> = [];
+
+/**
+ * Builds a PDF with some empty pages
+ *
+ * @param   pages  How many
+ *
+ * @return  The file
+ */
+async function pdfWith(pages: number): Promise<Buffer> {
+  const document = await PDFDocument.create();
+  for (let page = 0; page < pages; page++) {
+    document.addPage([200, 200]);
+  }
+
+  return Buffer.from(await document.save());
+}
+
+/**
+ * Uploads a PDF alone, for conversion
+ *
+ * @param   token  Session
+ * @param   pdf    File
+ * @param   name   Its name
+ *
+ * @return  The response
+ */
+async function convert(token: string, pdf: Buffer, name = "Manual de bodega.pdf") {
+  const form = new FormData();
+  form.append("original", new Blob([pdf]), name);
+
+  return app.inject({
+    method: "POST",
+    url: "/docs/conversions",
+    headers: { authorization: `Bearer ${token}` },
+    payload: form,
+  });
+}
 let adminToken: string;
 let userToken: string;
 let userId: number;
@@ -145,6 +188,24 @@ describe("docs", () => {
       bucket: "documents-test",
     });
     await storage.ensureBucket();
+    pageAnswer = (from, to) =>
+      Array.from(
+        { length: to - from + 1 },
+        (_, offset) =>
+          `<!-- page: ${from + offset} -->\n## Montacargas ${from + offset}\n\nLa velocidad máxima es de ocho kilómetros por hora.`,
+      ).join("\n\n");
+    converter = new PdfConverter({
+      db: database.db,
+      storage,
+      convert: async (prompt, pdf) => {
+        const [, from, to] = prompt.match(/páginas (\d+) a (\d+)/) ?? [];
+        const pages = (await PDFDocument.load(pdf)).getPageCount();
+        parts.push({ from: Number(from), to: Number(to), pages });
+        return pageAnswer(Number(from), Number(to));
+      },
+      ask: async () =>
+        '{"doc_code": "BOD-PDF-V001", "doc_title": "Manual de bodega", "doc_version": "V001", "area": "general", "tags": ["bodega"]}',
+    });
     // A second area, held by the admin role only
     const [hr] = await database.db
       .insert(scopes)
@@ -176,7 +237,7 @@ describe("docs", () => {
       db: database.db,
       signer: testSigner(),
       systems: new Map(),
-      docs: { index, storage },
+      docs: { index, storage, converter },
       mcp: {
         registry,
         publicBaseUrl: "https://assistant.example.com",
@@ -456,5 +517,396 @@ describe("docs", () => {
     expect(codes).not.toContain("BOD-V001");
     expect(codes).toContain("RH-V001");
     expect(await storage.exists("BOD-V001", "md")).toBe(false);
+  });
+
+  it("turns a PDF into a document in parts of ten pages, with a header to review", async () => {
+    // Performs the test.
+    parts.length = 0;
+    const started = await convert(adminToken, await pdfWith(23));
+    await converter.idle();
+    const id = started.json().data.id;
+    const found = await app.inject({
+      url: `/docs/conversions/${id}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    const data = found.json().data;
+
+    // Performs assertions.
+    expect(started.statusCode).toBe(202);
+    expect(parts).toEqual([
+      { from: 1, to: 10, pages: 10 },
+      { from: 11, to: 20, pages: 10 },
+      { from: 21, to: 23, pages: 3 },
+    ]);
+    expect(data).toMatchObject({ status: "done", pages_done: 23, pages_total: 23 });
+    expect(data.markdown).toContain("<!-- page: 23 -->");
+    expect(data.suggested).toMatchObject({ doc_code: "BOD-PDF-V001", area: "general" });
+  });
+
+  it("publishes a reviewed conversion with the PDF as its original, and forgets the conversion", async () => {
+    // Performs the test.
+    const pdf = await pdfWith(2);
+    const id = (await convert(adminToken, pdf)).json().data.id;
+    await converter.idle();
+    const published = await app.inject({
+      method: "POST",
+      url: `/docs/conversions/${id}/publish`,
+      headers: { authorization: `Bearer ${adminToken}` },
+      payload: {
+        header: {
+          doc_code: "BOD-PDF-V001",
+          doc_title: "Manual de bodega",
+          doc_version: "V001",
+          area: "general",
+          tags: ["bodega"],
+        },
+      },
+    });
+    await drainQueue();
+    const original = await app.inject({
+      url: "/docs/BOD-PDF-V001/original?kind=pdf",
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    const gone = await app.inject({
+      url: `/docs/conversions/${id}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    await app.inject({
+      method: "DELETE",
+      url: "/docs/BOD-PDF-V001",
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+
+    // Performs assertions.
+    expect(published.statusCode).toBe(202);
+    expect(original.statusCode).toBe(200);
+    expect(original.rawPayload.equals(pdf)).toBe(true);
+    expect(gone.statusCode).toBe(404);
+  });
+
+  it("refuses what is not a PDF, one that does not open and one too long to review", async () => {
+    // Performs the test.
+    const text = await convert(adminToken, Buffer.from("no soy un pdf"));
+    const broken = await convert(adminToken, Buffer.from("%PDF-1.7 roto"));
+    const long = await convert(adminToken, await pdfWith(301));
+    const notManager = await convert(userToken, await pdfWith(1));
+
+    // Performs assertions.
+    expect(text.json().error).toBe("invalid_original");
+    expect(broken.json().error).toBe("unreadable_pdf");
+    expect(long.json().error).toBe("too_many_pages");
+    expect(notManager.statusCode).toBe(403);
+  });
+
+  it("fails a conversion whose pages the model could not read, and never keeps its excuse", async () => {
+    // Performs the test.
+    pageAnswer = () => "No pude leer document.pdf: pdftoppm is not installed.";
+    const id = (await convert(adminToken, await pdfWith(3))).json().data.id;
+    await converter.idle();
+    const found = await app.inject({
+      url: `/docs/conversions/${id}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+    pageAnswer = (from, to) =>
+      Array.from(
+        { length: to - from + 1 },
+        (_, offset) => `<!-- page: ${from + offset} -->\nTexto.`,
+      ).join("\n");
+
+    // Performs assertions.
+    expect(found.json().data).toMatchObject({ status: "failed", markdown: null });
+    expect(found.json().data.error).toContain("No se pudo convertir");
+  });
+
+  it("marks as failed the conversions a stopped server left unfinished", async () => {
+    // Performs the test.
+    const id = (await convert(adminToken, await pdfWith(1))).json().data.id;
+    await converter.idle();
+    await database.db.execute(sql`update pdf_conversions set status = 'running' where id = ${id}`);
+    await converter.recover();
+    const found = await app.inject({
+      url: `/docs/conversions/${id}`,
+      headers: { authorization: `Bearer ${adminToken}` },
+    });
+
+    // Performs assertions.
+    expect(found.json().data.status).toBe("failed");
+  });
+
+  describe("pdf conversions under strain", () => {
+    /**
+     * Reads a conversion as its owner
+     *
+     * @param   id  Conversion id
+     *
+     * @return  The response
+     */
+    const seen = (id: string) =>
+      app.inject({
+        url: `/docs/conversions/${id}`,
+        headers: { authorization: `Bearer ${adminToken}` },
+      });
+
+    /**
+     * Publishes a conversion with a header
+     *
+     * @param   id      Conversion id
+     * @param   header  Header fields
+     *
+     * @return  The response
+     */
+    const publish = (id: string, header: Record<string, unknown>) =>
+      app.inject({
+        method: "POST",
+        url: `/docs/conversions/${id}/publish`,
+        headers: { authorization: `Bearer ${adminToken}` },
+        payload: { header },
+      });
+
+    const header = {
+      doc_code: "BOD-CARGA-V001",
+      doc_title: "Carga de camiones",
+      doc_version: "V001",
+      area: "general",
+    };
+
+    it("leaves no conversion waiting when its file could not be kept", async () => {
+      // Performs the test.
+      const failing = new PdfConverter({
+        db: database.db,
+        storage: {
+          saveConversion: async () => {
+            throw new Error("sin espacio");
+          },
+        } as unknown as DocumentStorage,
+        convert: async () => "",
+        ask: async () => "{}",
+      });
+      const attempt = await failing
+        .start(userId, "a.pdf", await pdfWith(1), 1, ["general"])
+        .catch((error: Error) => error.message);
+      const left = await database.db.execute(
+        sql`select count(*)::int as n from pdf_conversions where file_name = 'a.pdf'`,
+      );
+
+      // Performs assertions.
+      expect(attempt).toBe("sin espacio");
+      expect((left.rows[0] as { n: number }).n).toBe(0);
+    });
+
+    it("goes on with the next conversion after one fails", async () => {
+      // Performs the test.
+      let calls = 0;
+      const answer = pageAnswer;
+      pageAnswer = (from, to) => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error("el modelo se cayó");
+        }
+        return answer(from, to);
+      };
+      const failed = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      const next = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
+      pageAnswer = answer;
+
+      // Performs assertions.
+      expect((await seen(failed)).json().data.status).toBe("failed");
+      expect((await seen(next)).json().data.status).toBe("done");
+    });
+
+    it("publishes once, gives a refused header back to correct, and waits for a running one", async () => {
+      // Performs the test.
+      const id = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
+      const refused = await publish(id, { ...header, area: "inexistente" });
+      const afterRefused = (await seen(id)).json().data.status;
+      const empty = await publish(id, { ...header, doc_version: " " });
+      const [first, second] = await Promise.all([publish(id, header), publish(id, header)]);
+      await drainQueue();
+      const running = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
+      await database.db.execute(
+        sql`update pdf_conversions set status = 'running' where id = ${running}`,
+      );
+      const early = await publish(running, header);
+      await database.db.execute(
+        sql`update pdf_conversions set status = 'done' where id = ${running}`,
+      );
+      await app.inject({
+        method: "DELETE",
+        url: "/docs/BOD-CARGA-V001",
+        headers: { authorization: `Bearer ${adminToken}` },
+      });
+
+      // Performs assertions.
+      expect(refused.statusCode).toBeGreaterThanOrEqual(400);
+      expect(afterRefused).toBe("done");
+      expect(empty.json().message).toBe("Falta la versión");
+      expect([first.statusCode, second.statusCode].sort()).toEqual([202, 409]);
+      expect(early.statusCode).toBe(409);
+    });
+
+    it("shows no one else's conversion, and discarding one removes its file", async () => {
+      // Performs the test.
+      const id = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
+      await database.db.execute(
+        sql`update pdf_conversions set user_id = ${userId} where id = ${id}`,
+      );
+      const foreign = await seen(id);
+      const foreignDelete = await app.inject({
+        method: "DELETE",
+        url: `/docs/conversions/${id}`,
+        headers: { authorization: `Bearer ${adminToken}` },
+      });
+      const [admin] = await database.db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, "admin@example.com"));
+      await database.db.execute(
+        sql`update pdf_conversions set user_id = ${admin?.id ?? 0} where id = ${id}`,
+      );
+      const discarded = await app.inject({
+        method: "DELETE",
+        url: `/docs/conversions/${id}`,
+        headers: { authorization: `Bearer ${adminToken}` },
+      });
+      const file = await storage
+        .readConversion(id)
+        .then(() => "still there")
+        .catch(() => "gone");
+
+      // Performs assertions.
+      expect(foreign.statusCode).toBe(404);
+      expect(foreignDelete.statusCode).toBe(404);
+      expect(discarded.statusCode).toBe(200);
+      expect(file).toBe("gone");
+    });
+
+    it("keeps two PDFs converting per person, and one discarded halfway stops", async () => {
+      // Performs the test.
+      parts.length = 0;
+      let release: () => void = () => undefined;
+      const answer = pageAnswer;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      pageAnswer = (from, to) => answer(from, to);
+      const slow = new PdfConverter({
+        db: database.db,
+        storage,
+        convert: async (prompt) => {
+          const [, from, to] = prompt.match(/páginas (\d+) a (\d+)/) ?? [];
+          parts.push({ from: Number(from), to: Number(to), pages: 0 });
+          await held;
+          return answer(Number(from), Number(to));
+        },
+        ask: async () => "{}",
+      });
+      const first = await slow.start(userId, "uno.pdf", await pdfWith(25), 25, ["general"]);
+      await slow.start(userId, "dos.pdf", await pdfWith(1), 1, ["general"]);
+      const pending = await slow.pending(userId);
+      await slow.remove(first);
+      release();
+      await slow.idle();
+      const leftovers = await slow.list(userId);
+      for (const row of leftovers) {
+        await slow.remove(row.id);
+      }
+
+      // Performs assertions.
+      expect(pending).toBe(2);
+      // The first part was already being written; nothing after it was asked for
+      expect(parts.filter((part) => part.to > 10 && part.to <= 25)).toEqual([]);
+    });
+
+    it("refuses a third PDF while a person already has two converting", async () => {
+      // Performs the test.
+      const [admin] = await database.db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, "admin@example.com"));
+      const waiting = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+      ];
+      for (const id of waiting) {
+        await database.db.execute(
+          sql`insert into pdf_conversions (id, user_id, file_name, status) values (${id}, ${admin?.id ?? 0}, 'espera.pdf', 'queued')`,
+        );
+      }
+      const third = await convert(adminToken, await pdfWith(1));
+      await database.db.execute(sql`delete from pdf_conversions where file_name = 'espera.pdf'`);
+
+      // Performs assertions.
+      expect(third.statusCode).toBe(409);
+      expect(third.json().error).toBe("too_many_conversions");
+    });
+
+    it("gives a conversion back when publishing breaks, or when the server stopped while publishing", async () => {
+      // Performs the test.
+      const id = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
+      const read = converter.read.bind(converter);
+      converter.read = async () => {
+        throw new Error("el almacenamiento no responde");
+      };
+      const broken = await publish(id, header);
+      converter.read = read;
+      const afterBroken = (await seen(id)).json().data.status;
+      await database.db.execute(
+        sql`update pdf_conversions set status = 'publishing' where id = ${id}`,
+      );
+      await converter.recover();
+      const afterRestart = (await seen(id)).json().data.status;
+      await converter.remove(id);
+
+      // Performs assertions.
+      expect(broken.statusCode).toBe(500);
+      expect(afterBroken).toBe("done");
+      expect(afterRestart).toBe("done");
+    });
+
+    it("keeps no file when the conversion could not be written down", async () => {
+      // Performs the test.
+      let kept = "";
+      const failing = new PdfConverter({
+        db: database.db,
+        storage: {
+          saveConversion: async (id: string) => {
+            kept = id;
+          },
+          removeConversion: async (id: string) => {
+            kept = kept === id ? "" : kept;
+          },
+        } as unknown as DocumentStorage,
+        convert: async () => "",
+        ask: async () => "{}",
+      });
+      const attempt = await failing
+        .start(userId, "huerfano.pdf", await pdfWith(1), 0.5, ["general"])
+        .catch(() => "refused");
+
+      // Performs assertions.
+      expect(attempt).toBe("refused");
+      expect(kept).toBe("");
+    });
+
+    it("removes old reviewed conversions with their files, and keeps the rest", async () => {
+      // Performs the test.
+      const old = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      const fresh = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
+      await database.db.execute(
+        sql`update pdf_conversions set created_at = now() - interval '8 days' where id = ${old}`,
+      );
+      const purged = await converter.purge(new Date(Date.now() - 7 * 86_400_000));
+
+      // Performs assertions.
+      expect(purged).toBe(1);
+      expect((await seen(old)).statusCode).toBe(404);
+      expect((await seen(fresh)).statusCode).toBe(200);
+    });
   });
 });

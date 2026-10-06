@@ -3,10 +3,8 @@ import {
   Box,
   Button,
   Dialog,
-  Field,
   HStack,
   IconButton,
-  Input,
   Portal,
   Spinner,
   Stack,
@@ -15,9 +13,10 @@ import {
 } from "@chakra-ui/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { FiDownload, FiRefreshCw, FiTrash2, FiUpload } from "react-icons/fi";
+import { FiDownload, FiRefreshCw, FiTrash2 } from "react-icons/fi";
 import { ApiError, api, request } from "../api/http";
 import { can, useSession } from "../api/session";
+import { Conversions, PdfUploadButton } from "./Conversions";
 
 interface DocumentRow {
   doc_code: string;
@@ -94,8 +93,9 @@ export function DocsPage() {
           Los documentos que el asistente usa para responder; ves los de las áreas a las que tienes
           acceso.
         </Text>
-        {manager && <UploadButton onQueued={follow} />}
+        {manager && <PdfUploadButton />}
       </HStack>
+      {manager && <Conversions onQueued={follow} />}
       {jobs.map((job) => (
         <JobStatus key={job} id={job} onSettled={() => void settled(job)} />
       ))}
@@ -110,7 +110,7 @@ export function DocsPage() {
         ) : list.data?.length === 0 ? (
           <Text p={6} color="fg.muted">
             {manager
-              ? "Todavía no hay documentos. Carga el primero con «Cargar documento»."
+              ? "Todavía no hay documentos. Sube el primero con «Subir PDF»."
               : "No hay documentos de tus áreas todavía."}
           </Text>
         ) : (
@@ -216,105 +216,6 @@ function areaOf(scope: string): string {
  */
 function extensionOf(type: string | null): string {
   return type?.includes("pdf") ? ".pdf" : type?.includes("markdown") ? ".md" : "";
-}
-
-/**
- * Loads a document: its markdown, with the frontmatter that names it, and optionally its original
- *
- * @param   props  What to do with the job the server queues
- *
- * @return  The button and its dialog
- */
-function UploadButton({ onQueued }: { onQueued: (job: number) => void }) {
-  const [open, setOpen] = useState(false);
-  const [markdown, setMarkdown] = useState<File | null>(null);
-  const [original, setOriginal] = useState<File | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const submit = async (event: { preventDefault: () => void }) => {
-    event.preventDefault();
-    if (!markdown) {
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    const form = new FormData();
-    form.append("document", markdown, markdown.name);
-    if (original) {
-      form.append("original", original, original.name);
-    }
-    try {
-      const queued = await api<{ job_id: number }>("/docs", { method: "POST", body: form });
-      onQueued(queued.job_id);
-      setOpen(false);
-      setMarkdown(null);
-      setOriginal(null);
-    } catch (failure) {
-      setError(failure instanceof ApiError ? failure.message : "No se pudo cargar el documento");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Dialog.Root open={open} onOpenChange={(details) => setOpen(details.open)}>
-      <Dialog.Trigger asChild>
-        <Button colorPalette="brand" size="sm">
-          <FiUpload /> Cargar documento
-        </Button>
-      </Dialog.Trigger>
-      <Portal>
-        <Dialog.Backdrop />
-        <Dialog.Positioner>
-          <Dialog.Content as="form" onSubmit={submit}>
-            <Dialog.Header>
-              <Dialog.Title>Cargar documento</Dialog.Title>
-            </Dialog.Header>
-            <Dialog.Body>
-              <Stack gap={4}>
-                <Field.Root required>
-                  <Field.Label>Markdown del documento</Field.Label>
-                  <Input
-                    type="file"
-                    accept=".md,text/markdown"
-                    pt={1.5}
-                    onChange={(event) => setMarkdown(event.target.files?.[0] ?? null)}
-                  />
-                  <Field.HelperText>
-                    Con su encabezado: doc_code, doc_title, doc_version y area.
-                  </Field.HelperText>
-                </Field.Root>
-                <Field.Root>
-                  <Field.Label>Original (opcional)</Field.Label>
-                  <Input
-                    type="file"
-                    accept="application/pdf,.pdf"
-                    pt={1.5}
-                    onChange={(event) => setOriginal(event.target.files?.[0] ?? null)}
-                  />
-                  <Field.HelperText>El PDF que las personas pueden descargar.</Field.HelperText>
-                </Field.Root>
-                {error && (
-                  <Text role="alert" color="fg.error" fontSize="sm">
-                    {error}
-                  </Text>
-                )}
-              </Stack>
-            </Dialog.Body>
-            <Dialog.Footer>
-              <Dialog.ActionTrigger asChild>
-                <Button variant="outline">Cancelar</Button>
-              </Dialog.ActionTrigger>
-              <Button type="submit" colorPalette="brand" loading={busy} disabled={!markdown}>
-                Cargar
-              </Button>
-            </Dialog.Footer>
-          </Dialog.Content>
-        </Dialog.Positioner>
-      </Portal>
-    </Dialog.Root>
-  );
 }
 
 /**

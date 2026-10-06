@@ -13,7 +13,20 @@ export interface OneShotDependencies {
 const ONE_SHOT_TIMEOUT_MS = 120_000;
 // The name an attached file takes in the call's folder; never the name its owner gave it
 export const ATTACHMENT_NAME = "document.pdf";
-// Reading a long PDF takes several reads of up to twenty pages each, then the answer
+
+/**
+ * Names the files of a call, as the model is told to read them
+ *
+ * @param   count  How many files
+ *
+ * @return  Their names in order: document.pdf alone, document-1.pdf and on when there are several
+ */
+export function attachmentNames(count: number): string[] {
+  return count === 1
+    ? [ATTACHMENT_NAME]
+    : Array.from({ length: count }, (_, index) => `document-${index + 1}.pdf`);
+}
+// Reading a long PDF takes a read of each of its parts, then the answer
 const ATTACHMENT_TURNS = 12;
 // Reading a long PDF takes longer than a plain answer, yet well within the chat attempt that asked
 // for it, so the attempt still has time to answer with what was read
@@ -25,14 +38,16 @@ const ATTACHMENT_TIMEOUT_MS = 180_000;
  *
  * @param   deps        CLI, model and where the call works
  * @param   prompt      Question, sent through stdin
- * @param   attachment  A file the model reads to answer
+ * @param   attachment  The file the model reads to answer, or its parts in order
+ * @param   limits      Turns and time for a longer job than reading a file to answer
  *
  * @return  The text of the answer
  */
 export async function askOnce(
   deps: OneShotDependencies,
   prompt: string,
-  attachment?: Buffer,
+  attachment?: Buffer | Buffer[],
+  limits?: { maxTurns: number; timeoutMs: number },
 ): Promise<string> {
   // The chat creates this folder on its first turn; a call may come before any
   await mkdir(deps.workspacesDir, { recursive: true });
@@ -41,22 +56,27 @@ export async function askOnce(
     // No server at all: the model can only answer
     const mcpConfigPath = join(workspace, ".mcp.json");
     await writeFile(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
-    if (attachment) {
-      await writeFile(join(workspace, ATTACHMENT_NAME), attachment);
+    const files =
+      attachment === undefined ? [] : Array.isArray(attachment) ? attachment : [attachment];
+    const names = attachmentNames(files.length);
+    // With no file there is nothing to read, and Read stays blocked
+    const reading = files.length > 0;
+    for (const [index, file] of files.entries()) {
+      await writeFile(join(workspace, names[index] ?? ATTACHMENT_NAME), file);
     }
     const args = cliArgs({
       model: deps.model,
-      maxTurns: attachment ? ATTACHMENT_TURNS : 1,
+      maxTurns: limits?.maxTurns ?? (reading ? ATTACHMENT_TURNS : 1),
       mcpConfigPath,
       // Read stays blocked unless there is a file, and then it reaches that file alone
-      disallowedTools: attachment
+      disallowedTools: reading
         ? DISALLOWED_CLI_TOOLS.split(" ")
             .filter((tool) => tool !== "Read")
             .join(" ")
         : DISALLOWED_CLI_TOOLS,
-      ...(attachment ? { allowedTools: `Read(./${ATTACHMENT_NAME})` } : {}),
+      ...(reading ? { allowedTools: names.map((name) => `Read(./${name})`).join(" ") } : {}),
       // A list of what is allowed, so a tool a newer CLI adds is not left open
-      tools: attachment ? "Read" : "",
+      tools: reading ? "Read" : "",
       // Anything beyond that one read is denied, whatever the machine allows elsewhere
       permissionMode: "dontAsk",
     });
@@ -65,7 +85,9 @@ export async function askOnce(
       args,
       prompt,
       workspace,
-      AbortSignal.timeout(attachment ? ATTACHMENT_TIMEOUT_MS : ONE_SHOT_TIMEOUT_MS),
+      AbortSignal.timeout(
+        limits?.timeoutMs ?? (reading ? ATTACHMENT_TIMEOUT_MS : ONE_SHOT_TIMEOUT_MS),
+      ),
     );
 
     let answer: string | null = null;

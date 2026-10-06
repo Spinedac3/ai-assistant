@@ -346,6 +346,32 @@ export const sources = pgTable(
   (t) => [uniqueIndex("sources_code_unique").on(t.code)],
 );
 
+// A PDF being turned into a document: its pages are written as Markdown in the background, and
+// the person reviews the result and its suggested header before it is published
+export const pdfConversions = pgTable(
+  "pdf_conversions",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    userId: integer("user_id").notNull(),
+    fileName: varchar("file_name", { length: 200 }).notNull(),
+    status: varchar("status", {
+      length: 10,
+      enum: ["queued", "running", "done", "failed", "publishing"],
+    })
+      .notNull()
+      .default("queued"),
+    // Pages written so far, and how many the file has when that can be told from it
+    pagesDone: integer("pages_done").notNull().default(0),
+    pagesTotal: integer("pages_total"),
+    markdown: text("markdown"),
+    suggested: jsonb("suggested"),
+    error: text("error"),
+    createdAt: timestamptz("created_at").notNull().defaultNow(),
+    finishedAt: timestamptz("finished_at"),
+  },
+  (t) => [index("pdf_conversions_user_idx").on(t.userId, t.createdAt)],
+);
+
 // Excel files with the detail a tool result could not carry; deleted when they expire
 export const exportFiles = pgTable(
   "export_files",
