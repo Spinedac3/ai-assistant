@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { sql } from "drizzle-orm";
 import { buildApp } from "./app.js";
 import { loadExternalSystems } from "./auth/externalSystems.js";
+import { loadMachineClients } from "./auth/machineClients.js";
 import { createTokenSigner, readPrivateKey } from "./auth/tokens.js";
 import { chatMcpConfig } from "./chat/mcpConfig.js";
 import { readOrganizationContext } from "./chat/prompt.js";
@@ -173,6 +174,7 @@ const app = await buildApp({
     env.JWT_TTL_SECONDS,
   ),
   systems: loadExternalSystems(env.EXTERNAL_SYSTEMS_FILE),
+  machineClients: loadMachineClients(env.MACHINE_CLIENTS_FILE),
   passwordReset: { mailer, publicBaseUrl, assistantName: env.ASSISTANT_NAME },
   usage: { timeZone: env.APP_TIMEZONE },
   panel: { dir: env.PANEL_DIR },

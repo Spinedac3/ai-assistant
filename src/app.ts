@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import type { ExternalSystem } from "./auth/externalSystems.js";
+import type { MachineClient } from "./auth/machineClients.js";
 import type { TokenSigner } from "./auth/tokens.js";
 import type { Database } from "./db/client.js";
 import type { McpSettings } from "./mcp/server.js";
@@ -14,6 +15,7 @@ import mcpRoutes from "./routes/mcp.js";
 import oauthRoutes from "./routes/oauth.js";
 import panelRoutes, { type PanelRoutesOptions } from "./routes/panel.js";
 import passwordResetRoutes, { type PasswordResetRoutesOptions } from "./routes/passwordReset.js";
+import runsRoutes from "./routes/runs.js";
 import sourcesRoutes, { type SourcesRoutesOptions } from "./routes/sources.js";
 import toolsRoutes, { type ToolsRoutesOptions } from "./routes/tools.js";
 import usageRoutes, { type UsageRoutesOptions } from "./routes/usage.js";
@@ -28,6 +30,8 @@ export interface AppDependencies {
   chat?: Omit<ChatRoutesOptions, "db">;
   // Without it /mcp and the OAuth server that guards it are not mounted
   mcp?: { registry: ToolRegistry; settings: McpSettings; publicBaseUrl: string };
+  // Systems that run agents for people; with none declared their routes are not mounted
+  machineClients?: Map<string, MachineClient>;
   // Without it exported files cannot be downloaded
   exports?: ExportsRoutesOptions;
   // Without it the source administration is not mounted
@@ -100,6 +104,13 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
 
   if (deps.mcp) {
     await app.register(mcpRoutes, { ...deps.mcp, db: deps.db });
+    if (deps.machineClients && deps.machineClients.size > 0) {
+      await app.register(runsRoutes, {
+        db: deps.db,
+        registry: deps.mcp.registry,
+        clients: deps.machineClients,
+      });
+    }
     await app.register(oauthRoutes, {
       db: deps.db,
       publicBaseUrl: deps.mcp.publicBaseUrl,
