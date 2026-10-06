@@ -70,10 +70,15 @@ export class ExportStore {
    *
    * @param   sheets    Sheets, main one first
    * @param   owner     Who ran the tool, and which
+   * @param   signed    Whether the link must open without a session, as outside the panel
    *
    * @return  The link and how many days it lasts
    */
-  async save(sheets: Sheet[], owner: { userId: number; toolName: string }): Promise<SavedExport> {
+  async save(
+    sheets: Sheet[],
+    owner: { userId: number; toolName: string },
+    signed = true,
+  ): Promise<SavedExport> {
     const id = randomUUID();
     const data = workbook(sheets);
     const expiresAt = new Date(Date.now() + RETENTION_DAYS * DAY_MS);
@@ -95,6 +100,10 @@ export class ExportStore {
       "Content-Type": XLSX_CONTENT_TYPE,
     });
 
+    // Inside the panel the person's session opens it, so the link carries no permission of its own
+    if (!signed) {
+      return { url: `/exports/${id}`, expiresInDays: RETENTION_DAYS };
+    }
     const expires = Math.floor(expiresAt.getTime() / 1000);
     const query = new URLSearchParams({ exp: String(expires), sig: this.sign(id, expires) });
 
@@ -124,8 +133,35 @@ export class ExportStore {
       return null;
     }
 
+    return this.read(id);
+  }
+
+  /**
+   * Opens an export for the person who ran the tool that made it
+   *
+   * @param   id      Export id
+   * @param   userId  Who asks for it
+   *
+   * @return  The file, or null when it is someone else's, expired or deleted
+   */
+  async openOwned(id: string, userId: number): Promise<ExportFile | null> {
+    return this.read(id, userId);
+  }
+
+  /**
+   * Reads an export that has not expired, of one person when one is given
+   *
+   * @param   id      Export id
+   * @param   userId  Its owner, when only theirs may be read
+   *
+   * @return  The file, or null
+   */
+  private async read(id: string, userId?: number): Promise<ExportFile | null> {
     const [row] = await this.db.select().from(exportFiles).where(eq(exportFiles.id, id)).limit(1);
     if (!row || row.expiresAt.getTime() <= Date.now()) {
+      return null;
+    }
+    if (userId !== undefined && row.userId !== userId) {
       return null;
     }
 

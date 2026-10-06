@@ -43,6 +43,7 @@ import {
 } from "../creator/tool.js";
 import type { Database } from "../db/client.js";
 import { conversations, messages, toolDefinitions } from "../db/schema.js";
+import type { ExportStore } from "../exports/store.js";
 import { removeHiddenDeep } from "../lib/hiddenText.js";
 import { isRunning, oneAtATime } from "../lib/oneAtATime.js";
 import { cliToolName } from "../mcp/names.js";
@@ -54,6 +55,8 @@ import { ToolRegistry } from "../tools/registry.js";
 export interface ToolsRoutesOptions extends CreatedToolDependencies {
   db: Database;
   created: CreatedTools;
+  // Where a direct run leaves the Excel of a long result
+  exports?: ExportStore;
   // Asks the model one question with no tools; without it the guide is off
   ask?: (prompt: string) => Promise<string>;
   // What a trial chat needs: the chat's own settings, this server's /mcp, and the shared tools
@@ -965,6 +968,9 @@ export default async function toolsRoutes(
     const { tool, zone } = found;
     const trial = new ToolRegistry(db);
     trial.useLogger(request.log);
+    if (options.exports) {
+      trial.useExports(options.exports);
+    }
     trial.register(toolFrom(shapeOf(tool), options, zone));
     const outcome = await trial.execute(
       tool.name,

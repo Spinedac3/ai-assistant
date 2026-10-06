@@ -87,6 +87,7 @@ export interface Definition {
   summary?: {
     group_by: string[];
     aggregates: { fn: Aggregate; column?: string; as: string }[];
+    with_detail?: boolean;
   };
   order_by: { column: string; direction: "asc" | "desc" }[];
   time_zone?: string;

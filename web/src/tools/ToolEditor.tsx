@@ -904,7 +904,11 @@ function ToolEditor({
                 onCheckedChange={(details) =>
                   change({
                     summary: details.checked
-                      ? { group_by: [], aggregates: [{ fn: "count", as: "total" }] }
+                      ? {
+                          group_by: [],
+                          aggregates: [{ fn: "count", as: "total" }],
+                          with_detail: true,
+                        }
                       : undefined,
                     order_by: [],
                   })
@@ -916,6 +920,30 @@ function ToolEditor({
               </Switch.Root>
               {definition.summary && (
                 <Stack gap={2} mt={3}>
+                  <Switch.Root
+                    checked={definition.summary.with_detail === true}
+                    onCheckedChange={(details) => {
+                      const summary = definition.summary;
+                      if (summary) {
+                        change({ summary: { ...summary, with_detail: details.checked } });
+                      }
+                    }}
+                  >
+                    <Switch.HiddenInput />
+                    <Switch.Control />
+                    <Switch.Label>Incluir también cada registro</Switch.Label>
+                  </Switch.Root>
+                  <Text fontSize="xs" color="fg.muted">
+                    {definition.summary.with_detail
+                      ? "La IA recibe los totales y, aparte, cada registro con las columnas elegidas. Si el detalle es grande, va completo en un Excel con link y en la respuesta quedan los totales."
+                      : "La IA recibe solo los totales; las columnas que no agrupes no salen en la respuesta."}
+                  </Text>
+                  {definition.summary.group_by.length === 0 && (
+                    <Text fontSize="sm" color="fg.warning">
+                      Sin agrupar por ninguna columna, los totales son una sola fila con todo. Marca
+                      abajo por qué comparar (zona, tipo…) para tener un total por cada uno.
+                    </Text>
+                  )}
                   <Text fontSize="sm" color="fg.muted">
                     Agrupar por
                   </Text>

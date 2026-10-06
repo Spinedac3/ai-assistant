@@ -19,6 +19,7 @@ import { FiCheck, FiX } from "react-icons/fi";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ApiError, api, request } from "../api/http";
+import { downloadFile, LINKS } from "../shell/Links";
 import { argument, type Definition, type ToolDetail, type TraceEntry, typeOf } from "./types";
 
 interface Chip {
@@ -195,6 +196,7 @@ function Run({ name }: { name: string }) {
   });
   const [values, setValues] = useState<Record<string, string | boolean>>({});
   const [result, setResult] = useState<string | null>(null);
+  const [file, setFile] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const properties = Object.entries(detail.data?.input_schema.properties ?? {});
   const required = new Set(detail.data?.input_schema.required ?? []);
@@ -220,7 +222,10 @@ function Run({ name }: { name: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ args }),
       });
-      setResult(JSON.stringify(await response.json(), null, 2));
+      const answer = await response.json();
+      setResult(JSON.stringify(answer, null, 2));
+      // A long result leaves its rows in an Excel, downloaded with the session
+      setFile(typeof answer?.data?.archivo?.url === "string" ? answer.data.archivo.url : null);
     } catch {
       setResult("No se pudo correr; vuelve a intentarlo");
     } finally {
@@ -266,6 +271,16 @@ function Run({ name }: { name: string }) {
       <Button size="sm" colorPalette="brand" loading={busy} onClick={() => void run()}>
         Correr
       </Button>
+      {file && URL.canParse(file, window.location.href) && (
+        <Button
+          size="xs"
+          variant="outline"
+          alignSelf="start"
+          onClick={() => void downloadFile(new URL(file, window.location.href).pathname)}
+        >
+          Descargar el Excel con todas las filas
+        </Button>
+      )}
       {result && (
         <Code
           as="pre"
@@ -393,7 +408,9 @@ function TrialChat({ name }: { name: string }) {
             </Box>
           ))}
           <Box className="markdown" fontSize="sm">
-            <Markdown remarkPlugins={[remarkGfm]}>{turn.answer}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]} components={LINKS}>
+              {turn.answer}
+            </Markdown>
           </Box>
         </Stack>
       ))}

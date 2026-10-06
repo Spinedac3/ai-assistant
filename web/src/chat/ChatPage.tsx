@@ -12,11 +12,11 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { FiCheck, FiPaperclip, FiPlus, FiSend, FiSquare, FiStar, FiX } from "react-icons/fi";
-import type { Components } from "react-markdown";
 import Markdown from "react-markdown";
 import { NavLink, useLocation, useNavigate, useParams } from "react-router";
 import remarkGfm from "remark-gfm";
 import { ApiError, api } from "../api/http";
+import { LINKS } from "../shell/Links";
 import { type ChatMessage, type ConversationSummary, streamTurn, toolLabel } from "./api";
 
 interface ToolStep {
@@ -386,28 +386,6 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
     </Flex>
   );
 }
-
-// Links of an answer open apart, and one to another site says which site it is before anyone
-// follows it: the text of an answer may come from data or a document no one checked
-const LINKS: Components = {
-  a: ({ href, children }) => {
-    // A link that does not parse is shown as its text, never as a page that fails to render
-    if (!href || !URL.canParse(href, window.location.href)) {
-      return <span>{children}</span>;
-    }
-    const target = new URL(href, window.location.href);
-    const foreign =
-      target.protocol.startsWith("http") &&
-      target.host !== "" &&
-      target.origin !== window.location.origin;
-    return (
-      <a href={href} target="_blank" rel="noopener noreferrer">
-        {children}
-        {foreign && ` (${target.host})`}
-      </a>
-    );
-  },
-};
 
 /**
  * An answer of the assistant, rendered from its markdown

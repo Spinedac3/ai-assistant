@@ -91,7 +91,7 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
   }
 
   if (deps.tools) {
-    await app.register(toolsRoutes, { ...deps.tools, db: deps.db });
+    await app.register(toolsRoutes, { ...deps.tools, db: deps.db, exports: deps.exports?.exports });
   }
 
   if (deps.docs) {
