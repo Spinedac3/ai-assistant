@@ -103,7 +103,14 @@ interface CliOutcome {
   tokensOut: number | null;
   cachedIn: number | null;
   costMillionths: number | null;
+  // Why a process gave no answer: how it ended, how long it ran and the end of what it wrote to stderr
+  exitCode: number | null;
+  elapsedMs: number;
+  stderr: string;
 }
+
+// Enough of stderr to name a failure without filling the log
+const STDERR_LOG_CHARS = 2_000;
 
 /**
  * Turns a CLI tool name into the name shown to people
@@ -156,7 +163,11 @@ async function* runCli(
     abortSignal,
   );
 
+  const started = Date.now();
   const outcome: CliOutcome = {
+    exitCode: null,
+    elapsedMs: 0,
+    stderr: "",
     ok: false,
     resultText: "",
     cutByMaxTurns: false,
@@ -254,7 +265,15 @@ async function* runCli(
     }
   }
 
-  await cli.closed;
+  outcome.exitCode = await cli.closed;
+  outcome.elapsedMs = Date.now() - started;
+  if (!outcome.ok) {
+    try {
+      outcome.stderr = readFileSync(join(workspace, "stderr.log"), "utf8").slice(-STDERR_LOG_CHARS);
+    } catch {
+      outcome.stderr = "";
+    }
+  }
 
   return outcome;
 }
@@ -501,13 +520,27 @@ export async function* chatTurn(
       // The CLI keeps its sessions outside the workspace; a recreated host loses them
       if (attempt === 0 && resume && !abortSignal?.aborted) {
         logger.warn(
-          { conversationId: conversation },
+          {
+            conversationId: conversation,
+            exitCode: outcome.exitCode,
+            elapsedMs: outcome.elapsedMs,
+            stderr: outcome.stderr,
+          },
           "chat: --continue failed, retrying with a new session",
         );
         prompt = seeded;
         continue;
       }
 
+      logger.error(
+        {
+          conversationId: conversation,
+          exitCode: outcome.exitCode,
+          elapsedMs: outcome.elapsedMs,
+          stderr: outcome.stderr,
+        },
+        "chat: the CLI ended without an answer",
+      );
       throw new Error("El motor de chat no devolvió respuesta");
     }
   } finally {
