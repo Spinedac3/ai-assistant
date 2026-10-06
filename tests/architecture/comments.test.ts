@@ -182,6 +182,7 @@ describe("comments, fed a breach of each rule", () => {
           "  <div>",
           "    {/* Revisado el 2026-01-05 */}",
           "    <span>Escribe // aquí</span>",
+          "    <code>// 2026-01-05 aquí</code>",
           "  </div>",
           ");",
         ].join("\n"),

@@ -122,6 +122,13 @@ describe("the flow's kit", () => {
       () => base,
       () => now,
     );
+    // A new test seen red under a title the base already had leaves the old one alone
+    const redTwin = newTests(
+      ["t.test.ts::a > reads", "t.test.ts::b > reads"],
+      () => base,
+      () => now,
+      ["t.test.ts::b > reads"],
+    );
     const untouched = newTests(
       ["t.test.ts::a > reads"],
       () => base,
@@ -130,6 +137,7 @@ describe("the flow's kit", () => {
 
     // Performs assertions.
     expect(fresh).toEqual(["t.test.ts::b > reads", "t.test.ts::b > keeps 3", "t.test.ts::writes"]);
+    expect(redTwin).toEqual([]);
     expect(untouched).toEqual([]);
   });
 

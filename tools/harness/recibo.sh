@@ -171,20 +171,22 @@ verde)
     FV=$(campo "$RV" failures)
     campo "$RV" names | sort -u > "$DIR/verde-nombres.txt"
     touch "$DIR/rojos.txt"
-    comm -23 "$DIR/verde-nombres.txt" "$DIR/rojos.txt" > "$DIR/nunca-rojos-crudo.txt"
-    # Only NEW tests must be seen failing: one that already existed on the base was born green,
-    # and counting it would degrade every receipt that extends a test file
-    BASE_BRANCH="${BASE_BRANCH:-${GITHUB_BASE_REF:-main}}"
-    BASE_REF="origin/$BASE_BRANCH"
-    git rev-parse -q --verify "$BASE_REF" > /dev/null 2>&1 || BASE_REF="$BASE_BRANCH"
-    node "$S/newTests.mjs" "$BASE_REF" < "$DIR/nunca-rojos-crudo.txt" > "$DIR/nunca-rojos.txt"
-    TESTS_JSON="{\"corridos\":$TV,\"fallas\":$FV,\"nunca_rojos\":$(json_lineas "$DIR/nunca-rojos.txt")}"
-
     # The repository's gates: exit 2 means the gate could not run, which is neither green nor red
     GATES_JSON=""
     GATE_FALLO=0
     GATE_NO_CORRIO=0
     : > "$DIR/no-revisado.txt"
+    # Only NEW tests must be seen failing: one that already existed on the base was born green,
+    # and counting it would degrade every receipt that extends a test file
+    BASE_BRANCH="${BASE_BRANCH:-${GITHUB_BASE_REF:-main}}"
+    BASE_REF="origin/$BASE_BRANCH"
+    git rev-parse -q --verify "$BASE_REF" > /dev/null 2>&1 || BASE_REF="$BASE_BRANCH"
+    if ! node "$S/newTests.mjs" "$BASE_REF" "$DIR/rojos.txt" < "$DIR/verde-nombres.txt" > "$DIR/nunca-rojos.txt"; then
+        GATE_NO_CORRIO=1
+        echo "tests nuevos: no se pudo saber cuáles nunca se vieron fallar" >> "$DIR/no-revisado.txt"
+    fi
+    TESTS_JSON="{\"corridos\":$TV,\"fallas\":$FV,\"nunca_rojos\":$(json_lineas "$DIR/nunca-rojos.txt")}"
+
     # A listed file that did not run, or a run with no test, measures nothing
     FALTAN=$(no_corrieron "$RV")
     if [ -n "$FALTAN" ] || [ "$TV" -eq 0 ]; then

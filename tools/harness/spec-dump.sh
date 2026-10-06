@@ -22,7 +22,7 @@ URL="${GITHUB_API_URL:-https://api.github.com}"
 
 # The file is the way; the variable is kept for CI, where the platform hands it over
 if [ -n "${GITHUB_ENV_FILE:-}" ] && [ -f "$GITHUB_ENV_FILE" ]; then
-    GITHUB_TOKEN=$(grep -m1 '^GITHUB_TOKEN=' "$GITHUB_ENV_FILE" | cut -d= -f2-)
+    GITHUB_TOKEN=$(grep -m1 '^GITHUB_TOKEN=' "$GITHUB_ENV_FILE" | cut -d= -f2- | tr -d '\r')
 fi
 
 # The token reaches curl by stdin, never in its arguments, where any process could read it

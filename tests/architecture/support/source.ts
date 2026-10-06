@@ -64,8 +64,10 @@ export function commentsOf(text: string, path = "file.ts"): Array<{ line: number
   };
   // Every token, punctuation included, since a comment can sit before a closing brace or after a
   // last comma where no node starts; the text of JSX is prose, never a comment
+  const prose: Array<[number, number]> = [];
   const visit = (node: ts.Node): void => {
     if (node.kind === ts.SyntaxKind.JsxText) {
+      prose.push([node.getFullStart(), node.getEnd()]);
       return;
     }
     collect(node.getFullStart());
@@ -76,7 +78,9 @@ export function commentsOf(text: string, path = "file.ts"): Array<{ line: number
   };
   visit(file);
 
+  // A scan that ends where JSX text begins would read that text as a comment
   return [...found]
+    .filter(([position]) => !prose.some(([from, to]) => position >= from && position < to))
     .sort(([a], [b]) => a - b)
     .map(([position, comment]) => ({
       line: file.getLineAndCharacterOfPosition(position).line + 1,
