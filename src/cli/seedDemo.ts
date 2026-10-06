@@ -313,6 +313,64 @@ const READER: Record<Engine, string[]> = {
   ],
 };
 
+// A view, so a tool can read orders with their customer without a pasted query
+const VIEW = "pedidos_con_cliente";
+const VIEW_SQL = `create view ${VIEW} as
+select p.id as pedido_id, p.fecha, p.estado, p.total,
+  c.nombre as cliente, c.tipo as tipo_cliente, c.zona
+from pedidos p join clientes c on c.id = p.cliente_id`;
+
+// Some tables carry a comment and some do not, so the creator shows both ways of describing them
+const COMMENTS: Array<[name: string, kind: "table" | "view", text: string]> = [
+  [
+    "clientes",
+    "table",
+    "Tiendas y empresas a las que vende la distribuidora: tipo de cliente, zona y límite de crédito.",
+  ],
+  [
+    "productos",
+    "table",
+    "Catálogo de productos con su SKU, categoría, precio de lista y si necesitan refrigeración.",
+  ],
+  [
+    "pedidos",
+    "table",
+    "Pedidos de los clientes, uno por fila, con su fecha, estado (entregado, pendiente o cancelado) y total en quetzales.",
+  ],
+  [
+    VIEW,
+    "view",
+    "Cada pedido con los datos de su cliente (nombre, tipo y zona), para ver las ventas por zona o por tipo de cliente.",
+  ],
+];
+
+/**
+ * Writes the statement that sets the comment of a table or view on an engine
+ *
+ * @param   engine  Engine
+ * @param   name    Table or view
+ * @param   kind    Which of the two
+ * @param   text    Comment, a constant of this file
+ *
+ * @return  The statement, or null where the engine keeps no comment on that kind
+ */
+function commentOn(
+  engine: Engine,
+  name: string,
+  kind: "table" | "view",
+  text: string,
+): string | null {
+  const literal = text.replace(/'/g, "''");
+  if (engine === "postgres") {
+    return `comment on ${kind} ${name} is '${literal}'`;
+  }
+  if (engine === "mysql") {
+    return kind === "table" ? `alter table ${name} comment = '${literal}'` : null;
+  }
+
+  return `exec sp_addextendedproperty @name = N'MS_Description', @value = N'${literal}', @level0type = N'SCHEMA', @level0name = N'dbo', @level1type = N'${kind.toUpperCase()}', @level1name = N'${name}'`;
+}
+
 /**
  * Recreates the distributor on one engine
  *
@@ -322,6 +380,7 @@ const READER: Record<Engine, string[]> = {
 async function seed(engine: Engine, admin: Admin): Promise<void> {
   const tables = distributor();
 
+  await admin.run(`drop view if exists ${VIEW}`);
   for (const table of [...tables].reverse()) {
     await admin.run(`drop table if exists ${table.name}`);
   }
@@ -344,6 +403,15 @@ async function seed(engine: Engine, admin: Admin): Promise<void> {
     }
   }
 
+  await admin.run(VIEW_SQL);
+  for (const [name, kind, text] of COMMENTS) {
+    const statement = commentOn(engine, name, kind, text);
+    if (statement) {
+      await admin.run(statement);
+    }
+  }
+
+  // Granted after the view exists, so the reader reads it too
   for (const statement of READER[engine]) {
     await admin.run(statement);
   }

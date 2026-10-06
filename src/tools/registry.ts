@@ -127,10 +127,11 @@ export class ToolRegistry {
    *
    * @param   name    Tool name
    * @param   caller  Who runs it
+   * @param   origin  Channel of the call
    *
    * @return  The archive, or null when there is no store
    */
-  private archiveFor(name: string, caller: Caller): Archive | null {
+  private archiveFor(name: string, caller: Caller, origin: ToolOrigin): Archive | null {
     const exports = this.exports;
     if (!exports) {
       return null;
@@ -139,7 +140,13 @@ export class ToolRegistry {
     return {
       save: async (sheets) => {
         try {
-          return await exports.save(sheets, { userId: caller.userId, toolName: name });
+          // The panel's chats open it with the person's session; external clients and scheduled
+          // runs hand the link to someone outside the panel
+          return await exports.save(
+            sheets,
+            { userId: caller.userId, toolName: name },
+            origin === "mcp" || origin === "run",
+          );
         } catch (error) {
           this.logger?.error({ err: error, tool: name }, "result export failed");
           return null;
@@ -343,8 +350,9 @@ export class ToolRegistry {
     const capped = await capResult(
       filtered ? filtered.data : clean,
       context.origin === "mcp" ? EXTERNAL_MAX_BYTES : CHAT_MAX_BYTES,
-      this.archiveFor(name, caller),
+      this.archiveFor(name, caller, context.origin),
       target ? filterHint(target) : "",
+      result.main,
     );
     if (!capped.ok) {
       return this.fail(name, args, caller, context, started, "result_too_large", capped.message);

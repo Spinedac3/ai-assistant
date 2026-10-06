@@ -66,6 +66,7 @@ export function sheetOf(name: string, list: unknown[]): Sheet {
  * @param   maxBytes  Size limit
  * @param   archive   Where the full lists can go, if anywhere
  * @param   hint      Added to the note of a cut result, and measured with it
+ * @param   prefer    The list to keep the most of, when the tool names one; otherwise the largest
  *
  * @return  The result that fits, or why it cannot
  */
@@ -74,6 +75,7 @@ export async function capResult(
   maxBytes: number,
   archive: Archive | null,
   hint = "",
+  prefer?: string,
 ): Promise<Capped> {
   if (size(data) <= maxBytes) {
     return { ok: true, data, truncated: false };
@@ -83,7 +85,7 @@ export async function capResult(
     .filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]))
     .map(([name, list]) => ({ name, list, bytes: size(list) }))
     .sort((a, b) => b.bytes - a.bytes);
-  const main = lists[0];
+  const main = lists.find((entry) => entry.name === prefer) ?? lists[0];
   if (!main) {
     return {
       ok: false,
@@ -94,6 +96,9 @@ export async function capResult(
   }
 
   const heavy = lists.filter((entry) => entry.bytes > SMALL_LIST_BYTES);
+  // The file holds the main list first, then every other one with rows, the small ones included,
+  // so the totals sit beside the detail
+  const archived = [main, ...lists.filter((entry) => entry !== main && entry.list.length > 0)];
   // Rows of each archived list that do not fit in its sheet
   const outOfFile = Object.fromEntries(
     heavy
@@ -133,7 +138,7 @@ export async function capResult(
             archivo: {
               url: saved.url,
               filas: Object.fromEntries(
-                heavy.map((entry) => [entry.name, Math.min(entry.list.length, MAX_SHEET_ROWS)]),
+                archived.map((entry) => [entry.name, Math.min(entry.list.length, MAX_SHEET_ROWS)]),
               ),
               ...(partial ? { filas_fuera_del_archivo: outOfFile } : {}),
               vence_en_dias: saved.expiresInDays,
@@ -142,7 +147,7 @@ export async function capResult(
         : {}),
       filas_omitidas: omitted,
       nota: saved
-        ? `Comparte PRIMERO este link de Excel con las filas de ${heavy.map((entry) => entry.name).join(", ")}${partial}, ` +
+        ? `Comparte PRIMERO este link de Excel con las filas de ${archived.map((entry) => entry.name).join(", ")}${partial}, ` +
           `vence en ${saved.expiresInDays} días: ${saved.url}. Recortado aquí: ${cut}. Los ` +
           "totales están completos. No vuelvas a llamar para reconstruir las filas que faltan." +
           hint
@@ -156,7 +161,7 @@ export async function capResult(
   // Secondary heavy lists give way first, then the main one keeps all it can, found by halves,
   // and the small summary lists last
   const shrink = () => {
-    for (const entry of heavy.slice(1)) {
+    for (const entry of heavy.filter((item) => item !== main)) {
       if (!fits()) {
         keep.set(entry.name, 0);
       }
@@ -175,7 +180,7 @@ export async function capResult(
       }
       keep.set(main.name, low);
     }
-    for (const entry of lists.filter((item) => item.bytes <= SMALL_LIST_BYTES)) {
+    for (const entry of lists.filter((item) => item.bytes <= SMALL_LIST_BYTES && item !== main)) {
       if (!fits()) {
         keep.set(entry.name, 0);
       }
@@ -196,7 +201,7 @@ export async function capResult(
   }
 
   if (saved && archive) {
-    saved = await archive.save(heavy.map((entry) => sheetOf(entry.name, entry.list)));
+    saved = await archive.save(archived.map((entry) => sheetOf(entry.name, entry.list)));
     shrink();
     // A real link longer than the room kept for it can still push the result over
     if (!fits()) {

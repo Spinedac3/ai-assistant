@@ -23,7 +23,7 @@ function quotable(name: string): boolean {
 }
 
 // Any name the source uses; the creator quotes it, and the length is the longest the engines take
-const columnName = z
+export const columnName = z
   .string()
   .max(128)
   .refine(quotable, "sin comillas, corchetes ni caracteres de control");
@@ -36,6 +36,13 @@ const relationName = z
     const parts = name.split(".");
     return parts.length <= 2 && parts.every(quotable);
   }, "esquema.tabla o tabla, sin comillas ni corchetes");
+
+// The most values a filter offers as a closed list; a column with more gets examples instead
+export const MAX_FILTER_VALUES = 30;
+// The operators whose argument is one of the column's own values
+export const VALUE_OPS = new Set(["=", "!=", "in"]);
+
+const filterValue = z.union([z.string().max(200), z.number(), z.boolean()]);
 
 export const FILTER_OPS = [
   "=",
@@ -76,7 +83,22 @@ export const definitionSchema = z
             column: columnName,
             op: z.enum(FILTER_OPS),
             required: z.boolean().default(false),
-            description: z.string().trim().min(1).optional(),
+            description: z.string().trim().min(1).max(2_000).optional(),
+            // The only values the model may send, each with what it means
+            values: z
+              .array(
+                z
+                  .object({
+                    value: filterValue,
+                    meaning: z.string().trim().min(1).max(200).optional(),
+                  })
+                  .strict(),
+              )
+              .min(1)
+              .max(MAX_FILTER_VALUES)
+              .optional(),
+            // Real values, so the model writes them as the source does
+            examples: z.array(filterValue).min(1).max(5).optional(),
           })
           .strict(),
       )
@@ -91,6 +113,8 @@ export const definitionSchema = z
               .strict(),
           )
           .min(1),
+        // The rows behind the totals too; a long detail travels whole in the Excel
+        with_detail: z.boolean().optional(),
       })
       .strict()
       .optional(),
@@ -102,8 +126,9 @@ export const definitionSchema = z
     meaning: z
       .object({
         definition: z.string().trim().min(1),
-        grain: z.string().trim().min(1),
-        additive: z.boolean(),
+        // Said by the person or suggested; without it the totals say what a row is
+        grain: z.string().trim().min(1).optional(),
+        additive: z.boolean().default(true),
         synonyms: z.array(z.string().trim().min(1)).default([]),
         caveats: z.array(z.string().trim().min(1)).default([]),
       })
@@ -125,6 +150,15 @@ export const definitionSchema = z
     }
     if (new Set(columns).size !== columns.length) {
       issue("Hay columnas repetidas");
+    }
+    for (const filter of definition.filters) {
+      if (filter.values && !VALUE_OPS.has(filter.op)) {
+        issue(`El filtro de ${filter.column} no toma un valor de la lista; quita sus valores`);
+      }
+      const listed = (filter.values ?? []).map((item) => JSON.stringify(item.value));
+      if (new Set(listed).size !== listed.length) {
+        issue(`El filtro de ${filter.column} repite un valor`);
+      }
     }
 
     const summary = definition.summary;

@@ -153,6 +153,10 @@ describe("chat", () => {
     expect(stored[0]?.model).toBe("fake-model");
     expect(second.statusCode).toBe(200);
     expect(calls().map((call) => call.continued)).toEqual([false, true]);
+    // The turn resumes its own session by id, never whichever is newest in the folder
+    expect(calls()[1]?.args).toEqual(
+      expect.arrayContaining(["--resume", "0c7e92ec-1824-479c-a425-300cc4d6c5d0"]),
+    );
   });
 
   it("retries a silent announcement in a fresh session with the directive", async () => {
@@ -209,6 +213,58 @@ describe("chat", () => {
       "Salieron 1,240 cajas.\n\n_Fuentes consultadas: run capability._",
     );
     expect(response.json().data.toolCallsExecuted).toEqual(["run_capability"]);
+  });
+
+  it("seeds a new session from the thread when no session of its own can be resumed", async () => {
+    // Performs the test.
+    const seen: Record<string, { continued: boolean; seeded: boolean }> = {};
+    for (const [label, stored] of [
+      ["sin archivo", null],
+      ["archivo roto", "{no es json"],
+      ["id ajeno", JSON.stringify({ context: 10, session: "--dangerously-skip-permissions" })],
+    ] as const) {
+      script({ steps: [{ text: "Primera respuesta." }] });
+      const conversation = (await send("primera pregunta")).json().data.conversationId;
+      const file = join(scratch, "workspaces", String(conversation), "context.json");
+      if (stored === null) {
+        rmSync(file, { force: true });
+      } else {
+        writeFileSync(file, stored);
+      }
+      script({ steps: [{ text: "Segunda respuesta." }] });
+      await send("segunda pregunta", conversation);
+      const [call] = calls();
+      seen[label] = {
+        continued: call?.continued ?? true,
+        seeded: call?.prompt.includes("- persona: primera pregunta") ?? false,
+      };
+    }
+
+    // Performs assertions.
+    expect(seen).toEqual({
+      "sin archivo": { continued: false, seeded: true },
+      "archivo roto": { continued: false, seeded: true },
+      "id ajeno": { continued: false, seeded: true },
+    });
+  });
+
+  it("retries a session that cannot be resumed in a new one, and resumes that one next", async () => {
+    // Performs the test.
+    script({ steps: [{ text: "Primera respuesta." }] });
+    const conversation = (await send("primera pregunta")).json().data.conversationId;
+    script({ steps: [], noResult: true }, { steps: [{ text: "Segunda respuesta." }] });
+    const second = await send("segunda pregunta", conversation);
+    const [resumed, retried] = calls();
+    script({ steps: [{ text: "Tercera respuesta." }] });
+    await send("tercera pregunta", conversation);
+    const [third] = calls();
+
+    // Performs assertions.
+    expect(second.json().data.text).toContain("Segunda respuesta.");
+    expect(resumed?.continued).toBe(true);
+    expect(retried?.continued).toBe(false);
+    expect(retried?.prompt).toContain("- persona: primera pregunta");
+    expect(third?.continued).toBe(true);
   });
 
   it("starts a seeded session once the thread outgrew the context cap", async () => {

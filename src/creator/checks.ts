@@ -8,7 +8,7 @@ import {
 import { normalizeRows } from "./columns.js";
 import type { ToolDefinitionSpec } from "./definition.js";
 import { buildQuery, paramName, sampleQuery } from "./sql.js";
-import { type CreatedTool, outputSchemaOf } from "./tool.js";
+import { type CreatedTool, detailOf, outputSchemaOf } from "./tool.js";
 
 type Row = Record<string, unknown>;
 
@@ -217,8 +217,20 @@ export async function runChecks(tool: CreatedTool, runner: Runner): Promise<Chec
     return [{ name: "runs", ok: false, detail: `No corrió: ${(error as Error).message}` }];
   }
 
+  let detail: Row[] | null = null;
+  try {
+    detail = spec.summary?.with_detail ? await runner.run(detailOf(spec), base) : null;
+  } catch (error) {
+    return [
+      { name: "runs", ok: false, detail: `El detalle no corrió: ${(error as Error).message}` },
+    ];
+  }
   const validate = new Ajv({ strict: false }).compile(outputSchemaOf(tool));
-  const shaped = validate({ filas: rows, total_filas: rows.length });
+  const shaped = validate({
+    filas: rows,
+    total_filas: rows.length,
+    ...(detail ? { detalle: detail, total_detalle: detail.length } : {}),
+  });
 
   return [
     { name: "runs", ok: true, detail: `Corrió con ${rows.length} filas` },

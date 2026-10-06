@@ -29,7 +29,14 @@ export interface ToolContext {
 }
 
 export type ToolResult =
-  | { ok: true; data: Record<string, unknown>; rows?: number; truncated?: boolean }
+  | {
+      ok: true;
+      data: Record<string, unknown>;
+      rows?: number;
+      truncated?: boolean;
+      // The list a long result keeps the most of, when it is not the largest one
+      main?: string;
+    }
   | { ok: false; error: string; message: string };
 
 export interface Tool {

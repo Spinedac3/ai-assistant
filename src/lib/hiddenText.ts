@@ -51,3 +51,15 @@ export function removeHiddenDeep(value: unknown): unknown {
 export function countHidden(text: string): number {
   return text.match(HIDDEN)?.length ?? 0;
 }
+
+/**
+ * Writes data for a prompt as JSON whose angle brackets are escaped, still valid JSON, so no value
+ * can close the marked block it sits in
+ *
+ * @param   value  Data
+ *
+ * @return  The JSON text
+ */
+export function promptData(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+}

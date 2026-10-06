@@ -16,7 +16,7 @@ for await (const chunk of process.stdin) {
 appendFileSync(
   `${scenarioPath}.calls`,
   `${JSON.stringify({
-    continued: args.includes("--continue"),
+    continued: args.includes("--resume"),
     model: args[args.indexOf("--model") + 1],
     args,
     prompt,
@@ -84,4 +84,6 @@ if (!run.noResult) emit({
   result: run.result ?? "",
   usage: { input_tokens: 100, output_tokens: 20 },
   total_cost_usd: 0.0012,
+  // The same id every run, so a test can tell which session the next turn resumed
+  session_id: "0c7e92ec-1824-479c-a425-300cc4d6c5d0",
 });

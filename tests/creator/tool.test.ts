@@ -4,6 +4,7 @@ import { definitionSchema } from "../../src/creator/definition.js";
 import {
   type CreatedTool,
   descriptionOf,
+  detailOf,
   inputSchemaOf,
   outputColumnsOf,
   outputSchemaOf,
@@ -128,5 +129,102 @@ describe("created tool", () => {
 
     // Performs assertions.
     expect(rows).toEqual([{ activo: true, flag: false, monto: 12.5 }]);
+  });
+
+  it("closes a filter to its listed values and tells the model what each means and how to use it", () => {
+    // Performs the test.
+    const schema = inputSchemaOf(
+      created({
+        filters: [
+          {
+            column: "ruta",
+            op: "=",
+            description: "La ruta del camión.",
+            values: [{ value: "R-Norte-1", meaning: "norte" }, { value: "R-Sur-2" }],
+          },
+          { column: "Fecha", op: "between", required: true, examples: ["2026-01-01"] },
+        ],
+      }),
+    );
+    const properties = schema.properties as Record<
+      string,
+      { enum?: unknown[]; description: string }
+    >;
+    const ruta = properties.ruta as { enum?: unknown[]; description: string };
+    const fecha = properties.fecha as { enum?: unknown[]; description: string };
+
+    // Performs assertions.
+    expect(ruta.enum).toEqual(["R-Norte-1", "R-Sur-2"]);
+    expect(ruta.description).toContain('Valores posibles: "R-Norte-1" (norte), "R-Sur-2".');
+    expect(ruta.description).toContain("La ruta del camión.");
+    expect(ruta.description).toContain("Si se omite, no se filtra por ruta.");
+    expect(fecha.enum).toBeUndefined();
+    expect(fecha.description).toContain("fechas relativas");
+    expect(fecha.description).toContain('Ejemplos reales: "2026-01-01".');
+    expect(fecha.description).not.toContain("Si se omite");
+  });
+
+  it("refuses listed values on an operator that does not take one of them, or repeated", () => {
+    // Performs the test.
+    const parse = (filter: Record<string, unknown>) =>
+      definitionSchema.safeParse({
+        base: { kind: "table", name: "entregas" },
+        columns: [{ name: "ruta" }],
+        filters: [filter],
+        meaning: { definition: "Entregas." },
+      }).success;
+
+    // Performs assertions.
+    expect(parse({ column: "ruta", op: "contains", values: [{ value: "R" }] })).toBe(false);
+    expect(parse({ column: "ruta", op: "in", values: [{ value: "R" }, { value: "R" }] })).toBe(
+      false,
+    );
+    expect(parse({ column: "ruta", op: "in", values: [{ value: "R" }] })).toBe(true);
+  });
+
+  it("brings the detail behind the totals with the chosen columns and the orders they allow", () => {
+    // Performs the test.
+    const tool = created({
+      columns: [{ name: "ruta" }, { name: "total" }],
+      summary: {
+        group_by: ["ruta"],
+        aggregates: [{ fn: "sum", column: "total", as: "monto" }],
+        with_detail: true,
+      },
+      order_by: [
+        { column: "monto", direction: "desc" },
+        { column: "ruta", direction: "asc" },
+      ],
+    });
+    const detail = detailOf(tool.spec);
+    const schema = outputSchemaOf(tool) as unknown as {
+      properties: Record<string, { items?: { required?: string[] } }>;
+      required: string[];
+    };
+
+    // Performs assertions.
+    expect(detail.summary).toBeUndefined();
+    expect(detail.order_by).toEqual([{ column: "ruta", direction: "asc" }]);
+    expect(schema.required).toEqual(["filas", "total_filas", "detalle", "total_detalle"]);
+    expect(schema.properties.filas?.items?.required).toEqual(["ruta", "monto"]);
+    expect(schema.properties.detalle?.items?.required).toEqual(["ruta", "total"]);
+    expect(descriptionOf(tool, "UTC")).toContain("detalle trae cada registro");
+  });
+
+  it("says what a row is from the totals when the person left it unsaid", () => {
+    // Performs the test.
+    const grouped = created({
+      meaning: { definition: "Montos." },
+      summary: { group_by: ["ruta"], aggregates: [{ fn: "count", as: "n" }] },
+    });
+    const whole = created({
+      meaning: { definition: "Montos." },
+      summary: { group_by: [], aggregates: [{ fn: "count", as: "n" }] },
+    });
+
+    // Performs assertions.
+    expect(descriptionOf(grouped, "UTC")).toContain("Cada fila es: el total de cada ruta.");
+    expect(descriptionOf(whole, "UTC")).toContain("Cada fila es: el total de todo lo filtrado.");
+    expect(grouped.spec.meaning.additive).toBe(true);
   });
 });

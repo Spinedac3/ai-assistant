@@ -52,7 +52,7 @@ describe("result cap", () => {
     expect(capped).toEqual({ ok: true, data, truncated: false });
   });
 
-  it("keeps the totals and the summaries, archives the heavy lists and leads with the link", async () => {
+  it("keeps the totals and the summaries, archives every list and leads with the link", async () => {
     // Performs the test.
     const { archive, saved } = recordingArchive();
     const data = {
@@ -76,6 +76,7 @@ describe("result cap", () => {
     expect(saved[0]?.map((sheet) => [sheet.name, sheet.rows.length])).toEqual([
       ["pedidos", 1000],
       ["detalle", 200],
+      ["resumen", 1],
     ]);
     expect(result.archivo).toMatchObject({
       filas: { pedidos: 1000, detalle: 200 },
@@ -243,5 +244,47 @@ describe("result cap", () => {
     // Performs assertions.
     expect(sheet.columns).toEqual(["id", "valor"]);
     expect(sheet.rows).toEqual([[1], [undefined, 7], [undefined, "texto"]]);
+  });
+
+  it("keeps whole the list the tool names, cuts the larger one and leads the file with it", async () => {
+    // Performs the test.
+    const { archive, saved } = recordingArchive();
+    const data = { filas: rows(40, 60), detalle: rows(500) };
+    const capped = await capResult(data, 40_000, archive, "", "filas");
+    if (!capped.ok) {
+      throw new Error(capped.message);
+    }
+
+    // Performs assertions.
+    expect(capped.data.filas).toEqual(data.filas);
+    expect((capped.data.detalle as unknown[]).length).toBeLessThan(500);
+    expect(saved[0]?.map((sheet) => [sheet.name, sheet.rows.length])).toEqual([
+      ["filas", 40],
+      ["detalle", 500],
+    ]);
+  });
+
+  it("falls back to the largest list when the preferred one is missing, and keeps a small one whole", async () => {
+    // Performs the test.
+    const { archive } = recordingArchive();
+    const absent = await capResult({ detalle: rows(500) }, 40_000, archive, "", "filas");
+    const small = await capResult(
+      { filas: rows(3, 10), detalle: rows(500) },
+      40_000,
+      archive,
+      "",
+      "filas",
+    );
+    if (!absent.ok || !small.ok) {
+      throw new Error("not capped");
+    }
+
+    // Performs assertions.
+    expect((absent.data.detalle as unknown[]).length).toBeGreaterThan(0);
+    expect(small.data.filas).toHaveLength(3);
+    expect((small.data.archivo as { filas: Record<string, number> }).filas).toEqual({
+      filas: 3,
+      detalle: 500,
+    });
   });
 });

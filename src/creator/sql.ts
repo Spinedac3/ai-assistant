@@ -226,6 +226,36 @@ export function buildQuery(
 }
 
 /**
+ * Builds a query that reads the distinct values of one column of the base, empties left out
+ *
+ * @param   base    Base of the definition
+ * @param   engine  Engine
+ * @param   pasted  Checked pasted query, when the base is one
+ * @param   column  Column
+ * @param   rows    How many values at most
+ *
+ * @return  The query, its values under "value"
+ */
+export function distinctQuery(
+  base: ToolDefinitionSpec["base"],
+  engine: EngineName,
+  pasted: string | null,
+  column: string,
+  rows: number,
+): string {
+  const quoted = quote(column, engine);
+  const from = `FROM ${fromClause(base, engine, pasted)} AS base
+WHERE ${quoted} IS NOT NULL`;
+
+  return engine === "mssql"
+    ? `SELECT DISTINCT TOP ${rows} ${quoted} AS value
+${from}`
+    : `SELECT DISTINCT ${quoted} AS value
+${from}
+LIMIT ${rows}`;
+}
+
+/**
  * Builds a query that reads a few rows of some columns of the base, to try the filters with or to
  * show the guide what each column holds
  *

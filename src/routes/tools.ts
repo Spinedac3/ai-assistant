@@ -11,11 +11,31 @@ import {
 } from "../chat/rateLimit.js";
 import { findConversation } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
+import {
+  explainPrompt,
+  filterPrompt,
+  listRelations,
+  readExplanation,
+  readSuggestion,
+  readTotals,
+  suggestPrompt,
+  totalsPrompt,
+} from "../creator/catalog.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
-import { type BaseColumn, describeBase } from "../creator/columns.js";
-import { baseSchema, definitionSchema, TOOL_NAME } from "../creator/definition.js";
-import { guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
+import { type BaseColumn, describeBase, normalizeRows } from "../creator/columns.js";
+import {
+  baseSchema,
+  columnName,
+  definitionSchema,
+  FILTER_OPS,
+  MAX_FILTER_VALUES,
+  TOOL_NAME,
+  type ToolDefinitionSpec,
+  VALUE_OPS,
+} from "../creator/definition.js";
+import { canonical, guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
 import { checkPasted } from "../creator/pasted.js";
+import { distinctQuery } from "../creator/sql.js";
 import {
   type CreatedTools,
   findDefinition,
@@ -33,16 +53,20 @@ import {
 } from "../creator/tool.js";
 import type { Database } from "../db/client.js";
 import { conversations, messages, toolDefinitions } from "../db/schema.js";
+import type { ExportStore } from "../exports/store.js";
 import { removeHiddenDeep } from "../lib/hiddenText.js";
 import { isRunning, oneAtATime } from "../lib/oneAtATime.js";
 import { cliToolName } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
+import { type ColumnKind, type ConnectionInfo, runQuery } from "../sources/engines.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
 import { ToolRegistry } from "../tools/registry.js";
 
 export interface ToolsRoutesOptions extends CreatedToolDependencies {
   db: Database;
   created: CreatedTools;
+  // Where a direct run leaves the Excel of a long result
+  exports?: ExportStore;
   // Asks the model one question with no tools; without it the guide is off
   ask?: (prompt: string) => Promise<string>;
   // What a trial chat needs: the chat's own settings, this server's /mcp, and the shared tools
@@ -60,6 +84,15 @@ const GUIDE_SAMPLES = 5;
 const CHECK_LIMITS = { timeoutMs: 60_000, maxRows: 200_000 };
 // Naming the columns reads no row, so anything longer is a base that will not answer
 const DESCRIBE_LIMITS = { timeoutMs: 15_000, maxRows: 1 };
+// A few rows to describe a base, read as the guide reads them
+const DESCRIBE_SAMPLE_LIMITS = { timeoutMs: 15_000, maxRows: 50 };
+// Listing a source's tables reads its catalog only
+const RELATIONS_LIMITS = { timeoutMs: 15_000, maxRows: 5_000 };
+const BASE_UNREADABLE = {
+  ok: false,
+  error: "base_unreadable",
+  message: "No se pudo leer esa base en la fuente; revisa la tabla o la consulta",
+};
 // Said whenever a name cannot be used, so it never tells whether a tool of another source exists
 const NAME_TAKEN = {
   ok: false,
@@ -69,6 +102,47 @@ const NAME_TAKEN = {
 
 const nameParams = z.object({ name: z.string().regex(TOOL_NAME) });
 const describeBody = z.object({ source: z.string().regex(SOURCE_CODE), base: baseSchema }).strict();
+const relationsQuery = z.object({ source: z.string().regex(SOURCE_CODE) }).strict();
+const filterHelpBody = z
+  .object({
+    source: z.string().regex(SOURCE_CODE),
+    base: baseSchema,
+    column: columnName,
+    op: z.enum(FILTER_OPS),
+    // What the person said the base holds, so the explanation speaks of the same thing
+    about: z.string().trim().min(1).max(2_000).optional(),
+  })
+  .strict();
+
+type FilterValue = string | number | boolean;
+
+// A value longer than this is free text, never one of a closed list
+const MAX_LISTED_CHARS = 60;
+
+const totalsBody = z
+  .object({
+    source: z.string().regex(SOURCE_CODE),
+    base: baseSchema,
+    // What the person said the base holds, so the ideas speak of the same thing
+    about: z.string().trim().min(1).max(2_000).optional(),
+  })
+  .strict();
+const suggestBody = z
+  .object({
+    about: z.string().trim().min(1).max(2_000),
+    columns: z.array(columnName).min(1).max(200),
+    filters: z.array(columnName).max(200).default([]),
+    totals: z
+      .object({
+        by: z.array(columnName).max(200),
+        calculations: z.array(z.string().trim().min(1).max(200)).max(50),
+        detail: z.boolean(),
+      })
+      .strict()
+      .nullable()
+      .default(null),
+  })
+  .strict();
 const saveBody = z
   .object({
     source: z.string().regex(SOURCE_CODE),
@@ -91,6 +165,25 @@ const trialParams = z.object({
   name: z.string().regex(TOOL_NAME),
   id: z.coerce.number().int().positive(),
 });
+
+/**
+ * Reads the distinct values a column has in some rows, as text
+ *
+ * @param   rows    Rows
+ * @param   column  Column
+ *
+ * @return  Its values, without repeats or empties
+ */
+function valuesOf(rows: Record<string, unknown>[], column: string): string[] {
+  return [
+    ...new Set(
+      rows
+        .map((row) => row[column])
+        .filter((value) => value != null)
+        .map((value) => (value instanceof Date ? value.toISOString() : String(value))),
+    ),
+  ];
+}
 
 /**
  * Registers the creator: tools defined over a registered source, saved as drafts, checked, tried
@@ -218,47 +311,135 @@ export default async function toolsRoutes(
     };
   });
 
-  // The columns of a base before anything is saved, so a person picks them instead of typing them
-  app.post("/admin/tools/describe", guard, async (request, reply) => {
-    const body = describeBody.safeParse(request.body);
-    if (!body.success) {
-      return reply
-        .code(400)
-        .send({ ok: false, error: "invalid_body", message: body.error.issues[0]?.message });
-    }
-    const { source, base } = body.data;
+  /**
+   * Opens a source the caller may build on: they hold its permission and it still exists
+   *
+   * @param   request  Request
+   * @param   reply    Reply
+   * @param   source   Code of the source
+   *
+   * @return  Its connection, or null once the reply is sent
+   */
+  const openSource = async (request: FastifyRequest, reply: FastifyReply, source: string) => {
     if (!request.authUser?.scopes.has(sourceScope(source))) {
-      return reply.code(403).send({
+      reply.code(403).send({
         ok: false,
         error: "source_not_allowed",
         message: "No tienes el permiso de esa fuente",
       });
+      return null;
     }
     const connection = await connectionFor(db, options.secrets, source);
     if (!connection) {
-      return reply
+      reply
         .code(404)
         .send({ ok: false, error: "source_not_found", message: "Esa fuente ya no existe" });
+      return null;
     }
-    // One reading of a source's columns at a time; a person who clicks again is told to wait
-    // instead of queueing reads that block the checks of everyone else
-    const key = `describe:${source}`;
-    if (isRunning(key)) {
-      return reply.code(429).send({
-        ok: false,
-        error: "busy",
-        message: "Ya se están leyendo columnas de esa fuente; espera un momento",
-      });
+
+    return connection;
+  };
+
+  /**
+   * Opens the base a person is choosing, before anything is saved: its source, and the pasted
+   * query checked when the base is one
+   *
+   * @param   request  Request
+   * @param   reply    Reply
+   *
+   * @return  The source, its connection, the base and the checked query, or null once replied
+   */
+  const openBase = async <T extends z.infer<typeof describeBody>>(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    schema: z.ZodType<T>,
+  ) => {
+    const body = schema.safeParse(request.body);
+    if (!body.success) {
+      reply
+        .code(400)
+        .send({ ok: false, error: "invalid_body", message: body.error.issues[0]?.message });
+      return null;
+    }
+    const { source, base } = body.data;
+    const connection = await openSource(request, reply, source);
+    if (!connection) {
+      return null;
     }
     let pasted: string | null = null;
     if (base.kind === "query") {
       const checked = checkPasted(base.sql, connection.info.engine);
       if (!checked.ok) {
-        return reply
-          .code(400)
-          .send({ ok: false, error: "invalid_query", message: checked.message });
+        reply.code(400).send({ ok: false, error: "invalid_query", message: checked.message });
+        return null;
       }
       pasted = checked.sql;
+    }
+
+    return { source, connection, base, pasted, body: body.data };
+  };
+
+  /**
+   * Tells a person to wait when the same source is already being read, instead of queueing reads
+   * that block the checks of everyone else
+   *
+   * @param   reply  Reply
+   * @param   key    What is being read
+   *
+   * @return  Whether the reply was sent
+   */
+  const busy = (reply: FastifyReply, key: string): boolean => {
+    if (!isRunning(key)) {
+      return false;
+    }
+    reply.code(429).send({
+      ok: false,
+      error: "busy",
+      message: "Ya se está leyendo esa fuente; espera un momento",
+    });
+    return true;
+  };
+
+  // The tables and views a person can build on, so they pick one instead of typing its name
+  app.get("/admin/tools/relations", guard, async (request, reply) => {
+    const query = relationsQuery.safeParse(request.query);
+    if (!query.success) {
+      return reply.code(400).send({ ok: false, error: "invalid_query_string" });
+    }
+    const { source } = query.data;
+    const connection = await openSource(request, reply, source);
+    if (!connection) {
+      return reply;
+    }
+    const key = `relations:${source}`;
+    if (busy(reply, key)) {
+      return reply;
+    }
+    try {
+      const relations = await oneAtATime(key, () =>
+        listRelations(connection.info, RELATIONS_LIMITS),
+      );
+      return { ok: true, data: { relations } };
+    } catch (error) {
+      request.log.warn({ err: error, source }, "relations could not be listed");
+      return reply.code(400).send({
+        ok: false,
+        error: "source_unreadable",
+        message: "No se pudieron leer las tablas de esa fuente",
+      });
+    }
+  });
+
+  // The columns of a base before anything is saved, so a person picks them instead of typing them
+  app.post("/admin/tools/describe", guard, async (request, reply) => {
+    const opened = await openBase(request, reply, describeBody);
+    if (!opened) {
+      return reply;
+    }
+    const { source, connection, base, pasted } = opened;
+    const key = `describe:${source}`;
+    if (busy(reply, key)) {
+      return reply;
     }
     try {
       // Reads no row: the source only says which columns the base has
@@ -268,12 +449,268 @@ export default async function toolsRoutes(
       return { ok: true, data: { columns } };
     } catch (error) {
       request.log.warn({ err: error, source }, "base could not be described");
+      return reply.code(400).send(BASE_UNREADABLE);
+    }
+  });
+
+  /**
+   * Asks the model one question for the creator, counted as a message of the person; a quota
+   * reached or a model that fails leaves a note instead of an answer, and the message is theirs
+   * again when nothing came back
+   *
+   * @param   request  Request of the person
+   * @param   prompt   Question
+   * @param   failure  What the person reads when the model fails
+   * @param   context  What the log says the call was about
+   *
+   * @return  The answer, or the note to show; no note when there is no model at all
+   */
+  const askCounted = async (
+    request: FastifyRequest,
+    prompt: string,
+    failure: string,
+    context: Record<string, unknown> = {},
+  ): Promise<{ answer: string } | { note: string | null }> => {
+    const ask = options.ask;
+    if (!ask) {
+      return { note: null };
+    }
+    const userId = request.authUser?.id;
+    let reservation: Reservation | null = null;
+    try {
+      const limits = options.trial?.chat.limits;
+      if (limits && userId !== undefined) {
+        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
+      }
+      return { answer: await ask(prompt) };
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return { note: error.message };
+      }
+      if (reservation && userId !== undefined) {
+        await refundMessage(db, userId, reservation).catch(() => undefined);
+      }
+      request.log.warn({ err: error, ...context }, "creator model call failed");
+      return { note: failure };
+    }
+  };
+
+  /**
+   * Reads the columns of a base and a few values of each, in one read of a few rows so the source
+   * is not held long
+   *
+   * @param   connection  Source connection
+   * @param   base        Base of the tool
+   * @param   pasted      Checked pasted query, when the base is one
+   *
+   * @return  The columns and their sample values
+   */
+  const readSamples = async (
+    connection: { info: ConnectionInfo },
+    base: ToolDefinitionSpec["base"],
+    pasted: string | null,
+  ): Promise<{ columns: BaseColumn[]; samples: Record<string, string[]> }> => {
+    const columns = await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS);
+    const kinds = new Map(columns.map((column) => [column.name, column.kind]));
+    const runner = runnerFor(connection.info, base, pasted, DESCRIBE_SAMPLE_LIMITS, kinds);
+    const rows = await runner.sample(
+      columns.map((column) => column.name),
+      false,
+    );
+
+    return {
+      columns,
+      samples: Object.fromEntries(
+        columns.map((column) => [column.name, valuesOf(rows, column.name).slice(0, GUIDE_SAMPLES)]),
+      ),
+    };
+  };
+
+  // The columns of a base with a short description the model writes from a few of its values,
+  // for a base whose database gives none
+  app.post("/admin/tools/explain", guard, async (request, reply) => {
+    const opened = await openBase(request, reply, describeBody);
+    if (!opened) {
+      return reply;
+    }
+    const { source, connection, base, pasted } = opened;
+    const key = `describe:${source}`;
+    if (busy(reply, key)) {
+      return reply;
+    }
+    let read: { columns: BaseColumn[]; samples: Record<string, string[]> };
+    try {
+      read = await oneAtATime(key, async () =>
+        options.ask
+          ? readSamples(connection, base, pasted)
+          : {
+              columns: await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS),
+              samples: {},
+            },
+      );
+    } catch (error) {
+      request.log.warn({ err: error, source }, "base could not be described");
+      return reply.code(400).send(BASE_UNREADABLE);
+    }
+    const { columns, samples } = read;
+    const asked = await askCounted(
+      request,
+      explainPrompt(base.kind === "table" ? base.name : null, columns, samples),
+      "No se pudo escribir la descripción ahora; escríbela tú",
+      { source },
+    );
+
+    // The columns serve either way: without a description the person writes it
+    return "answer" in asked
+      ? { ok: true, data: { columns, description: readExplanation(asked.answer) } }
+      : { ok: true, data: { columns, description: null, note: asked.note } };
+  });
+
+  // What a filter needs for the model to use it well: the column's real values, as a closed list
+  // when they are few, and an explanation the model writes and the person reviews
+  app.post("/admin/tools/filter-help", guard, async (request, reply) => {
+    const opened = await openBase(request, reply, filterHelpBody);
+    if (!opened) {
+      return reply;
+    }
+    const { source, connection, base, pasted, body } = opened;
+    const key = `describe:${source}`;
+    if (busy(reply, key)) {
+      return reply;
+    }
+    let read: { kind: ColumnKind; values: FilterValue[] } | null;
+    try {
+      read = await oneAtATime(key, async () => {
+        const columns = await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS);
+        const kind = columns.find((column) => column.name === body.column)?.kind;
+        if (!kind) {
+          return null;
+        }
+        // One more than a closed list holds, to tell a short list from a long one
+        const sql = distinctQuery(
+          base,
+          connection.info.engine,
+          pasted,
+          body.column,
+          MAX_FILTER_VALUES + 1,
+        );
+        const rows = normalizeRows(
+          await runQuery(connection.info, sql, [], {
+            timeoutMs: DESCRIBE_SAMPLE_LIMITS.timeoutMs,
+            maxRows: MAX_FILTER_VALUES + 1,
+          }),
+        );
+        const values = rows
+          .map((row) => row.value)
+          .filter(
+            (value): value is FilterValue =>
+              typeof value === "string" || typeof value === "number" || typeof value === "boolean",
+          );
+        return { kind, values };
+      });
+    } catch (error) {
+      request.log.warn({ err: error, source }, "filter values could not be read");
+      return reply.code(400).send(BASE_UNREADABLE);
+    }
+    if (!read) {
       return reply.code(400).send({
         ok: false,
-        error: "base_unreadable",
-        message: "No se pudo leer esa base en la fuente; revisa la tabla o la consulta",
+        error: "unknown_column",
+        message: "Esa columna no está en lo que lee la herramienta",
       });
     }
+
+    const { kind, values } = read;
+    // A closed list is for a few short texts or numbers a person picks one of; long texts are not
+    // categories, and they would reach every model reading the tool
+    const listable = kind === "text" || kind === "number";
+    const closed =
+      VALUE_OPS.has(body.op) &&
+      listable &&
+      values.length > 0 &&
+      values.length <= MAX_FILTER_VALUES &&
+      values.every((value) => String(value).length <= MAX_LISTED_CHARS);
+    const sorted = [...values].sort((a, b) =>
+      typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)),
+    );
+    const help = {
+      values: closed ? sorted : null,
+      examples: !closed && listable && values.length > 0 ? values.slice(0, 5) : null,
+    };
+    const asked = await askCounted(
+      request,
+      filterPrompt({
+        column: body.column,
+        kind,
+        op: body.op,
+        about: body.about ?? null,
+        values: values.slice(0, MAX_FILTER_VALUES),
+      }),
+      "No se pudo escribir la explicación ahora; escríbela tú",
+      { source, column: body.column },
+    );
+
+    return "answer" in asked
+      ? { ok: true, data: { ...help, description: readExplanation(asked.answer) } }
+      : { ok: true, data: { ...help, description: null, note: asked.note } };
+  });
+
+  // The last step's suggestions: a name, what it returns, what a row is and other words for it;
+  // the person edits them before saving, and nothing here reads the source
+  app.post("/admin/tools/suggest", guard, async (request, reply) => {
+    const body = suggestBody.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "invalid_body", message: body.error.issues[0]?.message });
+    }
+    const asked = await askCounted(
+      request,
+      suggestPrompt(body.data),
+      "No se pudo sugerir ahora; complétalo tú",
+    );
+
+    return "answer" in asked
+      ? { ok: true, data: readSuggestion(asked.answer) }
+      : {
+          ok: true,
+          data: { name: null, definition: null, grain: null, synonyms: [], note: asked.note },
+        };
+  });
+
+  // Summaries a person would likely want from a base, read from its columns and a few values;
+  // each one is applied as it is or left aside
+  app.post("/admin/tools/suggest-totals", guard, async (request, reply) => {
+    const opened = await openBase(request, reply, totalsBody);
+    if (!opened) {
+      return reply;
+    }
+    const { source, connection, base, pasted, body } = opened;
+    if (!options.ask) {
+      return { ok: true, data: { ideas: [] } };
+    }
+    const key = `describe:${source}`;
+    if (busy(reply, key)) {
+      return reply;
+    }
+    let read: { columns: BaseColumn[]; samples: Record<string, string[]> };
+    try {
+      read = await oneAtATime(key, () => readSamples(connection, base, pasted));
+    } catch (error) {
+      request.log.warn({ err: error, source }, "base could not be described");
+      return reply.code(400).send(BASE_UNREADABLE);
+    }
+    const asked = await askCounted(
+      request,
+      totalsPrompt(body.about ?? null, read.columns, read.samples),
+      "No se pudieron sugerir resúmenes ahora; ármalo tú",
+      { source },
+    );
+
+    // The person builds the summary by hand when no idea comes
+    return "answer" in asked
+      ? { ok: true, data: { ideas: readTotals(asked.answer, read.columns) } }
+      : { ok: true, data: { ideas: [], note: asked.note } };
   });
 
   // Saving a published tool turns it back into a draft until it passes its checks again
@@ -355,6 +792,18 @@ export default async function toolsRoutes(
       });
     }
 
+    // Saving the very version that is published changes nothing, so it stays published
+    if (
+      existing?.tool.status === "published" &&
+      canonical(existing.tool.spec) === canonical(spec) &&
+      canonical(existing.tool.columns) === canonical(columns)
+    ) {
+      return {
+        ok: true,
+        data: { name, status: existing.tool.status, columns, checks: await check(existing.tool) },
+      };
+    }
+
     const userId = request.authUser.id;
     const stored = await saveDefinition(db, { name, sourceCode: source, spec, columns, userId });
     created.sync(stored, connection.timeZone);
@@ -402,14 +851,6 @@ export default async function toolsRoutes(
       if (limits && userId !== undefined) {
         reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
       }
-      const valuesOf = (rows: Record<string, unknown>[], column: string) => [
-        ...new Set(
-          rows
-            .map((row) => row[column])
-            .filter((value) => value != null)
-            .map((value) => (value instanceof Date ? value.toISOString() : String(value))),
-        ),
-      ];
       // One read of a few rows, whatever the number of columns, so the source is not held long;
       // only a column empty in those rows is read again on its own
       const samples = await oneAtATime(`checks:${tool.sourceCode}`, async () => {
@@ -649,6 +1090,9 @@ export default async function toolsRoutes(
     const { tool, zone } = found;
     const trial = new ToolRegistry(db);
     trial.useLogger(request.log);
+    if (options.exports) {
+      trial.useExports(options.exports);
+    }
     trial.register(toolFrom(shapeOf(tool), options, zone));
     const outcome = await trial.execute(
       tool.name,

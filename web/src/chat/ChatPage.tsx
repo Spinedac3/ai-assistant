@@ -12,11 +12,11 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { FiCheck, FiPaperclip, FiPlus, FiSend, FiSquare, FiStar, FiX } from "react-icons/fi";
-import type { Components } from "react-markdown";
 import Markdown from "react-markdown";
 import { NavLink, useLocation, useNavigate, useParams } from "react-router";
 import remarkGfm from "remark-gfm";
 import { ApiError, api } from "../api/http";
+import { LINKS } from "../shell/Links";
 import { type ChatMessage, type ConversationSummary, streamTurn, toolLabel } from "./api";
 
 interface ToolStep {
@@ -97,7 +97,15 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
   });
 
   const messages = conversationId ? (open.data?.messages ?? []) : [];
-  const shown = `${messages.length}:${draft?.text.length ?? 0}:${draft?.tools.length ?? 0}`;
+  // Anything new on screen follows the person down: their question, each tool as it runs and ends,
+  // and the answer as it arrives
+  const shown = [
+    messages.length,
+    draft ? draft.question.length : -1,
+    draft?.text.length ?? 0,
+    draft?.tools.map((tool) => tool.state).join(",") ?? "",
+    error ?? "",
+  ].join(":");
   useEffect(() => {
     if (shown) {
       bottom.current?.scrollIntoView({ block: "end" });
@@ -274,7 +282,7 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
       </Stack>
 
       <Flex direction="column" flex={1} minW={0} bg="bg.surface" borderWidth="1px" rounded="panel">
-        <Stack flex={1} overflow="auto" p={5} gap={4}>
+        <Stack flex={1} minH={0} overflow="auto" p={5} gap={4}>
           {conversationId && open.isLoading && <Spinner color="brand.solid" />}
           {!conversationId && !draft && (
             <Text color="fg.muted">
@@ -386,28 +394,6 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
     </Flex>
   );
 }
-
-// Links of an answer open apart, and one to another site says which site it is before anyone
-// follows it: the text of an answer may come from data or a document no one checked
-const LINKS: Components = {
-  a: ({ href, children }) => {
-    // A link that does not parse is shown as its text, never as a page that fails to render
-    if (!href || !URL.canParse(href, window.location.href)) {
-      return <span>{children}</span>;
-    }
-    const target = new URL(href, window.location.href);
-    const foreign =
-      target.protocol.startsWith("http") &&
-      target.host !== "" &&
-      target.origin !== window.location.origin;
-    return (
-      <a href={href} target="_blank" rel="noopener noreferrer">
-        {children}
-        {foreign && ` (${target.host})`}
-      </a>
-    );
-  },
-};
 
 /**
  * An answer of the assistant, rendered from its markdown

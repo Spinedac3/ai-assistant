@@ -4,7 +4,7 @@ import { connectionFor, sourceScope } from "../sources/registry.js";
 import type { JsonSchema, Tool, ToolResult } from "../tools/contract.js";
 import type { Secrets } from "../vault/envelope.js";
 import { type BaseColumn, normalizeRows } from "./columns.js";
-import type { ToolDefinitionSpec } from "./definition.js";
+import { type ToolDefinitionSpec, VALUE_OPS } from "./definition.js";
 import { checkPasted } from "./pasted.js";
 import { buildQuery, paramName } from "./sql.js";
 
@@ -81,7 +81,26 @@ function filterText(filter: ToolDefinitionSpec["filters"][number], kind: ColumnK
     empty: `true: solo filas sin ${filter.column}; false: solo filas con ${filter.column}.`,
   };
 
-  return `${what[filter.op]}${day}${own}`;
+  const relative = day
+    ? " Si la persona habla de fechas relativas (hoy, ayer, este mes), conviértelas con la fecha de hoy."
+    : "";
+  const listed =
+    filter.values && VALUE_OPS.has(filter.op)
+      ? ` Valores posibles: ${filter.values
+          .map((item) =>
+            item.meaning
+              ? `${JSON.stringify(item.value)} (${item.meaning})`
+              : JSON.stringify(item.value),
+          )
+          .join(", ")}.`
+      : "";
+  const examples =
+    !listed && filter.examples
+      ? ` Ejemplos reales: ${filter.examples.map((value) => JSON.stringify(value)).join(", ")}.`
+      : "";
+  const omitted = filter.required ? "" : ` Si se omite, no se filtra por ${filter.column}.`;
+
+  return `${what[filter.op]}${day}${relative}${listed}${examples}${own}${omitted}`;
 }
 
 /**
@@ -96,7 +115,11 @@ export function inputSchemaOf(tool: CreatedTool): JsonSchema {
   const properties: Record<string, unknown> = {};
   for (const filter of tool.spec.filters) {
     const kind = kinds.get(filter.column) ?? "text";
-    const one = valueSchema(kind);
+    // A closed list keeps the model to values the source has
+    const one =
+      filter.values && VALUE_OPS.has(filter.op)
+        ? { ...valueSchema(kind), enum: filter.values.map((item) => item.value) }
+        : valueSchema(kind);
     const schema =
       filter.op === "between"
         ? { type: "array", items: one, minItems: 2, maxItems: 2 }
@@ -149,6 +172,24 @@ export function outputColumnsOf(tool: CreatedTool): BaseColumn[] {
 }
 
 /**
+ * The same definition without its summary: each row of the chosen columns, ordered by those of
+ * them the order names, for a summary that also brings its detail
+ *
+ * @param   spec  Tool definition
+ *
+ * @return  The definition of the detail
+ */
+export function detailOf(spec: ToolDefinitionSpec): ToolDefinitionSpec {
+  const chosen = new Set(spec.columns.map((column) => column.name));
+
+  return {
+    ...spec,
+    summary: undefined,
+    order_by: spec.order_by.filter((order) => chosen.has(order.column)),
+  };
+}
+
+/**
  * Builds the output schema of a created tool: its rows and how many there are
  *
  * @param   tool  Created tool
@@ -163,25 +204,56 @@ export function outputSchemaOf(tool: CreatedTool): JsonSchema {
     date: "string",
     datetime: "string",
   };
-  const columns = outputColumnsOf(tool);
+  const rowsOf = (columns: BaseColumn[]) => ({
+    type: "array",
+    items: {
+      type: "object",
+      properties: Object.fromEntries(
+        columns.map((column) => [column.name, { type: [json[column.kind], "null"] }]),
+      ),
+      required: columns.map((column) => column.name),
+    },
+  });
+  const detail = tool.spec.summary?.with_detail
+    ? {
+        properties: {
+          detalle: rowsOf(outputColumnsOf({ ...tool, spec: detailOf(tool.spec) })),
+          total_detalle: { type: ["integer", "null"] },
+        },
+        required: ["detalle", "total_detalle"],
+      }
+    : { properties: {}, required: [] };
 
   return {
     type: "object",
     properties: {
-      filas: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: Object.fromEntries(
-            columns.map((column) => [column.name, { type: [json[column.kind], "null"] }]),
-          ),
-          required: columns.map((column) => column.name),
-        },
-      },
+      filas: rowsOf(outputColumnsOf(tool)),
       total_filas: { type: "integer" },
+      ...detail.properties,
     },
-    required: ["filas", "total_filas"],
+    required: ["filas", "total_filas", ...detail.required],
   };
+}
+
+/**
+ * Says what one row of a tool is: as the person put it, or what its totals are grouped by
+ *
+ * @param   spec  Tool definition
+ *
+ * @return  What a row is
+ */
+function grainOf(spec: ToolDefinitionSpec): string {
+  if (spec.meaning.grain) {
+    return spec.meaning.grain;
+  }
+  const summary = spec.summary;
+  if (!summary) {
+    return "un registro de lo que lee la herramienta";
+  }
+
+  return summary.group_by.length > 0
+    ? `el total de cada ${summary.group_by.join(" y ")}`
+    : "el total de todo lo filtrado";
 }
 
 /**
@@ -202,7 +274,13 @@ export function descriptionOf(tool: CreatedTool, timeZone: string): string {
     .join(", ");
   const parts = [
     meaning.definition,
-    `Cada fila es: ${meaning.grain}. Columnas: ${columns}.`,
+    `Cada fila es: ${grainOf(tool.spec)}. Columnas: ${columns}.`,
+    ...(tool.spec.summary?.with_detail
+      ? [
+          "filas trae los totales; detalle trae cada registro detrás de ellos, con las columnas " +
+            `${tool.spec.columns.map((column) => column.name).join(", ")}.`,
+        ]
+      : []),
     meaning.additive
       ? "Las cantidades se pueden sumar entre filas."
       : "Las cantidades NO se suman entre filas: cada fila ya es un valor completo.",
@@ -268,8 +346,58 @@ export function toolFrom(
           timeZone,
         });
         const rows = normalizeRows(result);
+        if (!tool.spec.summary?.with_detail) {
+          return { ok: true, data: { filas: rows, total_filas: rows.length }, rows: rows.length };
+        }
 
-        return { ok: true, data: { filas: rows, total_filas: rows.length }, rows: rows.length };
+        // The detail reads the same rows the totals came from, with the same filters
+        const detailQuery = buildQuery(
+          detailOf(tool.spec),
+          source.info.engine,
+          pasted,
+          args,
+          kinds,
+        );
+        let detail: Array<Record<string, unknown>>;
+        try {
+          detail = normalizeRows(
+            await runQuery(source.info, detailQuery.sql, detailQuery.params, {
+              timeoutMs: QUERY_TIMEOUT_MS,
+              maxRows: MAX_ROWS,
+              timeZone,
+            }),
+          );
+        } catch (error) {
+          if (!(error instanceof TooManyRowsError)) {
+            throw error;
+          }
+          // The totals were read whole; only the detail behind them is too long to bring
+          return {
+            ok: true,
+            data: {
+              filas: rows,
+              total_filas: rows.length,
+              detalle: [],
+              total_detalle: null,
+              nota_detalle:
+                "El detalle pasa del límite de filas; pide filtros más angostos para verlo.",
+            },
+            rows: rows.length,
+            main: "filas",
+          };
+        }
+        return {
+          ok: true,
+          data: {
+            filas: rows,
+            total_filas: rows.length,
+            detalle: detail,
+            total_detalle: detail.length,
+          },
+          rows: detail.length,
+          // The totals stay whole in the answer; the detail behind them is what goes to the Excel
+          main: "filas",
+        };
       } catch (error) {
         if (error instanceof TooManyRowsError) {
           return { ok: false, error: "too_many_rows", message: error.message };

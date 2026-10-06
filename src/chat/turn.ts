@@ -103,7 +103,16 @@ interface CliOutcome {
   tokensOut: number | null;
   cachedIn: number | null;
   costMillionths: number | null;
+  // The session the CLI ran, so the next turn resumes exactly this one
+  sessionId: string | null;
+  // Why a process gave no answer: how it ended, how long it ran and the end of what it wrote to stderr
+  exitCode: number | null;
+  elapsedMs: number;
+  stderr: string;
 }
+
+// Enough of stderr to name a failure without filling the log
+const STDERR_LOG_CHARS = 2_000;
 
 /**
  * Turns a CLI tool name into the name shown to people
@@ -126,7 +135,7 @@ export function displayToolName(name: string, input: Record<string, unknown>): s
  * @param   model           Model for this turn
  * @param   workspace       Conversation workspace
  * @param   prompt          Text sent to the CLI
- * @param   continueSession Whether to resume the workspace's session
+ * @param   resumeSession   The conversation's session to resume, or null for a new one
  * @param   abortSignal     Stops the process
  *
  * @return  The turn's outcome once the process ends
@@ -136,7 +145,7 @@ async function* runCli(
   model: string,
   workspace: string,
   prompt: string,
-  continueSession: boolean,
+  resumeSession: string | null,
   abortSignal?: AbortSignal,
   trace?: TraceEntry[],
 ): AsyncGenerator<TurnEvent, CliOutcome> {
@@ -145,7 +154,7 @@ async function* runCli(
     cliArgs({
       model,
       maxTurns: MAX_TURNS,
-      continueSession,
+      resumeSession: resumeSession ?? undefined,
       mcpConfigPath: join(workspace, ".mcp.json"),
       // With tools, the CLI may call only what the chat catalog, or the trial, offers
       ...(deps.mcpConfig ? { allowedTools: deps.trial?.allowedTools ?? CHAT_CLI_ALLOWED } : {}),
@@ -156,7 +165,12 @@ async function* runCli(
     abortSignal,
   );
 
+  const started = Date.now();
   const outcome: CliOutcome = {
+    sessionId: null,
+    exitCode: null,
+    elapsedMs: 0,
+    stderr: "",
     ok: false,
     resultText: "",
     cutByMaxTurns: false,
@@ -241,6 +255,10 @@ async function* runCli(
     } else if (event.type === "result") {
       const usage = (event.usage ?? {}) as Record<string, unknown>;
       outcome.ok = event.is_error !== true;
+      outcome.sessionId =
+        typeof event.session_id === "string" && SESSION_ID.test(event.session_id)
+          ? event.session_id
+          : null;
       outcome.cutByMaxTurns = event.subtype === "error_max_turns";
       outcome.resultText = typeof event.result === "string" ? event.result : "";
       outcome.tokensIn = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
@@ -254,25 +272,46 @@ async function* runCli(
     }
   }
 
-  await cli.closed;
+  outcome.exitCode = await cli.closed;
+  outcome.elapsedMs = Date.now() - started;
+  if (!outcome.ok) {
+    try {
+      outcome.stderr = readFileSync(join(workspace, "stderr.log"), "utf8").slice(-STDERR_LOG_CHARS);
+    } catch {
+      outcome.stderr = "";
+    }
+  }
 
   return outcome;
 }
 
 /**
- * Reads the context size the previous turn of a workspace measured
+ * Reads what the previous turn of a workspace left: the context it measured and its session
  *
- * @param   path  Measurement file
+ * @param   path  Workspace's context file
  *
- * @return  Tokens, or zero without a measurement
+ * @return  The context size, and the session id when there is one to resume
  */
-function previousContext(path: string): number {
+function previousTurn(path: string): { context: number; session: string | null } {
   try {
-    return Number((JSON.parse(readFileSync(path, "utf8")) as { context?: unknown }).context) || 0;
+    const stored = JSON.parse(readFileSync(path, "utf8")) as {
+      context?: unknown;
+      session?: unknown;
+    };
+    return {
+      context: Number(stored.context) || 0,
+      session:
+        typeof stored.session === "string" && SESSION_ID.test(stored.session)
+          ? stored.session
+          : null,
+    };
   } catch {
-    return 0;
+    return { context: 0, session: null };
   }
 }
+
+// A session id as the CLI writes it; anything else never reaches its arguments
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Answers one chat message, streaming what happens and storing the final answer
@@ -356,11 +395,14 @@ export async function* chatTurn(
     yield { type: "start", conversationId: conversation, userMessageId };
 
     const contextPath = join(workspace, "context.json");
-    const resetByContext = !freshSession && previousContext(contextPath) > CONTEXT_CAP_TOKENS;
+    const previous = freshSession ? { context: 0, session: null } : previousTurn(contextPath);
+    const resetByContext = previous.context > CONTEXT_CAP_TOKENS;
+    // Only the conversation's own session is resumed; without one, the thread seeds a new one
+    const session = resetByContext ? null : previous.session;
     const summary = threadSummary(earlier);
     // Any new session on an existing conversation starts from the thread, not from nothing
     const seeded = summary ? `${summary}\n\n${content}` : content;
-    let prompt = resetByContext || freshSession ? seeded : content;
+    let prompt = session ? content : seeded;
 
     if (resetByContext) {
       logger.info(
@@ -379,7 +421,7 @@ export async function* chatTurn(
       // A discarded attempt's calls are not what answered; only the last attempt's are shown
       trace?.splice(0);
       // Both retries start a new session: a silent turn means the resumed one went bad
-      const resume = attempt === 0 && !freshSession && !resetByContext;
+      const resume = attempt === 0 && session !== null;
       const names = new Map<string, string>();
       const executed: string[] = [];
       const seen: TurnEvent[] = [];
@@ -391,7 +433,15 @@ export async function* chatTurn(
       ]);
       // Sources are what ran in this attempt; a discarded attempt's tools must not be credited
       const callsBefore = await lastToolCallId(db, conversation);
-      const run = runCli(deps, model, workspace, prompt, resume, attemptSignal, trace);
+      const run = runCli(
+        deps,
+        model,
+        workspace,
+        prompt,
+        resume ? session : null,
+        attemptSignal,
+        trace,
+      );
       let step = await run.next();
 
       while (!step.done) {
@@ -458,7 +508,10 @@ export async function* chatTurn(
 
       if (outcome.ok || text !== "" || cutOff !== null) {
         try {
-          writeFileSync(contextPath, JSON.stringify({ context: outcome.context }));
+          writeFileSync(
+            contextPath,
+            JSON.stringify({ context: outcome.context, session: outcome.sessionId }),
+          );
         } catch {
           // Without a measurement the cap simply does not apply next turn
         }
@@ -501,13 +554,27 @@ export async function* chatTurn(
       // The CLI keeps its sessions outside the workspace; a recreated host loses them
       if (attempt === 0 && resume && !abortSignal?.aborted) {
         logger.warn(
-          { conversationId: conversation },
-          "chat: --continue failed, retrying with a new session",
+          {
+            conversationId: conversation,
+            exitCode: outcome.exitCode,
+            elapsedMs: outcome.elapsedMs,
+            stderr: outcome.stderr,
+          },
+          "chat: resuming the session failed, retrying with a new one",
         );
         prompt = seeded;
         continue;
       }
 
+      logger.error(
+        {
+          conversationId: conversation,
+          exitCode: outcome.exitCode,
+          elapsedMs: outcome.elapsedMs,
+          stderr: outcome.stderr,
+        },
+        "chat: the CLI ended without an answer",
+      );
       throw new Error("El motor de chat no devolvió respuesta");
     }
   } finally {

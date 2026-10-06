@@ -7,6 +7,20 @@ export interface BaseColumn {
   kind: ColumnKind;
 }
 
+// A table or view of a source, as the creator offers it
+export interface Relation {
+  name: string;
+  kind: "table" | "view";
+  comment: string | null;
+}
+
+// What reading a base gives: its columns, and what it holds when the database or the model says
+export interface DescribedBase {
+  columns: BaseColumn[];
+  description: string | null;
+  note?: string;
+}
+
 export const FILTER_OPS = [
   "=",
   "!=",
@@ -46,19 +60,48 @@ export const AGGREGATE_LABELS: Record<Aggregate, string> = {
   max: "Máximo",
 };
 
+export type FilterValue = string | number | boolean;
+
+// The operators whose argument is one of the column's own values
+export const VALUE_OPS: ReadonlySet<string> = new Set(["=", "!=", "in"]);
+
+// What the server finds for a filter: the column's values and the explanation for the model
+export interface FilterHelp {
+  values: FilterValue[] | null;
+  examples: FilterValue[] | null;
+  description: string | null;
+  note?: string;
+}
+
+// A summary the model proposes for a base: what to group by and which measures
+export interface TotalsIdea {
+  label: string;
+  why: string;
+  group_by: string[];
+  aggregates: { fn: Aggregate; column?: string; as: string }[];
+}
+
 export interface Definition {
   base: { kind: "table"; name: string } | { kind: "query"; sql: string };
   columns: { name: string; label?: string }[];
-  filters: { column: string; op: FilterOp; required: boolean; description?: string }[];
+  filters: {
+    column: string;
+    op: FilterOp;
+    required: boolean;
+    description?: string;
+    values?: { value: FilterValue; meaning?: string }[];
+    examples?: FilterValue[];
+  }[];
   summary?: {
     group_by: string[];
     aggregates: { fn: Aggregate; column?: string; as: string }[];
+    with_detail?: boolean;
   };
   order_by: { column: string; direction: "asc" | "desc" }[];
   time_zone?: string;
   meaning: {
     definition: string;
-    grain: string;
+    grain?: string;
     additive: boolean;
     synonyms: string[];
     caveats: string[];
@@ -185,13 +228,18 @@ export function cleanDefinition(definition: Definition): Definition {
   return {
     ...definition,
     columns: definition.columns.map((column) => ({ name: column.name, label: text(column.label) })),
-    filters: definition.filters.map((filter) => ({
+    // A closed list only goes with an operator that takes one of its values
+    filters: definition.filters.map(({ values, ...filter }) => ({
       ...filter,
       description: text(filter.description),
+      ...(values && VALUE_OPS.has(filter.op)
+        ? { values: values.map((item) => ({ value: item.value, meaning: text(item.meaning) })) }
+        : {}),
     })),
     time_zone: text(definition.time_zone),
     meaning: {
       ...definition.meaning,
+      grain: text(definition.meaning.grain),
       synonyms: definition.meaning.synonyms.map((word) => word.trim()).filter(Boolean),
       caveats: definition.meaning.caveats.map((line) => line.trim()).filter(Boolean),
     },

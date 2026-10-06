@@ -116,4 +116,19 @@ describe("tool definitions in the form", () => {
     // Before the base is read, no filter is judged
     expect(prune(before, []).filters).toHaveLength(2);
   });
+
+  it("saves a closed list only with an operator that takes one of its values", () => {
+    // Performs the test.
+    const base = blankDefinition();
+    const listed = { column: "zona", required: false, values: [{ value: "Norte", meaning: " " }] };
+    const kept = cleanDefinition({ ...base, filters: [{ ...listed, op: "=" }] });
+    const dropped = cleanDefinition({ ...base, filters: [{ ...listed, op: "contains" }] });
+
+    // Performs assertions.
+    expect(kept.filters[0]?.values).toEqual([{ value: "Norte", meaning: undefined }]);
+    expect(dropped.filters[0]).not.toHaveProperty("values");
+    expect(
+      cleanDefinition({ ...base, meaning: { ...base.meaning, grain: "  " } }).meaning.grain,
+    ).toBeUndefined();
+  });
 });

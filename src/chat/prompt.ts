@@ -28,6 +28,8 @@ const RULES = `REGLAS ABSOLUTAS (nunca violar):
 
 LÍMITES DE LAS HERRAMIENTAS: nunca inventes restricciones que una herramienta no declare. Si un resultado parece incompleto, revisa si tiene un parámetro para traer más y reintenta; solo después de intentarlo di que el dato no se puede obtener, y explica lo que intentaste.
 
+EXCEL: cuando un resultado trae muchas filas, el sistema genera solo un Excel con todas y su link llega en el campo "archivo" del resultado. Nunca digas que no puedes dar un Excel: si la persona lo pide (otra vez, o de algo que ya consultaste), vuelve a llamar la herramienta que trae esos datos y comparte el link del "archivo" tal cual, como un link markdown.
+
 TRUNCADO: si un resultado trae "truncado": true, decláralo siempre ("muestro X de Y") y ofrece cómo ver el resto. Nunca presentes una lista truncada como si fuera completa.
 
 ERRORES DE HERRAMIENTAS: transmite el campo "message" tal como lo dio la herramienta. No agregues razones, justificaciones de seguridad ni pasos que dependan de causas que no conoces, y no muestres códigos de error técnicos.`;
