@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { RUN_CLIENT_ID } from "../mcp/runTokens.js";
@@ -57,11 +57,14 @@ export function declareMachineClient(listPath: string, clientId: string, rotate:
   const secretPath = join(dirname(listPath), `${clientId}.secret`);
   const entry = { client_id: clientId, secret_sha256: hashSecret(secret) };
   mkdirSync(dirname(listPath), { recursive: true });
-  writeFileSync(secretPath, secret, { mode: 0o600 });
+  // The list first: a secret the list does not know would look valid and never work
   writeFileSync(
     listPath,
     `${JSON.stringify([...list.filter((item) => item.client_id !== clientId), entry], null, 2)}\n`,
   );
+  writeFileSync(secretPath, secret, { mode: 0o600 });
+  // The mode above applies only to a new file; a rotated one keeps whatever it had
+  chmodSync(secretPath, 0o600);
 
   return secretPath;
 }
