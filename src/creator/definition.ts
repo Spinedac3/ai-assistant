@@ -126,8 +126,9 @@ export const definitionSchema = z
     meaning: z
       .object({
         definition: z.string().trim().min(1),
-        grain: z.string().trim().min(1),
-        additive: z.boolean(),
+        // Said by the person or suggested; without it the totals say what a row is
+        grain: z.string().trim().min(1).optional(),
+        additive: z.boolean().default(true),
         synonyms: z.array(z.string().trim().min(1)).default([]),
         caveats: z.array(z.string().trim().min(1)).default([]),
       })

@@ -56,7 +56,7 @@ const STEPS = [
   "Columnas",
   "Filtros",
   "Totales y orden",
-  "Nombre y significado",
+  "Nombre y descripción",
   "Guardar y publicar",
 ];
 const KIND_LABELS: Record<ColumnKind, string> = {
@@ -154,6 +154,10 @@ function ToolEditor({
   const [search, setSearch] = useState("");
   // Why the model could not describe the base, when it could not
   const [note, setNote] = useState<string | null>(null);
+  // The folded options of the last step, and the trial beside a saved tool
+  const [more, setMore] = useState(false);
+  const [trying, setTrying] = useState(false);
+  const [suggested, setSuggested] = useState(false);
   // Columns whose values are being read for their filter
   const [helping, setHelping] = useState<string[]>([]);
   // The description last filled in for the person, replaced when they pick another base
@@ -169,6 +173,43 @@ function ToolEditor({
       setAdvanced(saved.data.definition.base.kind === "query");
     }
   }, [saved.data]);
+
+  // The name and the other words are suggested once, when the last step opens with them empty
+  useEffect(() => {
+    if (step !== 5 || suggested || definition.meaning.definition.trim() === "") {
+      return;
+    }
+    if (name !== "" && definition.meaning.synonyms.length > 0) {
+      return;
+    }
+    setSuggested(true);
+    setBusy("suggest");
+    api<{ name: string | null; grain: string | null; synonyms: string[] }>("/admin/tools/suggest", {
+      method: "POST",
+      body: {
+        about: definition.meaning.definition.trim(),
+        columns: definition.columns.map((column) => column.name),
+        groups: definition.summary?.group_by,
+      },
+    })
+      .then((suggestion) => {
+        if (suggestion.name) {
+          setName((current) => current || (suggestion.name ?? ""));
+        }
+        setDefinition((current) => ({
+          ...current,
+          meaning: {
+            ...current.meaning,
+            grain: current.meaning.grain || suggestion.grain || current.meaning.grain,
+            synonyms:
+              current.meaning.synonyms.length > 0 ? current.meaning.synonyms : suggestion.synonyms,
+          },
+        }));
+      })
+      // Without a suggestion the person writes them; nothing else depends on it
+      .catch(() => undefined)
+      .finally(() => setBusy(null));
+  }, [step, suggested, name, definition]);
 
   // Every change drops what no longer fits, so what the form shows is what gets saved
   const change = (patch: Partial<Definition>) =>
@@ -325,9 +366,7 @@ function ToolEditor({
     (definition.summary?.aggregates ?? []).every(
       (aggregate) => aggregate.as !== "" && (aggregate.fn === "count" || aggregate.column),
     ),
-    NAME.test(name) &&
-      definition.meaning.definition.trim() !== "" &&
-      definition.meaning.grain.trim() !== "",
+    NAME.test(name) && definition.meaning.definition.trim() !== "",
   ];
   const reachable = (index: number) => ready.slice(0, index).every(Boolean);
   const canSave = ready.every(Boolean);
@@ -666,25 +705,8 @@ function ToolEditor({
                         </Checkbox.Label>
                       </Checkbox.Root>
                       <Badge variant="outline" size="sm">
-                        {column.kind}
+                        {KIND_LABELS[column.kind]}
                       </Badge>
-                      {picked && (
-                        <Input
-                          size="sm"
-                          maxW="xs"
-                          placeholder="Etiqueta (opcional)"
-                          value={picked.label ?? ""}
-                          onChange={(event) =>
-                            change({
-                              columns: definition.columns.map((item) =>
-                                item.name === column.name
-                                  ? { ...item, label: event.target.value }
-                                  : item,
-                              ),
-                            })
-                          }
-                        />
-                      )}
                     </HStack>
                   );
                 })}
@@ -1126,99 +1148,109 @@ function ToolEditor({
 
           {step === 5 && (
             <Section
-              title="¿Cómo se llama?"
-              hint="Es el nombre con que el modelo la llama: corto, que diga lo que hace, como ventas_por_zona."
-            >
-              <Field.Root required maxW="sm" invalid={name !== "" && !NAME.test(name)}>
-                <Field.Label>Nombre</Field.Label>
-                <Input
-                  value={name}
-                  disabled={!isNew}
-                  fontFamily="mono"
-                  placeholder="ventas_por_zona"
-                  onChange={(event) => setName(event.target.value)}
-                />
-                <Field.HelperText>
-                  Minúsculas, números y guion bajo; empieza con una letra.
-                </Field.HelperText>
-              </Field.Root>
-            </Section>
-          )}
-          {step === 5 && (
-            <Section
-              title="Qué significa"
-              hint="Lo lee el modelo antes de usarla: escríbelo como se lo explicarías a alguien nuevo. Ya trae la descripción de la tabla; ajústala a lo que devuelve la herramienta."
+              title="Nombre y descripción"
+              hint="El asistente ya propone ambos a partir de lo que armaste; cámbialos si no te convencen. El nombre es como la llama la IA y la descripción, lo que lee para decidir cuándo usarla."
             >
               <Stack gap={3}>
+                <Field.Root required maxW="sm" invalid={name !== "" && !NAME.test(name)}>
+                  <Field.Label>Nombre</Field.Label>
+                  <Input
+                    value={name}
+                    disabled={!isNew}
+                    fontFamily="mono"
+                    placeholder={busy === "suggest" ? "Sugiriendo…" : "ventas_por_zona"}
+                    onChange={(event) => setName(event.target.value)}
+                  />
+                  <Field.HelperText>
+                    Minúsculas, números y guion bajo; empieza con una letra.
+                  </Field.HelperText>
+                </Field.Root>
                 <Field.Root required>
                   <Field.Label>Qué devuelve</Field.Label>
                   <Textarea
-                    rows={2}
+                    rows={3}
                     value={definition.meaning.definition}
                     onChange={(event) =>
                       change({ meaning: { ...definition.meaning, definition: event.target.value } })
                     }
                   />
                 </Field.Root>
-                <HStack gap={3} align="end">
-                  <Field.Root required>
-                    <Field.Label>Qué es cada fila</Field.Label>
-                    <Input
-                      placeholder="una entrega, un día por ruta…"
-                      value={definition.meaning.grain}
-                      onChange={(event) =>
-                        change({ meaning: { ...definition.meaning, grain: event.target.value } })
+                {definition.meaning.synonyms.length > 0 && (
+                  <Text fontSize="sm" color="fg.muted">
+                    También la usará cuando pidan: {definition.meaning.synonyms.join(", ")}.
+                  </Text>
+                )}
+                <Button size="xs" variant="ghost" alignSelf="start" onClick={() => setMore(!more)}>
+                  {more ? <FiMinus /> : <FiPlus />} Más opciones
+                </Button>
+                {more && (
+                  <Stack gap={3} ps={3} borderStartWidth="2px">
+                    <Field.Root>
+                      <Field.Label>Qué es cada fila</Field.Label>
+                      <Input
+                        placeholder="si lo dejas vacío, se deduce de los totales"
+                        value={definition.meaning.grain ?? ""}
+                        onChange={(event) =>
+                          change({ meaning: { ...definition.meaning, grain: event.target.value } })
+                        }
+                      />
+                    </Field.Root>
+                    <Switch.Root
+                      checked={definition.meaning.additive}
+                      onCheckedChange={(details) =>
+                        change({ meaning: { ...definition.meaning, additive: details.checked } })
                       }
-                    />
-                  </Field.Root>
-                  <Switch.Root
-                    checked={definition.meaning.additive}
-                    onCheckedChange={(details) =>
-                      change({ meaning: { ...definition.meaning, additive: details.checked } })
-                    }
-                    pb={2}
-                  >
-                    <Switch.HiddenInput />
-                    <Switch.Control />
-                    <Switch.Label>Sus cantidades se pueden sumar</Switch.Label>
-                  </Switch.Root>
-                </HStack>
-                <Field.Root>
-                  <Field.Label>Otras formas de llamarlo</Field.Label>
-                  <Input
-                    placeholder="separadas por comas"
-                    value={definition.meaning.synonyms.join(", ")}
-                    onChange={(event) =>
-                      change({
-                        meaning: {
-                          ...definition.meaning,
-                          synonyms: event.target.value.split(",").map((word) => word.trimStart()),
-                        },
-                      })
-                    }
-                  />
-                </Field.Root>
-                <Field.Root>
-                  <Field.Label>Cuidados al leerlo</Field.Label>
-                  <Textarea
-                    rows={2}
-                    placeholder="uno por línea"
-                    value={definition.meaning.caveats.join("\n")}
-                    onChange={(event) =>
-                      change({
-                        meaning: { ...definition.meaning, caveats: event.target.value.split("\n") },
-                      })
-                    }
-                  />
-                </Field.Root>
-                <Field.Root maxW="sm">
-                  <Field.Label>Zona horaria de sus fechas</Field.Label>
-                  <TimeZoneSelect
-                    value={definition.time_zone ?? ""}
-                    onChange={(zone) => change({ time_zone: zone || undefined })}
-                    inherited="la fuente"
-                  />
-                </Field.Root>
+                    >
+                      <Switch.HiddenInput />
+                      <Switch.Control />
+                      <Switch.Label>
+                        Sus cantidades se pueden sumar entre filas (apágalo para saldos o
+                        porcentajes)
+                      </Switch.Label>
+                    </Switch.Root>
+                    <Field.Root>
+                      <Field.Label>Otras formas de pedirla</Field.Label>
+                      <Input
+                        placeholder="separadas por comas"
+                        value={definition.meaning.synonyms.join(", ")}
+                        onChange={(event) =>
+                          change({
+                            meaning: {
+                              ...definition.meaning,
+                              synonyms: event.target.value
+                                .split(",")
+                                .map((word) => word.trimStart()),
+                            },
+                          })
+                        }
+                      />
+                    </Field.Root>
+                    <Field.Root>
+                      <Field.Label>Cuidados al leerla</Field.Label>
+                      <Textarea
+                        rows={2}
+                        placeholder="uno por línea, por ejemplo: los montos no incluyen IVA"
+                        value={definition.meaning.caveats.join("\n")}
+                        onChange={(event) =>
+                          change({
+                            meaning: {
+                              ...definition.meaning,
+                              caveats: event.target.value.split("\n"),
+                            },
+                          })
+                        }
+                      />
+                    </Field.Root>
+                    <Field.Root maxW="sm">
+                      <Field.Label>Zona horaria de sus fechas</Field.Label>
+                      <TimeZoneSelect
+                        value={definition.time_zone ?? ""}
+                        onChange={(zone) => change({ time_zone: zone || undefined })}
+                        inherited="la fuente"
+                      />
+                    </Field.Root>
+                  </Stack>
+                )}
               </Stack>
             </Section>
           )}
@@ -1251,6 +1283,17 @@ function ToolEditor({
                     : `Se puede pedir por ${definition.filters.map((filter) => `${filter.column}${filter.required ? " (obligatorio)" : ""}`).join(", ")}.`}
                 </Text>
               </Stack>
+              {status === "published" && !dirty && (
+                <Text fontSize="sm" color="fg.success" mt={3}>
+                  Publicada: ya está en el Chat para quien tenga el permiso de la fuente. Pregúntale
+                  algo que la use.
+                </Text>
+              )}
+              {!isNew && status && (
+                <Button size="xs" variant="ghost" mt={3} onClick={() => setTrying(!trying)}>
+                  {trying ? "Ocultar la prueba" : "Probar antes de publicar (opcional)"}
+                </Button>
+              )}
               {!canSave && (
                 <Text fontSize="sm" color="fg.error" mt={3}>
                   Falta completar:{" "}
@@ -1342,7 +1385,7 @@ function ToolEditor({
           )}
         </Stack>
       </fieldset>
-      {!isNew && status && (
+      {!isNew && status && trying && (
         <Box w={{ base: "full", xl: "420px" }} flexShrink={0}>
           <ToolLab
             name={name}

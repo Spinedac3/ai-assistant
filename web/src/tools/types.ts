@@ -93,7 +93,7 @@ export interface Definition {
   time_zone?: string;
   meaning: {
     definition: string;
-    grain: string;
+    grain?: string;
     additive: boolean;
     synonyms: string[];
     caveats: string[];
@@ -231,6 +231,7 @@ export function cleanDefinition(definition: Definition): Definition {
     time_zone: text(definition.time_zone),
     meaning: {
       ...definition.meaning,
+      grain: text(definition.meaning.grain),
       synonyms: definition.meaning.synonyms.map((word) => word.trim()).filter(Boolean),
       caveats: definition.meaning.caveats.map((line) => line.trim()).filter(Boolean),
     },

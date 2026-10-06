@@ -230,6 +230,27 @@ export function outputSchemaOf(tool: CreatedTool): JsonSchema {
 }
 
 /**
+ * Says what one row of a tool is: as the person put it, or what its totals are grouped by
+ *
+ * @param   spec  Tool definition
+ *
+ * @return  What a row is
+ */
+function grainOf(spec: ToolDefinitionSpec): string {
+  if (spec.meaning.grain) {
+    return spec.meaning.grain;
+  }
+  const summary = spec.summary;
+  if (!summary) {
+    return "un registro de lo que lee la herramienta";
+  }
+
+  return summary.group_by.length > 0
+    ? `el total de cada ${summary.group_by.join(" y ")}`
+    : "el total de todo lo filtrado";
+}
+
+/**
  * Writes what the model reads to decide when to call a created tool and how to read it
  *
  * @param   tool      Created tool
@@ -247,7 +268,7 @@ export function descriptionOf(tool: CreatedTool, timeZone: string): string {
     .join(", ");
   const parts = [
     meaning.definition,
-    `Cada fila es: ${meaning.grain}. Columnas: ${columns}.`,
+    `Cada fila es: ${grainOf(tool.spec)}. Columnas: ${columns}.`,
     ...(tool.spec.summary?.with_detail
       ? [
           "filas trae los totales; detalle trae cada registro detrás de ellos, con las columnas " +

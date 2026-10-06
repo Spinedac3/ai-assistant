@@ -11,7 +11,14 @@ import {
 } from "../chat/rateLimit.js";
 import { findConversation } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
-import { explainPrompt, filterPrompt, listRelations, readExplanation } from "../creator/catalog.js";
+import {
+  explainPrompt,
+  filterPrompt,
+  listRelations,
+  readExplanation,
+  readSuggestion,
+  suggestPrompt,
+} from "../creator/catalog.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
 import { type BaseColumn, describeBase, normalizeRows } from "../creator/columns.js";
 import {
@@ -105,6 +112,14 @@ const filterHelpBody = z
   .strict();
 
 type FilterValue = string | number | boolean;
+
+const suggestBody = z
+  .object({
+    about: z.string().trim().min(1).max(2_000),
+    columns: z.array(columnName).min(1).max(200),
+    groups: z.array(columnName).max(200).optional(),
+  })
+  .strict();
 const saveBody = z
   .object({
     source: z.string().regex(SOURCE_CODE),
@@ -600,6 +615,45 @@ export default async function toolsRoutes(
           note: "No se pudo escribir la explicación ahora; escríbela tú",
         },
       };
+    }
+  });
+
+  // The last step's suggestions: a name, what a row is and other words for it; the person edits
+  // them before saving, and nothing here reads the source
+  app.post("/admin/tools/suggest", guard, async (request, reply) => {
+    const body = suggestBody.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "invalid_body", message: body.error.issues[0]?.message });
+    }
+    const ask = options.ask;
+    if (!ask) {
+      return { ok: true, data: { name: null, grain: null, synonyms: [] } };
+    }
+    const userId = request.authUser?.id;
+    let reservation: Reservation | null = null;
+    try {
+      // A call to the model counts as a message of the person, like a chat turn
+      const limits = options.trial?.chat.limits;
+      if (limits && userId !== undefined) {
+        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
+      }
+      const { about, columns, groups } = body.data;
+      return {
+        ok: true,
+        data: readSuggestion(await ask(suggestPrompt(about, columns, groups ?? null))),
+      };
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
+      }
+      if (reservation && userId !== undefined) {
+        await refundMessage(db, userId, reservation).catch(() => undefined);
+      }
+      request.log.warn({ err: error }, "tool suggestion failed");
+      // The person fills them in; nothing is lost
+      return { ok: true, data: { name: null, grain: null, synonyms: [] } };
     }
   });
 
