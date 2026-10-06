@@ -91,14 +91,14 @@ export async function listRelations(
 /**
  * Asks the model for a short description of a table or view a person is about to build a tool on
  *
- * @param   name     Name of the table or view
+ * @param   name     Name of the table or view, or null for a pasted query
  * @param   columns  Its columns and what each holds
  * @param   samples  A few values of each column
  *
  * @return  The prompt
  */
 export function explainPrompt(
-  name: string,
+  name: string | null,
   columns: BaseColumn[],
   samples: Record<string, string[]>,
 ): string {
@@ -113,12 +113,12 @@ export function explainPrompt(
   // still valid JSON, no value can close the block of data it sits in
   return removeHidden(
     [
-      "A person who is not a programmer is choosing a table of a database to build a tool on.",
-      "Describe in Spanish, in one or two plain sentences, what this table holds and what one row is.",
+      "A person who is not a programmer is choosing what a tool reads from a database.",
+      "Describe in Spanish, in one or two plain sentences, what it holds and what one row is.",
       "Name it by what it means for the business, not by its columns. Reply with the description only.",
       "",
-      "Table:",
-      JSON.stringify(name),
+      name === null ? "It is a query; its SQL is not shown." : "Table or view:",
+      ...(name === null ? [] : [JSON.stringify(name)]),
       "",
       "Columns and what each holds:",
       JSON.stringify(columns),

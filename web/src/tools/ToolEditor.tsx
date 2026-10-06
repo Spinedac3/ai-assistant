@@ -10,6 +10,7 @@ import {
   IconButton,
   Input,
   NativeSelect,
+  SegmentGroup,
   Spinner,
   Stack,
   Switch,
@@ -424,9 +425,37 @@ function ToolEditor({
 
           {step === 1 && (
             <Section
-              title="¿Qué tabla o vista lee?"
-              hint="Estas son las tablas y vistas que la fuente deja leer. Elige una para ver qué guarda y sus columnas."
+              title="¿Qué lee?"
+              hint={
+                advanced
+                  ? "Escribe una consulta SELECT para unir tablas o calcular columnas. Sin ORDER BY: el orden se elige en «Totales y orden»."
+                  : "Estas son las tablas y vistas que la fuente deja leer. Elige una para ver qué guarda y sus columnas."
+              }
             >
+              <SegmentGroup.Root
+                size="sm"
+                mb={3}
+                value={advanced ? "query" : "table"}
+                onValueChange={(details) => {
+                  const query = details.value === "query";
+                  if (query === advanced) {
+                    return;
+                  }
+                  setAdvanced(query);
+                  setBaseColumns([]);
+                  change({
+                    base: query ? { kind: "query", sql: "" } : { kind: "table", name: "" },
+                  });
+                }}
+              >
+                <SegmentGroup.Indicator />
+                <SegmentGroup.Items
+                  items={[
+                    { value: "table", label: "Elegir una tabla o vista" },
+                    { value: "query", label: "Escribir una consulta (avanzado)" },
+                  ]}
+                />
+              </SegmentGroup.Root>
               {!advanced ? (
                 <Stack gap={3}>
                   <Input
@@ -492,7 +521,7 @@ function ToolEditor({
                     fontFamily="mono"
                     fontSize="sm"
                     rows={6}
-                    placeholder="select ... from ...  (sin ORDER BY; el orden se elige en «Totales y orden»)"
+                    placeholder="select p.fecha, p.total, c.zona from pedidos p join clientes c on c.id = p.cliente_id"
                     value={definition.base.kind === "query" ? definition.base.sql : ""}
                     onChange={(event) =>
                       change({ base: { kind: "query", sql: event.target.value } })
@@ -510,23 +539,6 @@ function ToolEditor({
                   </Button>
                 </Stack>
               )}
-              <Button
-                mt={3}
-                size="xs"
-                variant="plain"
-                disabled={!isNew}
-                onClick={() => {
-                  setAdvanced(!advanced);
-                  setBaseColumns([]);
-                  change({
-                    base: advanced ? { kind: "table", name: "" } : { kind: "query", sql: "" },
-                  });
-                }}
-              >
-                {advanced
-                  ? "Volver a elegir una tabla o vista"
-                  : "Avanzado: pegar una consulta SQL"}
-              </Button>
             </Section>
           )}
           {step === 1 && busy === "columns" && (

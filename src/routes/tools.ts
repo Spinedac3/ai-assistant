@@ -438,7 +438,7 @@ export default async function toolsRoutes(
       if (limits && userId !== undefined) {
         reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
       }
-      const name = base.kind === "table" ? base.name : "consulta pegada";
+      const name = base.kind === "table" ? base.name : null;
       const description = readExplanation(await ask(explainPrompt(name, columns, samples)));
       return { ok: true, data: { columns, description } };
     } catch (error) {
