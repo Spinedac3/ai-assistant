@@ -95,7 +95,7 @@ const mcpUrl = `http://127.0.0.1:${env.PORT}/mcp`;
 
 // One call to the chat's model, read on each call as the chat reads it; used by the guide of the
 // creator and to read a PDF attached to the chat
-const askModel = async (prompt: string, attachment?: Buffer) =>
+const askModel = async (prompt: string, attachment?: Buffer | Buffer[]) =>
   askOnce(
     {
       cli: chat.cli,

@@ -11,7 +11,6 @@ import {
   Spinner,
   Stack,
   Text,
-  Textarea,
 } from "@chakra-ui/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -238,14 +237,13 @@ function ReviewButton({ id, onPublished }: { id: string; onPublished: (job: numb
     .filter((area): area is string => Boolean(area));
   const [open, setOpen] = useState(false);
   const [header, setHeader] = useState<Header | null>(null);
+  // The document as converted; it is read here and published as it is
   const [markdown, setMarkdown] = useState("");
-  const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const start = async () => {
     setError(null);
-    setEditing(false);
     try {
       const found = await api<Conversion>(`/docs/conversions/${id}`);
       setHeader(
@@ -394,42 +392,27 @@ function ReviewButton({ id, onPublished }: { id: string; onPublished: (job: numb
                       />
                     </Field.Root>
                   </HStack>
-                  <HStack justify="space-between">
-                    <Text fontWeight="medium" fontSize="sm">
-                      Contenido convertido
-                    </Text>
-                    <Button size="xs" variant="outline" onClick={() => setEditing(!editing)}>
-                      {editing ? "Ver como se lee" : "Editar el Markdown"}
-                    </Button>
-                  </HStack>
-                  {editing ? (
-                    <Textarea
-                      fontFamily="mono"
-                      fontSize="xs"
-                      rows={18}
-                      value={markdown}
-                      onChange={(event) => setMarkdown(event.target.value)}
-                    />
-                  ) : (
-                    <Box
-                      borderWidth="1px"
-                      rounded="md"
-                      p={4}
-                      maxH="50vh"
-                      overflow="auto"
-                      fontSize="sm"
-                      css={{
-                        "& table": { borderCollapse: "collapse" },
-                        "& td, & th": {
-                          border: "1px solid",
-                          borderColor: "border",
-                          padding: "2px 6px",
-                        },
-                      }}
-                    >
-                      <Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown>
-                    </Box>
-                  )}
+                  <Text fontWeight="medium" fontSize="sm">
+                    Así quedó el documento
+                  </Text>
+                  <Box
+                    borderWidth="1px"
+                    rounded="md"
+                    p={4}
+                    maxH="50vh"
+                    overflow="auto"
+                    fontSize="sm"
+                    css={{
+                      "& table": { borderCollapse: "collapse" },
+                      "& td, & th": {
+                        border: "1px solid",
+                        borderColor: "border",
+                        padding: "2px 6px",
+                      },
+                    }}
+                  >
+                    <Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown>
+                  </Box>
                   {error && (
                     <Text role="alert" color="fg.error" fontSize="sm">
                       {error}

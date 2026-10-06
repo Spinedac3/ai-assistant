@@ -1,14 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, lte } from "drizzle-orm";
-import { PDFDocument } from "pdf-lib";
 import type { Database } from "../db/client.js";
 import { pdfConversions } from "../db/schema.js";
 import { promptData, removeHidden } from "../lib/hiddenText.js";
+import { openPdf, PAGES_PER_READ, pagesOf } from "../lib/pdf.js";
 import { DOC_CODE } from "./document.js";
 import { isMissing, type StorageConfig, s3Client } from "./storage.js";
 
-// Pages written per call: enough to keep the calls few, few enough for one answer to hold them
-export const PAGES_PER_CALL = 10;
 // A longer file is several documents, and reviewing it whole is no review
 export const MAX_PAGES = 300;
 // Writing ten pages reads them in one or two turns and answers; past this the call is stuck
@@ -44,43 +42,6 @@ export interface ConverterDependencies {
  */
 function pdfKey(id: string): string {
   return `conversions/${id}.pdf`;
-}
-
-/**
- * Opens a PDF to count and split its pages; an encrypted or broken file cannot be converted
- *
- * @param   pdf  File
- *
- * @return  The document, or null when it cannot be opened
- */
-export async function openPdf(pdf: Buffer): Promise<PDFDocument | null> {
-  try {
-    const document = await PDFDocument.load(pdf, { updateMetadata: false });
-    // A damaged file can open with no pages at all, which leaves nothing to convert
-    return document.getPageCount() > 0 ? document : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Cuts some pages out of a PDF into a file of their own, so the model reads them whole: reading
- * single pages of a large file needs a renderer installed on the server
- *
- * @param   source  Whole document
- * @param   from    First page, counted from 1
- * @param   to      Last page
- *
- * @return  The file with those pages
- */
-export async function pagesOf(source: PDFDocument, from: number, to: number): Promise<Buffer> {
-  const part = await PDFDocument.create();
-  const indices = Array.from({ length: to - from + 1 }, (_, offset) => from - 1 + offset);
-  for (const page of await part.copyPages(source, indices)) {
-    part.addPage(page);
-  }
-
-  return Buffer.from(await part.save());
 }
 
 /**
@@ -288,8 +249,8 @@ export class PdfConverter {
       }
       const last = Math.min(source.getPageCount(), MAX_PAGES);
       const parts: string[] = [];
-      for (let from = 1; from <= last; from += PAGES_PER_CALL) {
-        const to = Math.min(from + PAGES_PER_CALL - 1, last);
+      for (let from = 1; from <= last; from += PAGES_PER_READ) {
+        const to = Math.min(from + PAGES_PER_READ - 1, last);
         const answer = await this.deps.convert(
           pagesPrompt(from, to),
           await pagesOf(source, from, to),

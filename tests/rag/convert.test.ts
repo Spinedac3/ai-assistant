@@ -1,13 +1,7 @@
 import { PDFDocument } from "pdf-lib";
 import { describe, expect, it } from "vitest";
-import {
-  headerPrompt,
-  openPdf,
-  pagesOf,
-  pagesPrompt,
-  readHeader,
-  readPages,
-} from "../../src/rag/convert.js";
+import { openPdf, pagesOf, splitPdf } from "../../src/lib/pdf.js";
+import { headerPrompt, pagesPrompt, readHeader, readPages } from "../../src/rag/convert.js";
 import { parseDocument, writeDocument } from "../../src/rag/document.js";
 
 /**
@@ -36,6 +30,22 @@ describe("pdf conversion", () => {
     expect(source?.getPageCount()).toBe(23);
     expect(part?.getPageCount()).toBe(3);
     expect(await openPdf(Buffer.from("%PDF-1.7 no es un pdf"))).toBeNull();
+  });
+
+  it("splits a long PDF into files the CLI reads whole, and leaves a short one as it is", async () => {
+    // Performs the test.
+    const long = await splitPdf(await pdfWith(23));
+    const short = await pdfWith(4);
+    const kept = await splitPdf(short);
+
+    // Performs assertions.
+    expect(long.map((part) => [part.from, part.to])).toEqual([
+      [1, 10],
+      [11, 20],
+      [21, 23],
+    ]);
+    expect((await openPdf(long[2]?.file ?? Buffer.alloc(0)))?.getPageCount()).toBe(3);
+    expect(kept).toEqual([{ file: short, from: 1, to: 4 }]);
   });
 
   it("asks for the pages numbered as in the original", () => {
