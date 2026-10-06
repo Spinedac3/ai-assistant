@@ -19,6 +19,7 @@ import { purgeIntents } from "./mcp/intents.js";
 import { CapabilityRanker } from "./mcp/ranking.js";
 import { smtpMailer } from "./notices/mailer.js";
 import { purgeNotices, startNoticeWorker } from "./notices/outbox.js";
+import { CONVERT_LIMITS, PdfConverter } from "./rag/convert.js";
 import { startWorker } from "./rag/jobs.js";
 import { indexFrom, s3Config, storageFrom } from "./rag/services.js";
 import type { Probe } from "./routes/diagnostics.js";
@@ -104,6 +105,26 @@ const askModel = async (prompt: string, attachment?: Buffer) =>
     prompt,
     attachment,
   );
+// A PDF uploaded alone is read by the same model, ten pages per call, to become a document to review
+const converter = new PdfConverter({
+  db: database.db,
+  storage: s3Config(env),
+  convert: async (prompt, pdf) =>
+    askOnce(
+      {
+        cli: chat.cli,
+        model: (await readSetting(database.db, "chat.model")) ?? env.CHAT_MODEL,
+        workspacesDir: chat.workspacesDir,
+      },
+      prompt,
+      pdf,
+      CONVERT_LIMITS,
+    ),
+  ask: (prompt) => askModel(prompt),
+  logger: { error: (details, message) => app.log.error(details, message) },
+});
+// A conversion the last run of the server left halfway will never finish
+await converter.recover();
 const uploads = new Uploads();
 registry.register(readPdfTool({ uploads, ask: askModel }));
 
@@ -173,7 +194,7 @@ const app = await buildApp({
       ranker: new CapabilityRanker(index.embedder),
     },
   },
-  docs: { index, storage },
+  docs: { index, storage, converter },
   sources: { secrets, onSaved: (code, retargeted) => createdTools.sourceChanged(code, retargeted) },
   tools: {
     secrets,
@@ -221,6 +242,10 @@ const purgeExports = () =>
     storage
       .purgeParts(new Date(Date.now() - 86_400_000))
       .catch((error) => app.log.error({ err: error }, "document part purge failed")),
+    // A PDF nobody published in a week is not coming back to be reviewed
+    converter
+      .purge(new Date(Date.now() - 7 * 86_400_000))
+      .catch((error) => app.log.error({ err: error }, "pdf conversion purge failed")),
   ]);
 void purgeExports();
 const exportsTimer = setInterval(purgeExports, 3_600_000);

@@ -26,6 +26,7 @@ const ATTACHMENT_TIMEOUT_MS = 180_000;
  * @param   deps        CLI, model and where the call works
  * @param   prompt      Question, sent through stdin
  * @param   attachment  A file the model reads to answer
+ * @param   limits      Turns and time for a longer job than reading a file to answer
  *
  * @return  The text of the answer
  */
@@ -33,6 +34,7 @@ export async function askOnce(
   deps: OneShotDependencies,
   prompt: string,
   attachment?: Buffer,
+  limits?: { maxTurns: number; timeoutMs: number },
 ): Promise<string> {
   // The chat creates this folder on its first turn; a call may come before any
   await mkdir(deps.workspacesDir, { recursive: true });
@@ -46,7 +48,7 @@ export async function askOnce(
     }
     const args = cliArgs({
       model: deps.model,
-      maxTurns: attachment ? ATTACHMENT_TURNS : 1,
+      maxTurns: limits?.maxTurns ?? (attachment ? ATTACHMENT_TURNS : 1),
       mcpConfigPath,
       // Read stays blocked unless there is a file, and then it reaches that file alone
       disallowedTools: attachment
@@ -65,7 +67,9 @@ export async function askOnce(
       args,
       prompt,
       workspace,
-      AbortSignal.timeout(attachment ? ATTACHMENT_TIMEOUT_MS : ONE_SHOT_TIMEOUT_MS),
+      AbortSignal.timeout(
+        limits?.timeoutMs ?? (attachment ? ATTACHMENT_TIMEOUT_MS : ONE_SHOT_TIMEOUT_MS),
+      ),
     );
 
     let answer: string | null = null;
