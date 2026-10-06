@@ -14,6 +14,8 @@ export interface RunInfo {
   registry?: ToolRegistry;
   // Calls of a trial are audited apart, so they never count as real use
   trial?: boolean;
+  // Kept in the database too, for a run of another system that must outlive a restart
+  persisted?: boolean;
 }
 
 // In memory and keyed by the token, never by the person: deducing the run from the user once handed
@@ -27,6 +29,7 @@ const runs = new Map<string, RunInfo>();
  * @param   userId      Person the process acts for
  * @param   ttlMinutes  Lifetime
  * @param   info        Tools and conversation the token is bound to
+ * @param   clientId    Who asked for it: this server, or a machine client
  *
  * @return  The token in clear
  */
@@ -35,14 +38,16 @@ export async function mintRunToken(
   userId: number,
   ttlMinutes: number,
   info: RunInfo,
+  clientId = RUN_CLIENT_ID,
 ): Promise<string> {
   const token = generateToken("ast");
 
   await db.insert(accessTokens).values({
     userId,
-    clientId: RUN_CLIENT_ID,
+    clientId,
     accessTokenHash: hashToken(token),
     kind: "run",
+    runTools: info.persisted && info.tools !== null ? [...info.tools] : null,
     accessExpiresAt: sql`now() + make_interval(mins => ${ttlMinutes})`,
   });
   runs.set(token, {
