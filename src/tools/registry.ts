@@ -352,6 +352,7 @@ export class ToolRegistry {
       context.origin === "mcp" ? EXTERNAL_MAX_BYTES : CHAT_MAX_BYTES,
       this.archiveFor(name, caller, context.origin),
       target ? filterHint(target) : "",
+      result.main,
     );
     if (!capped.ok) {
       return this.fail(name, args, caller, context, started, "result_too_large", capped.message);

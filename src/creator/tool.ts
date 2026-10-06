@@ -368,6 +368,8 @@ export function toolFrom(
             total_detalle: detail.length,
           },
           rows: detail.length,
+          // The totals stay whole in the answer; the detail behind them is what goes to the Excel
+          main: "filas",
         };
       } catch (error) {
         if (error instanceof TooManyRowsError) {

@@ -245,4 +245,22 @@ describe("result cap", () => {
     expect(sheet.columns).toEqual(["id", "valor"]);
     expect(sheet.rows).toEqual([[1], [undefined, 7], [undefined, "texto"]]);
   });
+
+  it("keeps whole the list the tool names, cuts the larger one and leads the file with it", async () => {
+    // Performs the test.
+    const { archive, saved } = recordingArchive();
+    const data = { filas: rows(40, 60), detalle: rows(500) };
+    const capped = await capResult(data, 40_000, archive, "", "filas");
+    if (!capped.ok) {
+      throw new Error(capped.message);
+    }
+
+    // Performs assertions.
+    expect(capped.data.filas).toEqual(data.filas);
+    expect((capped.data.detalle as unknown[]).length).toBeLessThan(500);
+    expect(saved[0]?.map((sheet) => [sheet.name, sheet.rows.length])).toEqual([
+      ["filas", 40],
+      ["detalle", 500],
+    ]);
+  });
 });

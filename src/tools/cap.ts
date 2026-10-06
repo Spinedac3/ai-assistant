@@ -66,6 +66,7 @@ export function sheetOf(name: string, list: unknown[]): Sheet {
  * @param   maxBytes  Size limit
  * @param   archive   Where the full lists can go, if anywhere
  * @param   hint      Added to the note of a cut result, and measured with it
+ * @param   prefer    The list to keep the most of, when the tool names one; otherwise the largest
  *
  * @return  The result that fits, or why it cannot
  */
@@ -74,6 +75,7 @@ export async function capResult(
   maxBytes: number,
   archive: Archive | null,
   hint = "",
+  prefer?: string,
 ): Promise<Capped> {
   if (size(data) <= maxBytes) {
     return { ok: true, data, truncated: false };
@@ -83,7 +85,7 @@ export async function capResult(
     .filter((entry): entry is [string, unknown[]] => Array.isArray(entry[1]))
     .map(([name, list]) => ({ name, list, bytes: size(list) }))
     .sort((a, b) => b.bytes - a.bytes);
-  const main = lists[0];
+  const main = lists.find((entry) => entry.name === prefer) ?? lists[0];
   if (!main) {
     return {
       ok: false,
@@ -156,7 +158,7 @@ export async function capResult(
   // Secondary heavy lists give way first, then the main one keeps all it can, found by halves,
   // and the small summary lists last
   const shrink = () => {
-    for (const entry of heavy.slice(1)) {
+    for (const entry of heavy.filter((item) => item !== main)) {
       if (!fits()) {
         keep.set(entry.name, 0);
       }
@@ -175,7 +177,7 @@ export async function capResult(
       }
       keep.set(main.name, low);
     }
-    for (const entry of lists.filter((item) => item.bytes <= SMALL_LIST_BYTES)) {
+    for (const entry of lists.filter((item) => item.bytes <= SMALL_LIST_BYTES && item !== main)) {
       if (!fits()) {
         keep.set(entry.name, 0);
       }
@@ -198,9 +200,9 @@ export async function capResult(
   if (saved && archive) {
     // The small lists go along as sheets of their own, so the file has the totals beside the detail
     const small = lists.filter((entry) => entry.bytes <= SMALL_LIST_BYTES && entry.list.length > 0);
-    saved = await archive.save(
-      [...heavy, ...small].map((entry) => sheetOf(entry.name, entry.list)),
-    );
+    // The main list leads the file, whatever its size
+    const sheets = [main, ...[...heavy, ...small].filter((entry) => entry !== main)];
+    saved = await archive.save(sheets.map((entry) => sheetOf(entry.name, entry.list)));
     shrink();
     // A real link longer than the room kept for it can still push the result over
     if (!fits()) {
