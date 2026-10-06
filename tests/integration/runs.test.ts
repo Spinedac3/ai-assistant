@@ -250,11 +250,22 @@ describe("run tokens for another system", () => {
         headers: { authorization: auth },
         payload: { token: value },
       });
+    // A session of a person whose client name happens to match is still not a run of the factory
+    const session = generateToken("ast");
+    await database.db.insert(accessTokens).values({
+      userId: ownerId,
+      clientId: "agent-factory",
+      accessTokenHash: hashToken(session),
+      kind: "oauth",
+      accessExpiresAt: sql`now() + interval '10 minutes'`,
+    });
+    const ofASession = await revoke(session, basic("agent-factory"));
     const byOther = await revoke(token, basic("other-system"));
     const ofTheChat = await revoke(chatToken, basic("agent-factory"));
     const byOwner = await revoke(token, basic("agent-factory"));
 
     // Performs assertions.
+    expect(ofASession.statusCode).toBe(404);
     expect(byOther.statusCode).toBe(404);
     expect(ofTheChat.statusCode).toBe(404);
     expect(byOwner.statusCode).toBe(200);
