@@ -41,7 +41,7 @@ const fileSchema = z
 export function declareMachineClient(listPath: string, clientId: string, rotate: boolean): string {
   if (!MACHINE_CLIENT_ID.test(clientId) || clientId === RUN_CLIENT_ID) {
     throw new Error(
-      "El cliente va en minúsculas, números, - o _, y no puede llamarse internal-run",
+      `Uso: pnpm machine:create <cliente> [--rotate]; el cliente va en minúsculas, números, - o _, y no puede llamarse ${RUN_CLIENT_ID}`,
     );
   }
   const list = existsSync(listPath)
