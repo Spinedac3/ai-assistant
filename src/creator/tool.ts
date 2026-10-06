@@ -87,11 +87,17 @@ function filterText(filter: ToolDefinitionSpec["filters"][number], kind: ColumnK
   const listed =
     filter.values && VALUE_OPS.has(filter.op)
       ? ` Valores posibles: ${filter.values
-          .map((item) => (item.meaning ? `${item.value} (${item.meaning})` : String(item.value)))
+          .map((item) =>
+            item.meaning
+              ? `${JSON.stringify(item.value)} (${item.meaning})`
+              : JSON.stringify(item.value),
+          )
           .join(", ")}.`
       : "";
   const examples =
-    !listed && filter.examples ? ` Ejemplos reales: ${filter.examples.join(", ")}.` : "";
+    !listed && filter.examples
+      ? ` Ejemplos reales: ${filter.examples.map((value) => JSON.stringify(value)).join(", ")}.`
+      : "";
   const omitted = filter.required ? "" : ` Si se omite, no se filtra por ${filter.column}.`;
 
   return `${what[filter.op]}${day}${relative}${listed}${examples}${own}${omitted}`;

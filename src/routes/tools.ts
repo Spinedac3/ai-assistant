@@ -115,6 +115,9 @@ const filterHelpBody = z
 
 type FilterValue = string | number | boolean;
 
+// A value longer than this is free text, never one of a closed list
+const MAX_LISTED_CHARS = 60;
+
 const totalsBody = z
   .object({
     source: z.string().regex(SOURCE_CODE),
@@ -581,11 +584,13 @@ export default async function toolsRoutes(
 
     const { kind, values } = read;
     // A closed list makes sense for a few texts or numbers a person picks one of
+    // Long texts are not categories, and they would reach every model reading the tool
     const closed =
       VALUE_OPS.has(body.op) &&
       (kind === "text" || kind === "number") &&
       values.length > 0 &&
-      values.length <= MAX_FILTER_VALUES;
+      values.length <= MAX_FILTER_VALUES &&
+      values.every((value) => String(value).length <= MAX_LISTED_CHARS);
     const sorted = [...values].sort((a, b) =>
       typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)),
     );
