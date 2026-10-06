@@ -85,7 +85,10 @@ export function ExportActions({ path }: { path: string }) {
     }
     const response = await request(`${path}/preview`);
     if (!response.ok) {
-      setProblem("La vista previa ya no está disponible; descárgalo");
+      // Files made before previews existed, or already expired, have none
+      setProblem(
+        "Este archivo no tiene vista previa (se generó antes de que existiera o ya venció). Puedes descargarlo o pedir los datos de nuevo.",
+      );
       return;
     }
     setPreview((await response.json()) as Preview);
