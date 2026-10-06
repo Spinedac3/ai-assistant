@@ -46,7 +46,7 @@ fails when the exemplar named here stops scoring best. The criteria live in
 
 | Piece | Exemplar | What makes it one |
 |---|---|---|
-| Native tool | `src/tools/native/readPdf.ts` | Its own test, exported snake_case name, `additionalProperties: false`, failures as a status |
+| Native tool | `src/tools/native/readPdf.ts` | Its own test, exported snake_case name, `additionalProperties: false`, failures as `{ ok: false, error, message }` |
 | Route module | `src/routes/sources.ts` | Its own integration test, a permission on every route, bodies through `safeParse`, errors as `{ ok, error, message }` |
 | Model call | `src/creator/catalog.ts` | Its own test, data passed with `promptData`, the answer read with `jsonIn` / `answerText` |
 

@@ -68,7 +68,11 @@ export const PIECES: Piece[] = [
       [3, tested, "has its own test"],
       [2, (file) => /additionalProperties: false/.test(file.text), "refuses unknown input"],
       [2, (file) => /export const [A-Z_]+ = "[a-z_]+"/.test(file.text), "exports its name"],
-      [1, (file) => /status: "/.test(file.text), "answers a failure as a status, not a throw"],
+      [
+        1,
+        (file) => /ok: false,\s*error: "/.test(file.text),
+        "answers a failure as ok, error and message, not a throw",
+      ],
       [1, small, "no function too long to read at once"],
     ],
   },
