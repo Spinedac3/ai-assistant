@@ -437,4 +437,181 @@ describe("tool creator", () => {
     expect(failed).toMatchObject({ status: 502, body: { error: "guide_failed" } });
     expect(notAllowed.status).toBe(404);
   });
+
+  it("offers the tables and views each reader may read, with their comments", async () => {
+    // Performs the test.
+    const found: Record<string, unknown> = {};
+    for (const engine of available) {
+      const listed = await api("GET", `/admin/tools/relations?source=demo-${engine}`);
+      const byName = new Map(
+        (
+          listed.body.data.relations as Array<{
+            name: string;
+            kind: string;
+            comment: string | null;
+          }>
+        ).map((relation) => [relation.name, relation]),
+      );
+      found[engine] = {
+        status: listed.status,
+        view: byName.get("pedidos_con_cliente")?.kind,
+        commented: byName.get("clientes")?.comment?.startsWith("Tiendas y empresas"),
+        bare: byName.get("entregas")?.comment,
+      };
+    }
+    const withoutSource = await api(
+      "GET",
+      `/admin/tools/relations?source=demo-${available[0]}`,
+      undefined,
+      managerToken,
+    );
+
+    // Performs assertions.
+    for (const engine of available) {
+      expect(found[engine]).toEqual({ status: 200, view: "view", commented: true, bare: null });
+    }
+    expect(withoutSource.status).toBe(403);
+  });
+
+  it("describes a base with the model, and still gives its columns when the model fails", async () => {
+    // Performs the test.
+    const body = { source: `demo-${available[0]}`, base: { kind: "table", name: "entregas" } };
+    answer = () => "  Cada entrega de un pedido,\n con su ruta.  ";
+    const described = await api("POST", "/admin/tools/explain", body);
+    const prompt = asked.at(-1) ?? "";
+    answer = () => {
+      throw new Error("sin modelo");
+    };
+    const failed = await api("POST", "/admin/tools/explain", body);
+
+    // Performs assertions.
+    expect(described.body.data.description).toBe("Cada entrega de un pedido, con su ruta.");
+    expect(prompt).toContain("<<<SAMPLES");
+    expect(failed.status).toBe(200);
+    expect(failed.body.data.description).toBeNull();
+    expect(failed.body.data.note).toContain("escríbela tú");
+    expect(failed.body.data.columns.map((column: { name: string }) => column.name)).toContain(
+      "ruta",
+    );
+  });
+
+  it("lists a column's few values as the only choices, and only gives examples otherwise", async () => {
+    // Performs the test.
+    answer = () => "Zona del cliente.";
+    const help = (column: string, op: string) =>
+      api("POST", "/admin/tools/filter-help", {
+        source: `demo-${available[0]}`,
+        base: { kind: "table", name: "pedidos_con_cliente" },
+        column,
+        op,
+      });
+    const zona = await help("zona", "=");
+    const contains = await help("zona", "contains");
+    const cliente = await help("cliente", "=");
+    const fecha = await help("fecha", "between");
+    const unknown = await help("region", "=");
+
+    // Performs assertions.
+    expect(zona.body.data).toEqual({
+      values: ["Centro", "Norte", "Occidente", "Oriente", "Sur"],
+      examples: null,
+      description: "Zona del cliente.",
+    });
+    expect(contains.body.data.values).toBeNull();
+    expect(contains.body.data.examples).toHaveLength(5);
+    expect(cliente.body.data.values).toBeNull();
+    expect(fecha.body.data).toMatchObject({ values: null, examples: null });
+    expect(unknown.status).toBe(400);
+  });
+
+  it("suggests the meaning and the totals, and leaves a note when the model cannot", async () => {
+    // Performs the test.
+    answer = () =>
+      '{"name": "ventas_por_zona", "definition": "Ventas.", "grain": "una zona", "synonyms": ["ventas"]}';
+    const meaningAsked = await api("POST", "/admin/tools/suggest", {
+      about: "Pedidos con su cliente.",
+      columns: ["zona", "total"],
+      totals: { by: ["zona"], calculations: ["ventas: suma de total"], detail: true },
+    });
+    answer = () =>
+      JSON.stringify({
+        ideas: [
+          {
+            label: "Ventas por zona",
+            why: "Compara zonas.",
+            group_by: ["zona"],
+            aggregates: [{ fn: "sum", column: "total", as: "ventas" }],
+          },
+          {
+            label: "Suma de texto",
+            group_by: [],
+            aggregates: [{ fn: "sum", column: "zona", as: "x" }],
+          },
+        ],
+      });
+    const totals = await api("POST", "/admin/tools/suggest-totals", {
+      source: `demo-${available[0]}`,
+      base: { kind: "table", name: "pedidos_con_cliente" },
+    });
+    answer = () => {
+      throw new Error("sin modelo");
+    };
+    const failed = await api("POST", "/admin/tools/suggest", {
+      about: "Pedidos.",
+      columns: ["zona"],
+    });
+
+    // Performs assertions.
+    expect(meaningAsked.body.data).toEqual({
+      name: "ventas_por_zona",
+      definition: "Ventas.",
+      grain: "una zona",
+      synonyms: ["ventas"],
+    });
+    expect(totals.body.data.ideas.map((idea: { label: string }) => idea.label)).toEqual([
+      "Ventas por zona",
+    ]);
+    expect(failed.status).toBe(200);
+    expect(failed.body.data).toMatchObject({ name: null, note: expect.any(String) });
+  });
+
+  it("brings totals and their detail, and saving the published version keeps it published", async () => {
+    // Performs the test.
+    const name = "ventas_por_zona_detalle";
+    const url = `/admin/tools/${name}`;
+    const definition = {
+      base: { kind: "table", name: "pedidos_con_cliente" },
+      columns: [{ name: "pedido_id" }, { name: "zona" }, { name: "total" }],
+      filters: [{ column: "zona", op: "=", values: [{ value: "Norte" }, { value: "Sur" }] }],
+      summary: {
+        group_by: ["zona"],
+        aggregates: [{ fn: "count", as: "pedidos" }],
+        with_detail: true,
+      },
+      meaning: { definition: "Pedidos por zona." },
+    };
+    const saved = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition,
+      create: true,
+    });
+    const run = await api("POST", `${url}/run`, { args: { zona: "Norte" } });
+    await api("POST", `${url}/publish`);
+    const again = await api("PUT", url, { source: `demo-${available[0]}`, definition });
+    const changed = await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      definition: { ...definition, meaning: { definition: "Pedidos de cada zona." } },
+    });
+    const outside = await api("POST", `${url}/run`, { args: { zona: "Antártida" } });
+    await api("DELETE", url);
+    const data = run.body.data;
+
+    // Performs assertions.
+    expect(saved.body.data.checks.every((check: { ok: boolean }) => check.ok)).toBe(true);
+    expect(data.filas).toEqual([{ zona: "Norte", pedidos: data.total_detalle }]);
+    expect(data.detalle.every((row: { zona: string }) => row.zona === "Norte")).toBe(true);
+    expect(again.body.data.status).toBe("published");
+    expect(changed.body.data.status).toBe("draft");
+    expect(outside.body.data.error ?? outside.body.error).toBeDefined();
+  });
 });

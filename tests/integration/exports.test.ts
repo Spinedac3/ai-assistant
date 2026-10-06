@@ -3,8 +3,9 @@ import { sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
+import { hashPassword } from "../../src/auth/password.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { exportFiles, toolCalls } from "../../src/db/schema.js";
+import { exportFiles, toolCalls, users } from "../../src/db/schema.js";
 import { ExportStore } from "../../src/exports/store.js";
 import { isMissing, s3Client } from "../../src/rag/storage.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
@@ -12,13 +13,16 @@ import { testSigner } from "../support/keys.js";
 import { freshDatabase } from "./support/database.js";
 
 const BASE = "https://assistant.example.com";
+const PASSWORD = "tres caballos verdes";
 const STORAGE = {
   endpoint: process.env.S3_ENDPOINT ?? "http://localhost:9000",
   accessKey: process.env.S3_ACCESS_KEY ?? "assistant",
   secretKey: process.env.S3_SECRET_KEY ?? "assistant-secret",
   bucket: "documents-test",
 };
-const caller = { userId: 7, email: "ana@example.com", scopes: new Set(["chat.use"]) };
+const caller = { userId: 0, email: "ana@example.com", scopes: new Set(["chat.use"]) };
+// Sessions of the person who runs the tools and of someone else
+const tokens = { owner: "", other: "" };
 
 let database: DatabaseHandle;
 let app: FastifyInstance;
@@ -32,8 +36,8 @@ let registry: ToolRegistry;
  *
  * @return  The parsed result
  */
-async function runBig(origin: "chat" | "mcp") {
-  const outcome = await registry.execute("pedidos_del_anio", {}, caller, {
+async function runBig(origin: "chat" | "trial" | "mcp" | "run", tool = "pedidos_del_anio") {
+  const outcome = await registry.execute(tool, {}, caller, {
     origin,
     timeZone: "UTC",
   });
@@ -42,14 +46,29 @@ async function runBig(origin: "chat" | "mcp") {
 }
 
 /**
- * Downloads a link through the app, as a browser would
+ * Downloads a link through the app, as the panel does, with the session of a person
  *
- * @param   url  Link from a result
+ * @param   url    Link from a result
+ * @param   token  Session, if any
  *
  * @return  The response
  */
-function download(url: string) {
-  return app.inject({ url: url.replace(BASE, "") });
+function download(url: string, token: string | null = tokens.owner) {
+  return app.inject({
+    url: url.replace(BASE, ""),
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+}
+
+/**
+ * Finds the export id in a link, signed or not
+ *
+ * @param   url  Link from a result
+ *
+ * @return  The id
+ */
+function idOf(url: string): string {
+  return new URL(url, BASE).pathname.split("/").pop() ?? "";
 }
 
 describe("exports", () => {
@@ -84,12 +103,46 @@ describe("exports", () => {
         },
       }),
     });
+    // Large enough to be cut even for external clients
+    registry.register({
+      definition: {
+        name: "pedidos_grandes",
+        description: "Every order with a long note.",
+        inputSchema: { type: "object" },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({
+        ok: true,
+        data: {
+          pedidos: Array.from({ length: 3000 }, (_, id) => ({ id, nota: "x".repeat(120) })),
+        },
+      }),
+    });
     app = await buildApp({
       db: database.db,
       signer: testSigner(),
       systems: new Map(),
       exports: { exports: store },
     });
+    for (const [key, email] of [
+      ["owner", "ana@example.com"],
+      ["other", "luis@example.com"],
+    ] as const) {
+      const [person] = await database.db
+        .insert(users)
+        .values({ email, displayName: email, passwordHash: await hashPassword(PASSWORD) })
+        .returning();
+      if (key === "owner") {
+        caller.userId = person?.id ?? 0;
+      }
+      const login = await app.inject({
+        method: "POST",
+        url: "/auth/login",
+        payload: { email, password: PASSWORD },
+      });
+      tokens[key] = login.json().data.token;
+    }
   });
 
   afterAll(async () => {
@@ -129,7 +182,7 @@ describe("exports", () => {
 
   it("refuses a link with a changed signature, expiry or id", async () => {
     // Performs the test.
-    const { url } = (await runBig("chat")).archivo as { url: string };
+    const { url } = (await runBig("mcp", "pedidos_grandes")).archivo as { url: string };
     const link = new URL(url);
     const id = link.pathname.split("/").pop() ?? "";
     const exp = Number(link.searchParams.get("exp"));
@@ -144,13 +197,13 @@ describe("exports", () => {
     );
 
     // Performs assertions.
-    expect(statuses).toEqual([404, 404, 404, 404]);
+    expect(statuses).toEqual([404, 404, 404, 401]);
   });
 
   it("stops serving and deletes a file once it expires", async () => {
     // Performs the test.
     const { url } = (await runBig("chat")).archivo as { url: string };
-    const id = new URL(url).pathname.split("/").pop() ?? "";
+    const id = idOf(url);
     await database.db.update(exportFiles).set({ expiresAt: sql`now() - interval '1 second'` });
     const expired = await download(url);
     const purged = await store.purge();
@@ -170,7 +223,7 @@ describe("exports", () => {
   it("keeps the row of a file the storage could not remove, for the next sweep", async () => {
     // Performs the test.
     const { url } = (await runBig("chat")).archivo as { url: string };
-    const id = new URL(url).pathname.split("/").pop() ?? "";
+    const id = idOf(url);
     await database.db.update(exportFiles).set({ expiresAt: sql`now() - interval '1 second'` });
     const refusing = s3Client(STORAGE);
     refusing.removeObjects = (async (_bucket: string, keys: string[]) =>
@@ -317,5 +370,78 @@ describe("exports", () => {
     expect(bad.error).toBe("invalid_filter");
     expect(unknown.error).toBe("invalid_filter");
     expect(unknown.message).toContain("cliente");
+  });
+
+  describe("inside the panel", () => {
+    /**
+     * Runs the large tool on a channel
+     *
+     * @param   origin  Channel
+     *
+     * @return  The link of its Excel
+     */
+    const linkFor = async (origin: "chat" | "trial" | "mcp" | "run") =>
+      ((await runBig(origin, "pedidos_grandes")).archivo as { url: string }).url;
+
+    it("serves an unsigned file and its preview only to the person who ran the tool", async () => {
+      // Performs the test.
+      const url = await linkFor("chat");
+      const mine = await download(url);
+      const preview = await download(`${url}/preview`);
+      const someoneElse = await download(url, tokens.other);
+      const someoneElsePreview = await download(`${url}/preview`, tokens.other);
+      const nobody = await download(url, null);
+      const sheets = preview.json().sheets as Array<{
+        name: string;
+        rows: unknown[];
+        total: number;
+      }>;
+
+      // Performs assertions.
+      expect(url).toMatch(/^\/exports\/[0-9a-f-]{36}$/);
+      expect(mine.statusCode).toBe(200);
+      expect(mine.rawPayload.subarray(0, 2).toString()).toBe("PK");
+      expect(sheets[0]).toMatchObject({ name: "pedidos", total: 3000 });
+      expect(sheets[0]?.rows).toHaveLength(200);
+      expect(someoneElse.statusCode).toBe(404);
+      expect(someoneElsePreview.statusCode).toBe(404);
+      expect(nobody.statusCode).toBe(401);
+    });
+
+    it("signs the link only for outside clients and scheduled runs", async () => {
+      // Performs the test.
+      const links = {
+        chat: await linkFor("chat"),
+        trial: await linkFor("trial"),
+        mcp: await linkFor("mcp"),
+        run: await linkFor("run"),
+      };
+      const signed = new URL(links.mcp);
+      const preview = await app.inject({
+        url: `${signed.pathname}/preview${signed.search}`,
+      });
+
+      // Performs assertions.
+      expect(links.chat).not.toContain("sig=");
+      expect(links.trial).not.toContain("sig=");
+      expect(links.mcp).toContain("sig=");
+      expect(links.run).toContain("sig=");
+      expect(preview.statusCode).toBe(200);
+    });
+
+    it("removes the preview along with its file once it expires", async () => {
+      // Performs the test.
+      const url = await linkFor("chat");
+      const id = idOf(url);
+      await database.db.update(exportFiles).set({ expiresAt: sql`now() - interval '1 second'` });
+      await store.purge();
+      const preview = await s3Client(STORAGE)
+        .statObject(STORAGE.bucket, `exports/${id}.preview.json`)
+        .then(() => "still there")
+        .catch((error: unknown) => (isMissing(error) ? "gone" : "unknown"));
+
+      // Performs assertions.
+      expect(preview).toBe("gone");
+    });
   });
 });

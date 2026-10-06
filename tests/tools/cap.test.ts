@@ -263,4 +263,28 @@ describe("result cap", () => {
       ["detalle", 500],
     ]);
   });
+
+  it("falls back to the largest list when the preferred one is missing, and keeps a small one whole", async () => {
+    // Performs the test.
+    const { archive } = recordingArchive();
+    const absent = await capResult({ detalle: rows(500) }, 40_000, archive, "", "filas");
+    const small = await capResult(
+      { filas: rows(3, 10), detalle: rows(500) },
+      40_000,
+      archive,
+      "",
+      "filas",
+    );
+    if (!absent.ok || !small.ok) {
+      throw new Error("not capped");
+    }
+
+    // Performs assertions.
+    expect((absent.data.detalle as unknown[]).length).toBeGreaterThan(0);
+    expect(small.data.filas).toHaveLength(3);
+    expect((small.data.archivo as { filas: Record<string, number> }).filas).toEqual({
+      filas: 3,
+      detalle: 500,
+    });
+  });
 });

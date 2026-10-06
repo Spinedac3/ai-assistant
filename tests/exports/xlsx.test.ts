@@ -109,4 +109,18 @@ describe("xlsx", () => {
     expect(sheet).toContain('<autoFilter ref="A1:C2"/>');
     expect(files.get("xl/styles.xml")).toContain('formatCode="#,##0.00"');
   });
+
+  it("writes a sheet with titles and no rows, and an impossible hour as text", () => {
+    // Performs the test.
+    const files = unzip(
+      workbook([
+        { name: "Vacia", columns: ["dia"], rows: [] },
+        { name: "Horas", columns: ["momento"], rows: [["2026-03-01 25:00:00"]] },
+      ]),
+    );
+
+    // Performs assertions.
+    expect(files.get("xl/worksheets/sheet1.xml")).toContain('<autoFilter ref="A1:A1"/>');
+    expect(files.get("xl/worksheets/sheet2.xml")).toContain('<c r="A2" t="inlineStr">');
+  });
 });
