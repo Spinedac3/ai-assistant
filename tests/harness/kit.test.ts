@@ -89,6 +89,19 @@ describe("the flow's kit", () => {
     expect(checked.code).toBe(2);
   });
 
+  it("refuses an issue or a number that would write outside the specs folder", () => {
+    // Performs the test.
+    const spec = scratch("spec.md", SPEC);
+    const receipt = run("recibo.sh", "rojo", "../../x-1", spec, "tests/a.test.ts");
+    const dump = run("spec-dump.sh", "Spinedac3/ai-assistant", "../../x");
+
+    // Performs assertions.
+    expect(receipt.code).toBe(2);
+    expect(receipt.out).toContain("issue inválido");
+    expect(dump.code).toBe(2);
+    expect(dump.out).toContain("uso: spec-dump.sh");
+  });
+
   it("cuts a dump fetched another day and lets today's through", () => {
     // Performs the test.
     const checked = run("recibo.sh", "autochequeo");

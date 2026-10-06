@@ -55,6 +55,8 @@ ISSUE="$2"
 SPEC="$3"
 shift 3
 TESTS=("$@")
+# The issue names folders: <repo>-<number>, nothing that climbs out of them
+[[ "$ISSUE" =~ ^[A-Za-z0-9_.-]+-[0-9]+$ ]] || { echo "issue inválido: '$ISSUE' (se espera <repo>-<número>)"; exit 2; }
 
 [ -f "$SPEC" ] || { echo "spec inexistente: $SPEC"; exit 2; }
 # Absolute before moving into the repository, or a relative spec breaks and its sha comes out empty
