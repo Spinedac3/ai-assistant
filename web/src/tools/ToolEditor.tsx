@@ -416,6 +416,8 @@ function ToolEditor({
         setChecks(data.checks);
         setStatus(data.status);
         await queries.invalidateQueries({ queryKey: ["tools"] });
+        // Back to the list, where the published tool shows among the rest
+        navigate("/herramientas", { state: { published: name } });
       } catch (failure) {
         // The server runs the checks again; when they fail, those are the ones to show
         const failed = (failure as ApiError).details as { checks?: CheckResult[] } | undefined;

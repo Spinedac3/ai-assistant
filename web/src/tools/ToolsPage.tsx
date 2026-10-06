@@ -1,7 +1,8 @@
 import { Badge, Box, Button, HStack, Spinner, Stack, Table, Text } from "@chakra-ui/react";
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import { FiPlus } from "react-icons/fi";
-import { Link, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import { api } from "../api/http";
 import { NEW_TOOL } from "./ToolEditor";
 import type { ToolSummary } from "./types";
@@ -14,6 +15,16 @@ import type { ToolSummary } from "./types";
 export function ToolsPage() {
   const navigate = useNavigate();
   const list = useQuery({ queryKey: ["tools"], queryFn: () => api<ToolSummary[]>("/admin/tools") });
+  const location = useLocation();
+  // The tool just published, said once and highlighted; a reload does not bring it back
+  const [published] = useState(
+    (location.state as { published?: string } | null)?.published ?? null,
+  );
+  useEffect(() => {
+    if (location.state) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+  }, [location, navigate]);
 
   return (
     <Stack gap={4}>
@@ -30,6 +41,12 @@ export function ToolsPage() {
           <FiPlus /> Nueva herramienta
         </Button>
       </HStack>
+      {published && (
+        <Text role="status" fontSize="sm" color="fg.success">
+          {published} quedó publicada: ya está en el Chat para quien tenga el permiso de su fuente.
+          Pregúntale algo que la use.
+        </Text>
+      )}
       <Box bg="bg.surface" borderWidth="1px" rounded="panel" overflow="auto">
         {list.isLoading ? (
           <Spinner m={6} color="brand.solid" />
@@ -49,7 +66,7 @@ export function ToolsPage() {
             </Table.Header>
             <Table.Body>
               {list.data?.map((tool) => (
-                <Table.Row key={tool.name}>
+                <Table.Row key={tool.name} bg={tool.name === published ? "bg.muted" : undefined}>
                   <Table.Cell>
                     <Link to={`/herramientas/${tool.name}`}>
                       <Text fontFamily="mono" fontSize="sm" color="brand.fg" fontWeight="medium">
