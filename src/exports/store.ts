@@ -27,9 +27,15 @@ export interface ExportFile {
  *
  * @return  The key
  */
-function objectKey(id: string): string {
-  return `exports/${id}.xlsx`;
+function objectKey(id: string, part: ExportPart = "file"): string {
+  return part === "file" ? `exports/${id}.xlsx` : `exports/${id}.preview.json`;
 }
+
+// The file itself, or the first rows of each sheet to look at without downloading it
+export type ExportPart = "file" | "preview";
+
+// Rows of each sheet the preview shows; the rest is in the file
+const PREVIEW_ROWS = 200;
 
 export class ExportStore {
   private readonly client: Client;
@@ -99,6 +105,22 @@ export class ExportStore {
     await this.client.putObject(this.storage.bucket, objectKey(id), data, data.length, {
       "Content-Type": XLSX_CONTENT_TYPE,
     });
+    // A look at the file without opening Excel; a failure here only loses the preview
+    const preview = Buffer.from(
+      JSON.stringify({
+        sheets: sheets.map((sheet) => ({
+          name: sheet.name,
+          columns: sheet.columns,
+          rows: sheet.rows.slice(0, PREVIEW_ROWS),
+          total: sheet.rows.length,
+        })),
+      }),
+    );
+    await this.client
+      .putObject(this.storage.bucket, objectKey(id, "preview"), preview, preview.length, {
+        "Content-Type": "application/json",
+      })
+      .catch(() => undefined);
 
     // Inside the panel the person's session opens it, so the link carries no permission of its own
     if (!signed) {
@@ -119,10 +141,16 @@ export class ExportStore {
    * @param   id         Export id
    * @param   expires    Expiry from the link
    * @param   signature  Signature from the link
+   * @param   part       The file or its preview
    *
    * @return  The file, or null for a forged, expired or deleted link
    */
-  async open(id: string, expires: number, signature: string): Promise<ExportFile | null> {
+  async open(
+    id: string,
+    expires: number,
+    signature: string,
+    part: ExportPart = "file",
+  ): Promise<ExportFile | null> {
     const expected = Buffer.from(this.sign(id, expires));
     const given = Buffer.from(signature);
     if (
@@ -133,7 +161,7 @@ export class ExportStore {
       return null;
     }
 
-    return this.read(id);
+    return this.read(id, undefined, part);
   }
 
   /**
@@ -141,11 +169,16 @@ export class ExportStore {
    *
    * @param   id      Export id
    * @param   userId  Who asks for it
+   * @param   part    The file or its preview
    *
    * @return  The file, or null when it is someone else's, expired or deleted
    */
-  async openOwned(id: string, userId: number): Promise<ExportFile | null> {
-    return this.read(id, userId);
+  async openOwned(
+    id: string,
+    userId: number,
+    part: ExportPart = "file",
+  ): Promise<ExportFile | null> {
+    return this.read(id, userId, part);
   }
 
   /**
@@ -153,10 +186,15 @@ export class ExportStore {
    *
    * @param   id      Export id
    * @param   userId  Its owner, when only theirs may be read
+   * @param   part    The file or its preview
    *
    * @return  The file, or null
    */
-  private async read(id: string, userId?: number): Promise<ExportFile | null> {
+  private async read(
+    id: string,
+    userId?: number,
+    part: ExportPart = "file",
+  ): Promise<ExportFile | null> {
     const [row] = await this.db.select().from(exportFiles).where(eq(exportFiles.id, id)).limit(1);
     if (!row || row.expiresAt.getTime() <= Date.now()) {
       return null;
@@ -168,7 +206,7 @@ export class ExportStore {
     try {
       return {
         fileName: row.fileName,
-        stream: await this.client.getObject(this.storage.bucket, objectKey(id)),
+        stream: await this.client.getObject(this.storage.bucket, objectKey(id, part)),
       };
     } catch (error) {
       if (isMissing(error)) {
@@ -197,7 +235,7 @@ export class ExportStore {
     // the next sweep
     const failures = await this.client.removeObjects(
       this.storage.bucket,
-      expired.map((row) => objectKey(row.id)),
+      expired.flatMap((row) => [objectKey(row.id), objectKey(row.id, "preview")]),
     );
     // Its types say { Error: { Key } }, but it returns the error itself, as { Key, Code }
     const failed = new Set(

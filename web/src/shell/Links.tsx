@@ -1,5 +1,6 @@
-import { Text } from "@chakra-ui/react";
-import { type MouseEvent, type ReactNode, useState } from "react";
+import { Box, Button, Dialog, Portal, Spinner, Table, Tabs, Text } from "@chakra-ui/react";
+import { useState } from "react";
+import { FiDownload, FiEye } from "react-icons/fi";
 import type { Components } from "react-markdown";
 import { request } from "../api/http";
 
@@ -38,31 +39,161 @@ export function isPanelExport(target: URL): boolean {
   );
 }
 
+interface Preview {
+  sheets: { name: string; columns: string[]; rows: unknown[][]; total: number }[];
+}
+
 /**
- * A link to an Excel of the panel: a plain link cannot carry the session, so the panel fetches it
+ * Writes a cell of the preview as the Excel shows it: amounts with thousands, yes or no
  *
- * @param   props  Path and text of the link
+ * @param   value  Value
  *
- * @return  The link
+ * @return  The text
  */
-function ExportLink({ path, children }: { path: string; children: ReactNode }) {
+function shown(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  if (typeof value === "boolean") {
+    return value ? "sí" : "no";
+  }
+  if (typeof value === "number") {
+    return Number.isInteger(value)
+      ? String(value)
+      : value.toLocaleString("es", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  return String(value);
+}
+
+/**
+ * The Excel of an answer: a look at its sheets without downloading it, and the download
+ *
+ * @param   props  Path of the file
+ *
+ * @return  The buttons and the preview
+ */
+export function ExportActions({ path }: { path: string }) {
+  const [open, setOpen] = useState(false);
+  const [preview, setPreview] = useState<Preview | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  const open = (event: MouseEvent) => {
-    event.preventDefault();
+
+  const look = async () => {
     setProblem(null);
-    downloadFile(path).catch((error: Error) => setProblem(error.message));
+    if (preview) {
+      return;
+    }
+    const response = await request(`${path}/preview`);
+    if (!response.ok) {
+      setProblem("La vista previa ya no está disponible; descárgalo");
+      return;
+    }
+    setPreview((await response.json()) as Preview);
   };
 
   return (
     <>
-      <a href={path} onClick={open}>
-        {children}
-      </a>
+      <Button
+        size="2xs"
+        variant="outline"
+        mx={1}
+        onClick={() => {
+          setOpen(true);
+          void look();
+        }}
+      >
+        <FiEye /> Ver
+      </Button>
+      <Button
+        size="2xs"
+        variant="outline"
+        colorPalette="brand"
+        onClick={() => downloadFile(path).catch((error: Error) => setProblem(error.message))}
+      >
+        <FiDownload /> Descargar Excel
+      </Button>
       {problem && (
         <Text as="span" color="fg.error" fontSize="sm">
-          {` (${problem})`}
+          {` ${problem}`}
         </Text>
       )}
+      <Dialog.Root open={open} onOpenChange={(details) => setOpen(details.open)} size="xl">
+        <Portal>
+          <Dialog.Backdrop />
+          <Dialog.Positioner>
+            <Dialog.Content maxW="6xl">
+              <Dialog.Header>
+                <Dialog.Title>Vista previa del Excel</Dialog.Title>
+              </Dialog.Header>
+              <Dialog.Body>
+                {!preview ? (
+                  problem ? (
+                    <Text color="fg.error">{problem}</Text>
+                  ) : (
+                    <Spinner color="brand.solid" />
+                  )
+                ) : (
+                  <Tabs.Root defaultValue={preview.sheets[0]?.name} size="sm" variant="line">
+                    <Tabs.List>
+                      {preview.sheets.map((sheet) => (
+                        <Tabs.Trigger key={sheet.name} value={sheet.name}>
+                          {sheet.name} ({sheet.total})
+                        </Tabs.Trigger>
+                      ))}
+                    </Tabs.List>
+                    {preview.sheets.map((sheet) => (
+                      <Tabs.Content key={sheet.name} value={sheet.name}>
+                        <Box maxH="60vh" overflow="auto" borderWidth="1px" rounded="md">
+                          <Table.Root size="sm" stickyHeader>
+                            <Table.Header>
+                              <Table.Row>
+                                {sheet.columns.map((column) => (
+                                  <Table.ColumnHeader key={column}>{column}</Table.ColumnHeader>
+                                ))}
+                              </Table.Row>
+                            </Table.Header>
+                            <Table.Body>
+                              {sheet.rows.map((row, index) => (
+                                // biome-ignore lint/suspicious/noArrayIndexKey: rows of a fixed preview never move
+                                <Table.Row key={index}>
+                                  {sheet.columns.map((column, col) => (
+                                    <Table.Cell
+                                      key={column}
+                                      textAlign={typeof row[col] === "number" ? "end" : "start"}
+                                    >
+                                      {shown(row[col])}
+                                    </Table.Cell>
+                                  ))}
+                                </Table.Row>
+                              ))}
+                            </Table.Body>
+                          </Table.Root>
+                        </Box>
+                        {sheet.rows.length < sheet.total && (
+                          <Text fontSize="xs" color="fg.muted" mt={2}>
+                            Se ven {sheet.rows.length} de {sheet.total} filas; el Excel las trae
+                            todas.
+                          </Text>
+                        )}
+                      </Tabs.Content>
+                    ))}
+                  </Tabs.Root>
+                )}
+              </Dialog.Body>
+              <Dialog.Footer>
+                <Button
+                  colorPalette="brand"
+                  onClick={() =>
+                    downloadFile(path).catch((error: Error) => setProblem(error.message))
+                  }
+                >
+                  <FiDownload /> Descargar Excel
+                </Button>
+              </Dialog.Footer>
+            </Dialog.Content>
+          </Dialog.Positioner>
+        </Portal>
+      </Dialog.Root>
     </>
   );
 }
@@ -77,7 +208,7 @@ export const LINKS: Components = {
     }
     const target = new URL(href, window.location.href);
     if (isPanelExport(target)) {
-      return <ExportLink path={target.pathname}>{children}</ExportLink>;
+      return <ExportActions path={target.pathname} />;
     }
     const foreign =
       target.protocol.startsWith("http") &&

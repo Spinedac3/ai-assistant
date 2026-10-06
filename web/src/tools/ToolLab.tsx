@@ -19,7 +19,7 @@ import { FiCheck, FiX } from "react-icons/fi";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ApiError, api, request } from "../api/http";
-import { downloadFile, LINKS } from "../shell/Links";
+import { ExportActions, LINKS } from "../shell/Links";
 import { argument, type Definition, type ToolDetail, type TraceEntry, typeOf } from "./types";
 
 interface Chip {
@@ -272,14 +272,9 @@ function Run({ name }: { name: string }) {
         Correr
       </Button>
       {file && URL.canParse(file, window.location.href) && (
-        <Button
-          size="xs"
-          variant="outline"
-          alignSelf="start"
-          onClick={() => void downloadFile(new URL(file, window.location.href).pathname)}
-        >
-          Descargar el Excel con todas las filas
-        </Button>
+        <Box>
+          <ExportActions path={new URL(file, window.location.href).pathname} />
+        </Box>
       )}
       {result && (
         <Code
