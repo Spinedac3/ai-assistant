@@ -365,4 +365,35 @@ describe("trial chat", () => {
     expect(saved.status).toBe(200);
     expect(stored?.tool.spec.meaning.caveats).toEqual(["Ojo aquí"]);
   });
+
+  it("counts each creator suggestion as a message, gives it back when the model fails, and says when the quota ran out", async () => {
+    // Performs the test.
+    const spent = async () =>
+      (await database.db.select().from(rateLimits)).reduce((sum, row) => sum + row.msgCount, 0);
+    const suggest = () =>
+      api("POST", "/admin/tools/suggest", { about: "Entregas por ruta.", columns: ["ruta"] });
+    const before = await spent();
+    guideAnswer = () => '{"name": "entregas_por_ruta", "synonyms": []}';
+    const answered = await suggest();
+    const afterAnswer = await spent();
+    guideAnswer = () => {
+      throw new Error("sin modelo");
+    };
+    const failed = await suggest();
+    const afterFailure = await spent();
+    await database.db.update(rateLimits).set({ msgCount: 10_000 });
+    const limited = await suggest();
+    await database.db.update(rateLimits).set({ msgCount: 0 });
+    guideAnswer = () => JSON.stringify({ explanation: "ok", chips: [] });
+
+    // Performs assertions.
+    expect(answered.body.data.name).toBe("entregas_por_ruta");
+    // One message, counted in the hour and in the day
+    expect(afterAnswer).toBe(before + 2);
+    expect(failed.body.data.note).toContain("complétalo tú");
+    expect(afterFailure).toBe(afterAnswer);
+    expect(limited.status).toBe(200);
+    expect(limited.body.data.note).toBeTruthy();
+    expect(limited.body.data.name).toBeNull();
+  });
 });

@@ -461,17 +461,19 @@ export default async function toolsRoutes(
    * @param   request  Request of the person
    * @param   prompt   Question
    * @param   failure  What the person reads when the model fails
+   * @param   context  What the log says the call was about
    *
-   * @return  The answer, or the note to show
+   * @return  The answer, or the note to show; no note when there is no model at all
    */
   const askCounted = async (
     request: FastifyRequest,
     prompt: string,
     failure: string,
-  ): Promise<{ answer: string } | { note: string }> => {
+    context: Record<string, unknown> = {},
+  ): Promise<{ answer: string } | { note: string | null }> => {
     const ask = options.ask;
     if (!ask) {
-      return { note: "El asistente no está disponible ahora; complétalo tú" };
+      return { note: null };
     }
     const userId = request.authUser?.id;
     let reservation: Reservation | null = null;
@@ -488,7 +490,7 @@ export default async function toolsRoutes(
       if (reservation && userId !== undefined) {
         await refundMessage(db, userId, reservation).catch(() => undefined);
       }
-      request.log.warn({ err: error }, "creator model call failed");
+      request.log.warn({ err: error, ...context }, "creator model call failed");
       return { note: failure };
     }
   };
@@ -538,7 +540,14 @@ export default async function toolsRoutes(
     }
     let read: { columns: BaseColumn[]; samples: Record<string, string[]> };
     try {
-      read = await oneAtATime(key, () => readSamples(connection, base, pasted));
+      read = await oneAtATime(key, async () =>
+        options.ask
+          ? readSamples(connection, base, pasted)
+          : {
+              columns: await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS),
+              samples: {},
+            },
+      );
     } catch (error) {
       request.log.warn({ err: error, source }, "base could not be described");
       return reply.code(400).send(BASE_UNREADABLE);
@@ -548,6 +557,7 @@ export default async function toolsRoutes(
       request,
       explainPrompt(base.kind === "table" ? base.name : null, columns, samples),
       "No se pudo escribir la descripción ahora; escríbela tú",
+      { source },
     );
 
     // The columns serve either way: without a description the person writes it
@@ -637,6 +647,7 @@ export default async function toolsRoutes(
         values: values.slice(0, MAX_FILTER_VALUES),
       }),
       "No se pudo escribir la explicación ahora; escríbela tú",
+      { source, column: body.column },
     );
 
     return "answer" in asked
@@ -675,6 +686,9 @@ export default async function toolsRoutes(
       return reply;
     }
     const { source, connection, base, pasted, body } = opened;
+    if (!options.ask) {
+      return { ok: true, data: { ideas: [] } };
+    }
     const key = `describe:${source}`;
     if (busy(reply, key)) {
       return reply;
@@ -690,6 +704,7 @@ export default async function toolsRoutes(
       request,
       totalsPrompt(body.about ?? null, read.columns, read.samples),
       "No se pudieron sugerir resúmenes ahora; ármalo tú",
+      { source },
     );
 
     // The person builds the summary by hand when no idea comes

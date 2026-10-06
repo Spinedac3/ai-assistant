@@ -164,6 +164,8 @@ function ToolEditor({
   const helpAsked = useRef(new Map<string, number>());
   // Why the model could not explain a filter, shown in the filters step
   const [filterNote, setFilterNote] = useState<string | null>(null);
+  // Why the model could not write the meaning, when it could not
+  const [meaningNote, setMeaningNote] = useState<string | null>(null);
   // Columns whose values are being read for their filter
   const [helping, setHelping] = useState<string[]>([]);
   // The description last filled in for the person, replaced when they pick another base
@@ -195,6 +197,7 @@ function ToolEditor({
       definition: string | null;
       grain: string | null;
       synonyms: string[];
+      note?: string | null;
     }>("/admin/tools/suggest", {
       method: "POST",
       body: {
@@ -215,6 +218,7 @@ function ToolEditor({
       },
     })
       .then((suggestion) => {
+        setMeaningNote(suggestion.note ?? null);
         if (suggestion.name && isNew) {
           setName((current) => (redo || !current ? (suggestion.name ?? current) : current));
         }
@@ -569,9 +573,15 @@ function ToolEditor({
         ),
       }));
     } catch (failure) {
-      setError(failure instanceof ApiError ? failure.message : "No se pudieron leer los valores");
+      if (helpAsked.current.get(column) === asked) {
+        setError(failure instanceof ApiError ? failure.message : "No se pudieron leer los valores");
+      }
     } finally {
-      setHelping((current) => current.filter((item) => item !== column));
+      // One entry per request, so an older answer leaves the newer one still waiting
+      setHelping((current) => {
+        const at = current.indexOf(column);
+        return at < 0 ? current : [...current.slice(0, at), ...current.slice(at + 1)];
+      });
     }
   };
 
@@ -1391,7 +1401,8 @@ function ToolEditor({
                   <Text fontSize="sm" color="fg.muted">
                     {busy === "suggest"
                       ? "La IA está redactando el nombre, qué devuelve y qué es cada fila…"
-                      : "Redactado por la IA a partir de lo que armaste; corrígelo si hace falta."}
+                      : (meaningNote ??
+                        "Redactado por la IA a partir de lo que armaste; corrígelo si hace falta.")}
                   </Text>
                   <Button
                     size="xs"

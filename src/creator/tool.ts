@@ -218,7 +218,7 @@ export function outputSchemaOf(tool: CreatedTool): JsonSchema {
     ? {
         properties: {
           detalle: rowsOf(outputColumnsOf({ ...tool, spec: detailOf(tool.spec) })),
-          total_detalle: { type: "integer" },
+          total_detalle: { type: ["integer", "null"] },
         },
         required: ["detalle", "total_detalle"],
       }
@@ -378,7 +378,7 @@ export function toolFrom(
               filas: rows,
               total_filas: rows.length,
               detalle: [],
-              total_detalle: 0,
+              total_detalle: null,
               nota_detalle:
                 "El detalle pasa del límite de filas; pide filtros más angostos para verlo.",
             },

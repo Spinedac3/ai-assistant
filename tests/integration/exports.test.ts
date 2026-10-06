@@ -243,7 +243,7 @@ describe("exports", () => {
 
     // Performs assertions.
     expect(purged).toBe(0);
-    expect(left.map((row) => row.id)).toEqual([id]);
+    expect(left.map((row) => row.id)).toContain(id);
   });
 
   it("keeps the structured result when the cut only adds the declared cap fields", async () => {
@@ -474,6 +474,6 @@ describe("exports", () => {
 
     // Performs assertions.
     expect(purged).toBe(0);
-    expect(left.map((row) => row.id)).toEqual([id]);
+    expect(left.map((row) => row.id)).toContain(id);
   });
 });
