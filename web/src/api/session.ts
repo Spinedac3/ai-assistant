@@ -60,6 +60,17 @@ export function renewToken(token: string): void {
 }
 
 /**
+ * Replaces only the person, as the server reads role and permissions fresh on every request
+ *
+ * @param   user  Person as the server sees them now
+ */
+export function refreshUser(user: SessionUser): void {
+  if (current && JSON.stringify(current.user) !== JSON.stringify(user)) {
+    setSession({ ...current, user });
+  }
+}
+
+/**
  * Reads the current session outside React
  *
  * @return  The session, or null

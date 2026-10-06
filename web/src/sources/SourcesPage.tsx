@@ -44,6 +44,11 @@ export function SourcesPage() {
   const queries = useQueryClient();
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const list = useQuery({ queryKey: ["sources"], queryFn: () => api<Source[]>("/admin/sources") });
+  // A new source brings its own permission, which the tool creator reads from the session
+  const refresh = () => {
+    void queries.invalidateQueries({ queryKey: ["sources"] });
+    void queries.invalidateQueries({ queryKey: ["me"] });
+  };
 
   const test = async (code: string) => {
     setMessage(null);
@@ -77,7 +82,7 @@ export function SourcesPage() {
     setMessage(null);
     try {
       await api(`/admin/sources/${code}`, { method: "DELETE" });
-      await queries.invalidateQueries({ queryKey: ["sources"] });
+      refresh();
     } catch (failure) {
       setMessage({
         ok: false,
@@ -93,7 +98,7 @@ export function SourcesPage() {
           Las bases de datos que leen las herramientas. Cada una se conecta con un usuario de solo
           lectura; el asistente lo verifica antes de guardarla.
         </Text>
-        <SourceForm onSaved={() => void queries.invalidateQueries({ queryKey: ["sources"] })} />
+        <SourceForm onSaved={refresh} />
       </HStack>
       {message && (
         <Text role="status" fontSize="sm" color={message.ok ? "fg.success" : "fg.error"}>
@@ -148,10 +153,7 @@ export function SourcesPage() {
                     >
                       <FiActivity />
                     </IconButton>
-                    <SourceForm
-                      existing={source}
-                      onSaved={() => void queries.invalidateQueries({ queryKey: ["sources"] })}
-                    />
+                    <SourceForm existing={source} onSaved={refresh} />
                     <IconButton
                       aria-label="Borrar"
                       size="xs"

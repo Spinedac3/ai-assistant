@@ -1,5 +1,7 @@
 import { Box, Flex, IconButton, Menu, Portal, Stack, Text } from "@chakra-ui/react";
+import { useQuery } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
+import { useEffect } from "react";
 import type { IconType } from "react-icons";
 import {
   FiActivity,
@@ -17,7 +19,8 @@ import {
   FiUsers,
 } from "react-icons/fi";
 import { NavLink, Outlet, useMatches } from "react-router";
-import { can, setSession, useSession } from "../api/session";
+import { api } from "../api/http";
+import { can, refreshUser, type SessionUser, setSession, useSession } from "../api/session";
 
 interface NavItem {
   to: string;
@@ -47,6 +50,14 @@ const NAV: NavItem[] = [
  */
 export function Layout() {
   const session = useSession();
+  // Permissions change while the panel is open, as when a new source grants its own; the menu and
+  // the pages follow what the server holds now
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api<SessionUser>("/auth/me") });
+  useEffect(() => {
+    if (me.data) {
+      refreshUser(me.data);
+    }
+  }, [me.data]);
   const { resolvedTheme, setTheme } = useTheme();
   const matches = useMatches();
   const title = [...matches].reverse().find((match) => (match.handle as { title?: string })?.title)
