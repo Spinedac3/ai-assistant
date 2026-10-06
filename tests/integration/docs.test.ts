@@ -820,6 +820,29 @@ describe("docs", () => {
       expect(parts.filter((part) => part.to > 10 && part.to <= 25)).toEqual([]);
     });
 
+    it("refuses a third PDF while a person already has two converting", async () => {
+      // Performs the test.
+      const [admin] = await database.db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, "admin@example.com"));
+      const waiting = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+      ];
+      for (const id of waiting) {
+        await database.db.execute(
+          sql`insert into pdf_conversions (id, user_id, file_name, status) values (${id}, ${admin?.id ?? 0}, 'espera.pdf', 'queued')`,
+        );
+      }
+      const third = await convert(adminToken, await pdfWith(1));
+      await database.db.execute(sql`delete from pdf_conversions where file_name = 'espera.pdf'`);
+
+      // Performs assertions.
+      expect(third.statusCode).toBe(409);
+      expect(third.json().error).toBe("too_many_conversions");
+    });
+
     it("removes old reviewed conversions with their files, and keeps the rest", async () => {
       // Performs the test.
       const old = (await convert(adminToken, await pdfWith(1))).json().data.id;
