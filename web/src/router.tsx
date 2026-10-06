@@ -1,4 +1,8 @@
 import { createBrowserRouter, Navigate } from "react-router";
+import { RolesPage } from "./admin/RolesPage";
+import { DiagnosticsPage, SettingsPage } from "./admin/SettingsPage";
+import { UsagePage } from "./admin/UsagePage";
+import { UsersPage } from "./admin/UsersPage";
 import { useSession } from "./api/session";
 import { ChatRoute } from "./chat/ChatPage";
 import { DocsPage } from "./docs/DocsPage";
@@ -28,6 +32,11 @@ export const router = createBrowserRouter(
         { path: "chat/:id", handle: { title: "Chat" }, element: <ChatRoute /> },
         { path: "documentos", handle: { title: "Documentos" }, element: <DocsPage /> },
         { path: "fuentes", handle: { title: "Fuentes" }, element: <SourcesPage /> },
+        { path: "usuarios", handle: { title: "Usuarios" }, element: <UsersPage /> },
+        { path: "roles", handle: { title: "Roles y áreas" }, element: <RolesPage /> },
+        { path: "uso", handle: { title: "Uso" }, element: <UsagePage /> },
+        { path: "configuracion", handle: { title: "Configuración" }, element: <SettingsPage /> },
+        { path: "diagnostico", handle: { title: "Diagnóstico" }, element: <DiagnosticsPage /> },
         { path: "herramientas", handle: { title: "Herramientas" }, element: <ToolsPage /> },
         {
           path: "herramientas/:name",

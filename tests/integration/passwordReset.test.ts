@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/app.js";
 import { hashPassword } from "../../src/auth/password.js";
 import type { DatabaseHandle } from "../../src/db/client.js";
-import { passwordResets, roles, users } from "../../src/db/schema.js";
+import { passwordResets, roles, userIdentities, users } from "../../src/db/schema.js";
 import { smtpMailer } from "../../src/notices/mailer.js";
 import { testSigner } from "../support/keys.js";
 import { freshDatabase } from "./support/database.js";
@@ -267,6 +267,15 @@ describe("password reset by mail", () => {
       .insert(users)
       .values({ email: `sso-${run}@example.com`, displayName: "Por SSO" })
       .returning({ id: users.id });
+    await database.db
+      .insert(userIdentities)
+      .values({ userId: external?.id ?? 0, systemCode: "erp", externalId: `sso-${run}` });
+    // A local account made without a password gets its first one by the same link
+    const [fresh] = await database.db
+      .insert(users)
+      .values({ email: `nuevo-${run}@example.com`, displayName: "Nuevo" })
+      .returning({ id: users.id });
+    const toFresh = await sendLink(fresh?.id ?? 0);
     const notAllowed = await sendLink(anaId, betoToken);
     const toInactive = await sendLink(inactive);
     const toDeleted = await sendLink(deleted);
@@ -279,6 +288,8 @@ describe("password reset by mail", () => {
     expect(toDeleted.statusCode).toBe(404);
     expect(toExternal.json()).toMatchObject({ error: "external_account" });
     expect(await mailsTo(`sso-${run}@example.com`)).toEqual([]);
+    expect(toFresh.json()).toEqual({ ok: true });
+    expect(await mailsTo(`nuevo-${run}@example.com`)).toHaveLength(1);
     expect(noMail.json()).toMatchObject({ error: "mail_off" });
     expect(await mailsTo(`ida-${run}@example.com`)).toEqual([]);
   });

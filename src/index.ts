@@ -1,5 +1,8 @@
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
+import { sql } from "drizzle-orm";
 import { buildApp } from "./app.js";
 import { loadExternalSystems } from "./auth/externalSystems.js";
 import { createTokenSigner, readPrivateKey } from "./auth/tokens.js";
@@ -18,6 +21,7 @@ import { smtpMailer } from "./notices/mailer.js";
 import { purgeNotices, startNoticeWorker } from "./notices/outbox.js";
 import { startWorker } from "./rag/jobs.js";
 import { indexFrom, s3Config, storageFrom } from "./rag/services.js";
+import type { Probe } from "./routes/diagnostics.js";
 import { readSetting } from "./settings.js";
 import { calculateTool } from "./tools/native/calculate.js";
 import { fetchTool, searchTool } from "./tools/native/documents.js";
@@ -27,6 +31,7 @@ import { sendNoticeTool } from "./tools/native/sendNotice.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { Secrets } from "./vault/envelope.js";
 
+const runFile = promisify(execFile);
 const env = loadEnv();
 const database = connectDatabase(env.DATABASE_URL);
 const organizationContext = readOrganizationContext(env.ASSISTANT_CONTEXT_FILE);
@@ -102,6 +107,43 @@ const askModel = async (prompt: string, attachment?: Buffer) =>
 const uploads = new Uploads();
 registry.register(readPdfTool({ uploads, ask: askModel }));
 
+// What the diagnostics ask each service: the lightest call that proves it answers
+const probes: Record<string, Probe> = {
+  "Base de datos": async () => {
+    await database.db.execute(sql`select 1`);
+    return undefined;
+  },
+  "Búsqueda (Solr)": async () => {
+    const response = await fetch(`${env.SOLR_URL}/solr/admin/info/system?wt=json`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) {
+      throw new Error(`respondió ${response.status}`);
+    }
+    return undefined;
+  },
+  Embeddings: async () => {
+    const vector = await index.embedder.query("prueba");
+    if (!vector) {
+      throw new Error("no devolvió un vector");
+    }
+    return `${vector.length} dimensiones`;
+  },
+  Almacenamiento: async () => {
+    await storage.exists("__diagnostico__", "md");
+    return undefined;
+  },
+  Correo: async () => {
+    if (!mailer) {
+      return "sin servidor configurado: no hay avisos ni enlaces por correo";
+    }
+    await mailer.verify();
+    return undefined;
+  },
+  "CLI de Claude": async () =>
+    (await runFile(env.CLAUDE_BIN, ["--version"], { timeout: 8_000 })).stdout.trim(),
+};
+
 const app = await buildApp({
   db: database.db,
   signer: createTokenSigner(
@@ -113,6 +155,7 @@ const app = await buildApp({
   passwordReset: { mailer, publicBaseUrl, assistantName: env.ASSISTANT_NAME },
   usage: { timeZone: env.APP_TIMEZONE },
   panel: { dir: env.PANEL_DIR },
+  diagnostics: { probes },
   chat: {
     ...chat,
     mcpConfig: chatMcpConfig(database.db, mcpUrl),

@@ -231,6 +231,35 @@ describe("auth", () => {
     expect(identities).toHaveLength(1);
   });
 
+  it("drops a password set before the person first came through a system, and its sessions", async () => {
+    await createUser("p-2@example.com");
+    const before = (await login("p-2@example.com")).json().data.token;
+    // A session issued earlier than the link, as one set up by someone else would be
+    await database.db.execute(sql`select pg_sleep(1.1)`);
+
+    // Performs the test.
+    const linked = await app.inject({
+      method: "POST",
+      url: "/auth/system-login",
+      payload: { token: await systemToken("portal", "P-2") },
+    });
+    const byPassword = await login("p-2@example.com");
+    const oldSession = await app.inject({
+      url: "/auth/me",
+      headers: { authorization: `Bearer ${before}` },
+    });
+    const newSession = await app.inject({
+      url: "/auth/me",
+      headers: { authorization: `Bearer ${linked.json().data.token}` },
+    });
+
+    // Performs assertions.
+    expect(linked.statusCode).toBe(200);
+    expect(byPassword.statusCode).toBe(401);
+    expect(oldSession.statusCode).toBe(401);
+    expect(newSession.statusCode).toBe(200);
+  });
+
   it("refuses an unknown identity of a system without provisioning", async () => {
     // Performs the test.
     const response = await app.inject({
