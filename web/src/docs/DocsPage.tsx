@@ -18,6 +18,7 @@ import { useEffect, useState } from "react";
 import { FiDownload, FiRefreshCw, FiTrash2, FiUpload } from "react-icons/fi";
 import { ApiError, api, request } from "../api/http";
 import { can, useSession } from "../api/session";
+import { Conversions, PdfUploadButton } from "./Conversions";
 
 interface DocumentRow {
   doc_code: string;
@@ -94,8 +95,14 @@ export function DocsPage() {
           Los documentos que el asistente usa para responder; ves los de las áreas a las que tienes
           acceso.
         </Text>
-        {manager && <UploadButton onQueued={follow} />}
+        {manager && (
+          <HStack gap={2}>
+            <UploadButton onQueued={follow} />
+            <PdfUploadButton />
+          </HStack>
+        )}
       </HStack>
+      {manager && <Conversions onQueued={follow} />}
       {jobs.map((job) => (
         <JobStatus key={job} id={job} onSettled={() => void settled(job)} />
       ))}
@@ -110,7 +117,7 @@ export function DocsPage() {
         ) : list.data?.length === 0 ? (
           <Text p={6} color="fg.muted">
             {manager
-              ? "Todavía no hay documentos. Carga el primero con «Cargar documento»."
+              ? "Todavía no hay documentos. Sube el primero con «Subir PDF»."
               : "No hay documentos de tus áreas todavía."}
           </Text>
         ) : (
@@ -260,8 +267,8 @@ function UploadButton({ onQueued }: { onQueued: (job: number) => void }) {
   return (
     <Dialog.Root open={open} onOpenChange={(details) => setOpen(details.open)}>
       <Dialog.Trigger asChild>
-        <Button colorPalette="brand" size="sm">
-          <FiUpload /> Cargar documento
+        <Button variant="outline" size="sm">
+          <FiUpload /> Cargar Markdown
         </Button>
       </Dialog.Trigger>
       <Portal>

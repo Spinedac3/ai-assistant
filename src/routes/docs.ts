@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { logAudit } from "../audit.js";
 import type { Database } from "../db/client.js";
-import type { PdfConverter } from "../rag/convert.js";
+import { MAX_PAGES, openPdf, type PdfConverter } from "../rag/convert.js";
 import { DOC_CODE, writeDocument } from "../rag/document.js";
 import { type Index, isCurrent, removeDocument } from "../rag/ingest.js";
 import { enqueue, findJob } from "../rag/jobs.js";
@@ -230,7 +230,29 @@ export default async function docsRoutes(
     const areas = [...(request.authUser?.scopes ?? [])]
       .map((scope) => AREA_SCOPE.exec(scope)?.[1])
       .filter((area): area is string => Boolean(area));
-    const id = await converter.start(request.authUser?.id ?? 0, fileName, pdf, areas);
+    // Refused now, not after minutes of waiting: a file that does not open, or too long to review
+    const opened = await openPdf(pdf);
+    if (!opened) {
+      return reply.code(400).send({
+        ok: false,
+        error: "unreadable_pdf",
+        message: "No se pudo abrir el PDF; si tiene contraseña, quítasela y vuelve a subirlo",
+      });
+    }
+    if (opened.getPageCount() > MAX_PAGES) {
+      return reply.code(400).send({
+        ok: false,
+        error: "too_many_pages",
+        message: `El PDF tiene más de ${MAX_PAGES} páginas; divídelo en documentos más chicos`,
+      });
+    }
+    const id = await converter.start(
+      request.authUser?.id ?? 0,
+      fileName,
+      pdf,
+      opened.getPageCount(),
+      areas,
+    );
 
     return reply.code(202).send({ ok: true, data: { id } });
   });
