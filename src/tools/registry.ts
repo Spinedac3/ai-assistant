@@ -40,6 +40,8 @@ const MAX_BYTES_OF: Record<ToolOrigin, number> = {
   run: PROGRAM_MAX_BYTES,
 };
 const PROGRAM_TOO_LARGE = `El resultado pasa de ${PROGRAM_MAX_BYTES / 1_000_000} MB: el programa necesita una consulta más angosta`;
+const PROGRAM_PARTIAL =
+  "La herramienta devolvió solo parte de la lista: el programa necesita una consulta más angosta";
 
 /**
  * Prepares a call's arguments for the audit, keeping every key and the length of long texts
@@ -150,12 +152,12 @@ export class ToolRegistry {
     return {
       save: async (sheets) => {
         try {
-          // The panel's chats open it with the person's session; external clients and scheduled
-          // runs hand the link to someone outside the panel
+          // The panel's chats open it with the person's session; external clients hand the link
+          // to someone outside the panel
           return await exports.save(
             sheets,
             { userId: caller.userId, toolName: name },
-            origin === "mcp" || origin === "run",
+            origin === "mcp",
           );
         } catch (error) {
           this.logger?.error({ err: error, tool: name }, "result export failed");
@@ -360,13 +362,18 @@ export class ToolRegistry {
     const capped = await capResult(
       filtered ? filtered.data : clean,
       MAX_BYTES_OF[context.origin],
-      this.archiveFor(name, caller, context.origin),
+      // A program is refused what does not fit, so an Excel of it would be left behind unread
+      context.origin === "run" ? null : this.archiveFor(name, caller, context.origin),
       target ? filterHint(target) : "",
       result.main,
     );
     // A program counts what it reads: a cut list would give it wrong totals without a word
-    if (!capped.ok || (context.origin === "run" && capped.truncated)) {
-      const message = capped.ok ? PROGRAM_TOO_LARGE : capped.message;
+    if (!capped.ok || (context.origin === "run" && (capped.truncated || result.truncated))) {
+      const message = !capped.ok
+        ? capped.message
+        : capped.truncated
+          ? PROGRAM_TOO_LARGE
+          : PROGRAM_PARTIAL;
       return this.fail(name, args, caller, context, started, "result_too_large", message);
     }
 

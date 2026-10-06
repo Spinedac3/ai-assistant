@@ -138,6 +138,16 @@ describe("run tokens for another system", () => {
         },
       }),
     });
+    registry.register({
+      definition: {
+        name: "first_orders",
+        description: "Lists the first orders only.",
+        inputSchema: { type: "object", properties: {} },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({ ok: true, data: { orders: [{ order: 1 }] }, truncated: true }),
+    });
     const clients = new Map<string, MachineClient>(
       ["agent-factory", "other-system"].map((clientId) => [
         clientId,
@@ -329,6 +339,31 @@ describe("run tokens for another system", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('"error":"result_too_large"');
     expect(result.structuredContent).toBeUndefined();
+  });
+
+  it("refuses a program a list the tool itself cut", async () => {
+    // Performs the test.
+    const token = (
+      await issue({ owner_id: ownerId, tools: ["first_orders"], minutes: 5, run_id: "run-7" })
+    ).json().data.token;
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "first_orders", arguments: {} },
+      },
+    });
+
+    // Performs assertions.
+    expect(response.json().result.content[0].text).toContain("solo parte de la lista");
   });
 
   it("lets only the system that asked for a token end it", async () => {
