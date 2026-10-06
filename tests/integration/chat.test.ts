@@ -153,6 +153,10 @@ describe("chat", () => {
     expect(stored[0]?.model).toBe("fake-model");
     expect(second.statusCode).toBe(200);
     expect(calls().map((call) => call.continued)).toEqual([false, true]);
+    // The turn resumes its own session by id, never whichever is newest in the folder
+    expect(calls()[1]?.args).toEqual(
+      expect.arrayContaining(["--resume", "0c7e92ec-1824-479c-a425-300cc4d6c5d0"]),
+    );
   });
 
   it("retries a silent announcement in a fresh session with the directive", async () => {

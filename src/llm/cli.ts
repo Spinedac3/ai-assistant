@@ -16,7 +16,8 @@ export interface ArgvOptions {
   maxTurns: number;
   mcpConfigPath: string;
   effort?: Effort;
-  continueSession?: boolean;
+  // The conversation's own session, resumed by its id; never "the latest one in the folder"
+  resumeSession?: string;
   allowedTools?: string;
   disallowedTools: string;
   // Built-in tools the model may use; an empty list leaves it none
@@ -102,7 +103,7 @@ export function cliArgs(options: ArgvOptions): string[] {
     ...(options.effort ? ["--effort", options.effort] : []),
     "--max-turns",
     String(options.maxTurns),
-    ...(options.continueSession ? ["--continue"] : []),
+    ...(options.resumeSession ? ["--resume", options.resumeSession] : []),
     // The child loads no settings of the machine's account: on a developer machine its plugins,
     // hooks and memory, on a server whatever permissions someone once granted there
     "--setting-sources",

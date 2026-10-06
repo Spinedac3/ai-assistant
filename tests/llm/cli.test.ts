@@ -31,7 +31,10 @@ describe("cli", () => {
     };
 
     // Performs assertions.
-    expect(cliArgs({ ...base, continueSession: true })).toContain("--continue");
+    expect(cliArgs({ ...base, resumeSession: "0c7e92ec-1824-479c-a425-300cc4d6c5d0" })).toEqual(
+      expect.arrayContaining(["--resume", "0c7e92ec-1824-479c-a425-300cc4d6c5d0"]),
+    );
+    expect(cliArgs(base)).not.toContain("--continue");
     expect(cliArgs(base)).not.toContain("--continue");
   });
 

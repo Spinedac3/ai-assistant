@@ -103,6 +103,8 @@ interface CliOutcome {
   tokensOut: number | null;
   cachedIn: number | null;
   costMillionths: number | null;
+  // The session the CLI ran, so the next turn resumes exactly this one
+  sessionId: string | null;
   // Why a process gave no answer: how it ended, how long it ran and the end of what it wrote to stderr
   exitCode: number | null;
   elapsedMs: number;
@@ -133,7 +135,7 @@ export function displayToolName(name: string, input: Record<string, unknown>): s
  * @param   model           Model for this turn
  * @param   workspace       Conversation workspace
  * @param   prompt          Text sent to the CLI
- * @param   continueSession Whether to resume the workspace's session
+ * @param   resumeSession   The conversation's session to resume, or null for a new one
  * @param   abortSignal     Stops the process
  *
  * @return  The turn's outcome once the process ends
@@ -143,7 +145,7 @@ async function* runCli(
   model: string,
   workspace: string,
   prompt: string,
-  continueSession: boolean,
+  resumeSession: string | null,
   abortSignal?: AbortSignal,
   trace?: TraceEntry[],
 ): AsyncGenerator<TurnEvent, CliOutcome> {
@@ -152,7 +154,7 @@ async function* runCli(
     cliArgs({
       model,
       maxTurns: MAX_TURNS,
-      continueSession,
+      resumeSession: resumeSession ?? undefined,
       mcpConfigPath: join(workspace, ".mcp.json"),
       // With tools, the CLI may call only what the chat catalog, or the trial, offers
       ...(deps.mcpConfig ? { allowedTools: deps.trial?.allowedTools ?? CHAT_CLI_ALLOWED } : {}),
@@ -165,6 +167,7 @@ async function* runCli(
 
   const started = Date.now();
   const outcome: CliOutcome = {
+    sessionId: null,
     exitCode: null,
     elapsedMs: 0,
     stderr: "",
@@ -252,6 +255,10 @@ async function* runCli(
     } else if (event.type === "result") {
       const usage = (event.usage ?? {}) as Record<string, unknown>;
       outcome.ok = event.is_error !== true;
+      outcome.sessionId =
+        typeof event.session_id === "string" && SESSION_ID.test(event.session_id)
+          ? event.session_id
+          : null;
       outcome.cutByMaxTurns = event.subtype === "error_max_turns";
       outcome.resultText = typeof event.result === "string" ? event.result : "";
       outcome.tokensIn = typeof usage.input_tokens === "number" ? usage.input_tokens : null;
@@ -290,6 +297,25 @@ function previousContext(path: string): number {
     return Number((JSON.parse(readFileSync(path, "utf8")) as { context?: unknown }).context) || 0;
   } catch {
     return 0;
+  }
+}
+
+// A session id as the CLI writes it; anything else never reaches its arguments
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Reads the session the previous turn of a workspace ran
+ *
+ * @param   path  Workspace's context file
+ *
+ * @return  The session id, or null when there is none to resume
+ */
+function previousSession(path: string): string | null {
+  try {
+    const session = (JSON.parse(readFileSync(path, "utf8")) as { session?: unknown }).session;
+    return typeof session === "string" && SESSION_ID.test(session) ? session : null;
+  } catch {
+    return null;
   }
 }
 
@@ -376,10 +402,12 @@ export async function* chatTurn(
 
     const contextPath = join(workspace, "context.json");
     const resetByContext = !freshSession && previousContext(contextPath) > CONTEXT_CAP_TOKENS;
+    // Only the conversation's own session is resumed; without one, the thread seeds a new one
+    const session = freshSession || resetByContext ? null : previousSession(contextPath);
     const summary = threadSummary(earlier);
     // Any new session on an existing conversation starts from the thread, not from nothing
     const seeded = summary ? `${summary}\n\n${content}` : content;
-    let prompt = resetByContext || freshSession ? seeded : content;
+    let prompt = session ? content : seeded;
 
     if (resetByContext) {
       logger.info(
@@ -398,7 +426,7 @@ export async function* chatTurn(
       // A discarded attempt's calls are not what answered; only the last attempt's are shown
       trace?.splice(0);
       // Both retries start a new session: a silent turn means the resumed one went bad
-      const resume = attempt === 0 && !freshSession && !resetByContext;
+      const resume = attempt === 0 && session !== null;
       const names = new Map<string, string>();
       const executed: string[] = [];
       const seen: TurnEvent[] = [];
@@ -410,7 +438,15 @@ export async function* chatTurn(
       ]);
       // Sources are what ran in this attempt; a discarded attempt's tools must not be credited
       const callsBefore = await lastToolCallId(db, conversation);
-      const run = runCli(deps, model, workspace, prompt, resume, attemptSignal, trace);
+      const run = runCli(
+        deps,
+        model,
+        workspace,
+        prompt,
+        resume ? session : null,
+        attemptSignal,
+        trace,
+      );
       let step = await run.next();
 
       while (!step.done) {
@@ -477,7 +513,10 @@ export async function* chatTurn(
 
       if (outcome.ok || text !== "" || cutOff !== null) {
         try {
-          writeFileSync(contextPath, JSON.stringify({ context: outcome.context }));
+          writeFileSync(
+            contextPath,
+            JSON.stringify({ context: outcome.context, session: outcome.sessionId }),
+          );
         } catch {
           // Without a measurement the cap simply does not apply next turn
         }
@@ -526,7 +565,7 @@ export async function* chatTurn(
             elapsedMs: outcome.elapsedMs,
             stderr: outcome.stderr,
           },
-          "chat: --continue failed, retrying with a new session",
+          "chat: resuming the session failed, retrying with a new one",
         );
         prompt = seeded;
         continue;
