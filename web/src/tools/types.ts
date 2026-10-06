@@ -60,10 +60,30 @@ export const AGGREGATE_LABELS: Record<Aggregate, string> = {
   max: "Máximo",
 };
 
+export type FilterValue = string | number | boolean;
+
+// The operators whose argument is one of the column's own values
+export const VALUE_OPS: ReadonlySet<string> = new Set(["=", "!=", "in"]);
+
+// What the server finds for a filter: the column's values and the explanation for the model
+export interface FilterHelp {
+  values: FilterValue[] | null;
+  examples: FilterValue[] | null;
+  description: string | null;
+  note?: string;
+}
+
 export interface Definition {
   base: { kind: "table"; name: string } | { kind: "query"; sql: string };
   columns: { name: string; label?: string }[];
-  filters: { column: string; op: FilterOp; required: boolean; description?: string }[];
+  filters: {
+    column: string;
+    op: FilterOp;
+    required: boolean;
+    description?: string;
+    values?: { value: FilterValue; meaning?: string }[];
+    examples?: FilterValue[];
+  }[];
   summary?: {
     group_by: string[];
     aggregates: { fn: Aggregate; column?: string; as: string }[];
@@ -199,9 +219,13 @@ export function cleanDefinition(definition: Definition): Definition {
   return {
     ...definition,
     columns: definition.columns.map((column) => ({ name: column.name, label: text(column.label) })),
-    filters: definition.filters.map((filter) => ({
+    // A closed list only goes with an operator that takes one of its values
+    filters: definition.filters.map(({ values, ...filter }) => ({
       ...filter,
       description: text(filter.description),
+      ...(values && VALUE_OPS.has(filter.op)
+        ? { values: values.map((item) => ({ value: item.value, meaning: text(item.meaning) })) }
+        : {}),
     })),
     time_zone: text(definition.time_zone),
     meaning: {

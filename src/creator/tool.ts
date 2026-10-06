@@ -4,7 +4,7 @@ import { connectionFor, sourceScope } from "../sources/registry.js";
 import type { JsonSchema, Tool, ToolResult } from "../tools/contract.js";
 import type { Secrets } from "../vault/envelope.js";
 import { type BaseColumn, normalizeRows } from "./columns.js";
-import type { ToolDefinitionSpec } from "./definition.js";
+import { type ToolDefinitionSpec, VALUE_OPS } from "./definition.js";
 import { checkPasted } from "./pasted.js";
 import { buildQuery, paramName } from "./sql.js";
 
@@ -81,7 +81,20 @@ function filterText(filter: ToolDefinitionSpec["filters"][number], kind: ColumnK
     empty: `true: solo filas sin ${filter.column}; false: solo filas con ${filter.column}.`,
   };
 
-  return `${what[filter.op]}${day}${own}`;
+  const relative = day
+    ? " Si la persona habla de fechas relativas (hoy, ayer, este mes), conviértelas con la fecha de hoy."
+    : "";
+  const listed =
+    filter.values && VALUE_OPS.has(filter.op)
+      ? ` Valores posibles: ${filter.values
+          .map((item) => (item.meaning ? `${item.value} (${item.meaning})` : String(item.value)))
+          .join(", ")}.`
+      : "";
+  const examples =
+    !listed && filter.examples ? ` Ejemplos reales: ${filter.examples.join(", ")}.` : "";
+  const omitted = filter.required ? "" : ` Si se omite, no se filtra por ${filter.column}.`;
+
+  return `${what[filter.op]}${day}${relative}${listed}${examples}${own}${omitted}`;
 }
 
 /**
@@ -96,7 +109,11 @@ export function inputSchemaOf(tool: CreatedTool): JsonSchema {
   const properties: Record<string, unknown> = {};
   for (const filter of tool.spec.filters) {
     const kind = kinds.get(filter.column) ?? "text";
-    const one = valueSchema(kind);
+    // A closed list keeps the model to values the source has
+    const one =
+      filter.values && VALUE_OPS.has(filter.op)
+        ? { ...valueSchema(kind), enum: filter.values.map((item) => item.value) }
+        : valueSchema(kind);
     const schema =
       filter.op === "between"
         ? { type: "array", items: one, minItems: 2, maxItems: 2 }

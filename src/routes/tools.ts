@@ -11,12 +11,21 @@ import {
 } from "../chat/rateLimit.js";
 import { findConversation } from "../chat/repository.js";
 import { type ChatDependencies, type ChatEvent, chatTurn } from "../chat/turn.js";
-import { explainPrompt, listRelations, readExplanation } from "../creator/catalog.js";
+import { explainPrompt, filterPrompt, listRelations, readExplanation } from "../creator/catalog.js";
 import { type CheckResult, type Runner, runChecks, runnerFor } from "../creator/checks.js";
-import { type BaseColumn, describeBase } from "../creator/columns.js";
-import { baseSchema, definitionSchema, TOOL_NAME } from "../creator/definition.js";
+import { type BaseColumn, describeBase, normalizeRows } from "../creator/columns.js";
+import {
+  baseSchema,
+  columnName,
+  definitionSchema,
+  FILTER_OPS,
+  MAX_FILTER_VALUES,
+  TOOL_NAME,
+  VALUE_OPS,
+} from "../creator/definition.js";
 import { guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
 import { checkPasted } from "../creator/pasted.js";
+import { distinctQuery } from "../creator/sql.js";
 import {
   type CreatedTools,
   findDefinition,
@@ -38,6 +47,7 @@ import { removeHiddenDeep } from "../lib/hiddenText.js";
 import { isRunning, oneAtATime } from "../lib/oneAtATime.js";
 import { cliToolName } from "../mcp/names.js";
 import { CHAT_CLI_ALLOWED } from "../mcp/surface.js";
+import { type ColumnKind, runQuery } from "../sources/engines.js";
 import { connectionFor, SOURCE_CODE, sourceScope } from "../sources/registry.js";
 import { ToolRegistry } from "../tools/registry.js";
 
@@ -80,6 +90,18 @@ const NAME_TAKEN = {
 const nameParams = z.object({ name: z.string().regex(TOOL_NAME) });
 const describeBody = z.object({ source: z.string().regex(SOURCE_CODE), base: baseSchema }).strict();
 const relationsQuery = z.object({ source: z.string().regex(SOURCE_CODE) }).strict();
+const filterHelpBody = z
+  .object({
+    source: z.string().regex(SOURCE_CODE),
+    base: baseSchema,
+    column: columnName,
+    op: z.enum(FILTER_OPS),
+    // What the person said the base holds, so the explanation speaks of the same thing
+    about: z.string().trim().min(1).max(2_000).optional(),
+  })
+  .strict();
+
+type FilterValue = string | number | boolean;
 const saveBody = z
   .object({
     source: z.string().regex(SOURCE_CODE),
@@ -286,8 +308,12 @@ export default async function toolsRoutes(
    *
    * @return  The source, its connection, the base and the checked query, or null once replied
    */
-  const openBase = async (request: FastifyRequest, reply: FastifyReply) => {
-    const body = describeBody.safeParse(request.body);
+  const openBase = async <T extends z.infer<typeof describeBody>>(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    schema: z.ZodType<T>,
+  ) => {
+    const body = schema.safeParse(request.body);
     if (!body.success) {
       reply
         .code(400)
@@ -309,7 +335,7 @@ export default async function toolsRoutes(
       pasted = checked.sql;
     }
 
-    return { source, connection, base, pasted };
+    return { source, connection, base, pasted, body: body.data };
   };
 
   /**
@@ -365,7 +391,7 @@ export default async function toolsRoutes(
 
   // The columns of a base before anything is saved, so a person picks them instead of typing them
   app.post("/admin/tools/describe", guard, async (request, reply) => {
-    const opened = await openBase(request, reply);
+    const opened = await openBase(request, reply, describeBody);
     if (!opened) {
       return reply;
     }
@@ -389,7 +415,7 @@ export default async function toolsRoutes(
   // The columns of a base with a short description the model writes from a few of its values,
   // for a base whose database gives none; without the model, only the columns
   app.post("/admin/tools/explain", guard, async (request, reply) => {
-    const opened = await openBase(request, reply);
+    const opened = await openBase(request, reply, describeBody);
     if (!opened) {
       return reply;
     }
@@ -457,6 +483,118 @@ export default async function toolsRoutes(
           columns,
           description: null,
           note: "No se pudo escribir la descripción ahora; escríbela tú",
+        },
+      };
+    }
+  });
+
+  // What a filter needs for the model to use it well: the column's real values, as a closed list
+  // when they are few, and an explanation the model writes and the person reviews
+  app.post("/admin/tools/filter-help", guard, async (request, reply) => {
+    const opened = await openBase(request, reply, filterHelpBody);
+    if (!opened) {
+      return reply;
+    }
+    const { source, connection, base, pasted, body } = opened;
+    const key = `describe:${source}`;
+    if (busy(reply, key)) {
+      return reply;
+    }
+    let read: { kind: ColumnKind; values: FilterValue[] } | null;
+    try {
+      read = await oneAtATime(key, async () => {
+        const columns = await describeBase(connection.info, base, pasted, DESCRIBE_LIMITS);
+        const kind = columns.find((column) => column.name === body.column)?.kind;
+        if (!kind) {
+          return null;
+        }
+        // One more than a closed list holds, to tell a short list from a long one
+        const sql = distinctQuery(
+          base,
+          connection.info.engine,
+          pasted,
+          body.column,
+          MAX_FILTER_VALUES + 1,
+        );
+        const rows = normalizeRows(
+          await runQuery(connection.info, sql, [], {
+            timeoutMs: DESCRIBE_SAMPLE_LIMITS.timeoutMs,
+            maxRows: MAX_FILTER_VALUES + 1,
+          }),
+        );
+        const values = rows
+          .map((row) => row.value)
+          .filter(
+            (value): value is FilterValue =>
+              typeof value === "string" || typeof value === "number" || typeof value === "boolean",
+          );
+        return { kind, values };
+      });
+    } catch (error) {
+      request.log.warn({ err: error, source }, "filter values could not be read");
+      return reply.code(400).send(BASE_UNREADABLE);
+    }
+    if (!read) {
+      return reply.code(400).send({
+        ok: false,
+        error: "unknown_column",
+        message: "Esa columna no está en lo que lee la herramienta",
+      });
+    }
+
+    const { kind, values } = read;
+    // A closed list makes sense for a few texts or numbers a person picks one of
+    const closed =
+      VALUE_OPS.has(body.op) &&
+      (kind === "text" || kind === "number") &&
+      values.length > 0 &&
+      values.length <= MAX_FILTER_VALUES;
+    const sorted = [...values].sort((a, b) =>
+      typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)),
+    );
+    const help = {
+      values: closed ? sorted : null,
+      examples:
+        !closed && (kind === "text" || kind === "number") && values.length > 0
+          ? values.slice(0, 5)
+          : null,
+    };
+
+    const ask = options.ask;
+    if (!ask) {
+      return { ok: true, data: { ...help, description: null } };
+    }
+    const userId = request.authUser?.id;
+    let reservation: Reservation | null = null;
+    try {
+      // A call to the model counts as a message of the person, like a chat turn
+      const limits = options.trial?.chat.limits;
+      if (limits && userId !== undefined) {
+        reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
+      }
+      const prompt = filterPrompt({
+        column: body.column,
+        kind,
+        op: body.op,
+        about: body.about ?? null,
+        values: values.slice(0, MAX_FILTER_VALUES),
+      });
+      return { ok: true, data: { ...help, description: readExplanation(await ask(prompt)) } };
+    } catch (error) {
+      if (error instanceof RateLimitExceededError) {
+        return { ok: true, data: { ...help, description: null, note: error.message } };
+      }
+      // The person did not get an explanation, so the message is theirs again
+      if (reservation && userId !== undefined) {
+        await refundMessage(db, userId, reservation).catch(() => undefined);
+      }
+      request.log.warn({ err: error, source }, "filter explanation failed");
+      return {
+        ok: true,
+        data: {
+          ...help,
+          description: null,
+          note: "No se pudo escribir la explicación ahora; escríbela tú",
         },
       };
     }

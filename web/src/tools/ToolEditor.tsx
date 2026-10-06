@@ -37,11 +37,14 @@ import {
   type Definition,
   type DescribedBase,
   FILTER_OPS,
+  type FilterHelp,
+  type FilterOp,
   OP_LABELS,
   outputNames,
   prune,
   type Relation,
   type ToolDetail,
+  VALUE_OPS,
   withDefaults,
 } from "./types";
 
@@ -151,6 +154,8 @@ function ToolEditor({
   const [search, setSearch] = useState("");
   // Why the model could not describe the base, when it could not
   const [note, setNote] = useState<string | null>(null);
+  // Columns whose values are being read for their filter
+  const [helping, setHelping] = useState<string[]>([]);
   // The description last filled in for the person, replaced when they pick another base
   const [autoDescription, setAutoDescription] = useState<string | null>(null);
   const relations = useQuery({
@@ -346,8 +351,62 @@ function ToolEditor({
   const textIdeas = baseColumns
     .filter((column) => column.kind === "text" && !filtered.has(column.name))
     .slice(0, 3);
-  const addFilter = (filter: Definition["filters"][number]) =>
+  // The next column without a filter, for a new one
+  const nextColumn = baseColumns.find((column) => !filtered.has(column.name));
+
+  /**
+   * Reads a filter's real values and has the model explain it; an explanation the person already
+   * wrote stays unless they ask for a new one
+   *
+   * @param   column  Column of the filter
+   * @param   op      Its operator
+   * @param   redo    Whether to replace the explanation already there
+   */
+  const helpFilter = async (column: string, op: FilterOp, redo = false) => {
+    setHelping((current) => [...current, column]);
+    try {
+      const help = await api<FilterHelp>("/admin/tools/filter-help", {
+        method: "POST",
+        body: {
+          source,
+          base: definition.base,
+          column,
+          op,
+          about: definition.meaning.definition.trim() || undefined,
+        },
+      });
+      setNote(help.note ?? null);
+      setDefinition((current) => ({
+        ...current,
+        filters: current.filters.map((filter) =>
+          filter.column !== column
+            ? filter
+            : {
+                ...filter,
+                // What the person wrote of a value that is still there stays with it
+                values: help.values?.map((value) => ({
+                  value,
+                  meaning: filter.values?.find((item) => item.value === value)?.meaning,
+                })),
+                examples: help.examples ?? undefined,
+                description:
+                  redo || !filter.description?.trim()
+                    ? (help.description ?? filter.description)
+                    : filter.description,
+              },
+        ),
+      }));
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : "No se pudieron leer los valores");
+    } finally {
+      setHelping((current) => current.filter((item) => item !== column));
+    }
+  };
+
+  const addFilter = (filter: Definition["filters"][number]) => {
     change({ filters: [...definition.filters, filter] });
+    void helpFilter(filter.column, filter.op);
+  };
 
   return (
     <Flex gap={4} align="start" direction={{ base: "column", xl: "row" }}>
@@ -648,7 +707,6 @@ function ToolEditor({
                         column: dateIdea.name,
                         op: "between",
                         required: false,
-                        description: `Rango de ${dateIdea.name}`,
                       })
                     }
                   >
@@ -671,87 +729,164 @@ function ToolEditor({
           {step === 3 && (
             <Section
               title="Por qué se puede filtrar"
-              hint="Cada filtro es algo que la persona podrá pedir al preguntar, como un rango de fechas o un cliente. Marca obligatorio el que siempre debe venir, para no traer la tabla entera."
+              hint="Cada filtro es algo que la persona podrá pedir al preguntar, como un rango de fechas o una zona. Al agregarlo, el asistente lee los valores reales de la columna y redacta cómo debe usarlo la IA; revísalo y ajústalo. Marca obligatorio el que siempre debe venir, para no traer la tabla entera."
             >
-              <Stack gap={2}>
-                {definition.filters.map((filter, index) => (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: edited rows have no identity of their own, and a key built from their values would remount the input being typed in
-                  <HStack key={index} gap={2} wrap="wrap">
-                    <Select
-                      value={filter.column}
-                      options={baseColumns.map((column) => [column.name, column.name])}
-                      onChange={(value) =>
-                        change({
-                          filters: replace(definition.filters, index, { ...filter, column: value }),
-                        })
-                      }
-                    />
-                    <Select
-                      value={filter.op}
-                      options={FILTER_OPS.map((op) => [op, OP_LABELS[op]])}
-                      onChange={(value) =>
-                        change({
-                          filters: replace(definition.filters, index, {
-                            ...filter,
-                            op: value as typeof filter.op,
-                          }),
-                        })
-                      }
-                    />
-                    <Checkbox.Root
-                      checked={filter.required}
-                      onCheckedChange={(details) =>
-                        change({
-                          filters: replace(definition.filters, index, {
-                            ...filter,
-                            required: Boolean(details.checked),
-                          }),
-                        })
-                      }
+              <Stack gap={3}>
+                {definition.filters.map((filter, index) => {
+                  const set = (patch: Partial<typeof filter>) =>
+                    change({
+                      filters: replace(definition.filters, index, { ...filter, ...patch }),
+                    });
+                  const reading = helping.includes(filter.column);
+                  const closed = filter.values && VALUE_OPS.has(filter.op) ? filter.values : null;
+                  return (
+                    <Box
+                      // biome-ignore lint/suspicious/noArrayIndexKey: edited rows have no identity of their own, and a key built from their values would remount the input being typed in
+                      key={index}
+                      borderWidth="1px"
+                      rounded="md"
+                      p={3}
                     >
-                      <Checkbox.HiddenInput />
-                      <Checkbox.Control />
-                      <Checkbox.Label fontSize="sm">obligatorio</Checkbox.Label>
-                    </Checkbox.Root>
-                    <Input
-                      size="sm"
-                      flex={1}
-                      minW="48"
-                      placeholder="Para qué sirve (lo lee el modelo)"
-                      value={filter.description ?? ""}
-                      onChange={(event) =>
-                        change({
-                          filters: replace(definition.filters, index, {
-                            ...filter,
-                            description: event.target.value,
-                          }),
-                        })
-                      }
-                    />
-                    <IconButton
-                      aria-label="Quitar el filtro"
-                      size="xs"
-                      variant="ghost"
-                      onClick={() =>
-                        change({ filters: definition.filters.filter((_, at) => at !== index) })
-                      }
-                    >
-                      <FiMinus />
-                    </IconButton>
-                  </HStack>
-                ))}
+                      <HStack gap={2} wrap="wrap">
+                        <Select
+                          value={filter.column}
+                          options={baseColumns.map((column) => [column.name, column.name])}
+                          onChange={(value) => {
+                            // Another column has other values and means something else
+                            set({
+                              column: value,
+                              values: undefined,
+                              examples: undefined,
+                              description: undefined,
+                            });
+                            void helpFilter(value, filter.op, true);
+                          }}
+                        />
+                        <Select
+                          value={filter.op}
+                          options={FILTER_OPS.map((op) => [op, OP_LABELS[op]])}
+                          onChange={(value) => {
+                            set({ op: value as typeof filter.op });
+                            void helpFilter(filter.column, value as typeof filter.op);
+                          }}
+                        />
+                        <Checkbox.Root
+                          checked={filter.required}
+                          onCheckedChange={(details) => set({ required: Boolean(details.checked) })}
+                        >
+                          <Checkbox.HiddenInput />
+                          <Checkbox.Control />
+                          <Checkbox.Label fontSize="sm">obligatorio</Checkbox.Label>
+                        </Checkbox.Root>
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          ms="auto"
+                          loading={reading}
+                          onClick={() => void helpFilter(filter.column, filter.op, true)}
+                        >
+                          Leer valores y redactar de nuevo
+                        </Button>
+                        <IconButton
+                          aria-label="Quitar el filtro"
+                          size="xs"
+                          variant="ghost"
+                          onClick={() =>
+                            change({ filters: definition.filters.filter((_, at) => at !== index) })
+                          }
+                        >
+                          <FiMinus />
+                        </IconButton>
+                      </HStack>
+                      <Field.Root mt={3}>
+                        <Field.Label fontSize="sm">Cómo lo usa la IA</Field.Label>
+                        <Textarea
+                          size="sm"
+                          rows={3}
+                          placeholder={
+                            reading
+                              ? "Leyendo la columna y redactando…"
+                              : "Qué significa, cómo lo pide la gente y cuándo usarlo"
+                          }
+                          value={filter.description ?? ""}
+                          onChange={(event) => set({ description: event.target.value })}
+                        />
+                        <Field.HelperText>
+                          El formato, los valores posibles y qué pasa si se omite los agrega el
+                          sistema.
+                        </Field.HelperText>
+                      </Field.Root>
+                      {closed && (
+                        <Box mt={3}>
+                          <Text fontSize="sm" fontWeight="medium">
+                            Valores posibles ({closed.length})
+                          </Text>
+                          <Text fontSize="xs" color="fg.muted" mb={2}>
+                            La IA solo puede pedir uno de estos. Anota qué significa el que no se
+                            entienda solo, o quita los que no deban pedirse.
+                          </Text>
+                          <Stack gap={1}>
+                            {closed.map((item) => (
+                              <HStack key={String(item.value)} gap={2}>
+                                <Badge variant="outline" fontFamily="mono" minW="32">
+                                  {String(item.value)}
+                                </Badge>
+                                <Input
+                                  size="xs"
+                                  maxW="sm"
+                                  placeholder="qué significa (opcional)"
+                                  value={item.meaning ?? ""}
+                                  onChange={(event) =>
+                                    set({
+                                      values: closed.map((other) =>
+                                        other.value === item.value
+                                          ? { ...other, meaning: event.target.value }
+                                          : other,
+                                      ),
+                                    })
+                                  }
+                                />
+                                <IconButton
+                                  aria-label="Quitar el valor"
+                                  size="2xs"
+                                  variant="ghost"
+                                  disabled={closed.length === 1}
+                                  onClick={() =>
+                                    set({
+                                      values: closed.filter((other) => other.value !== item.value),
+                                    })
+                                  }
+                                >
+                                  <FiX />
+                                </IconButton>
+                              </HStack>
+                            ))}
+                          </Stack>
+                        </Box>
+                      )}
+                      {!closed && filter.examples && (
+                        <Text fontSize="xs" color="fg.muted" mt={2}>
+                          Ejemplos reales que verá la IA: {filter.examples.map(String).join(", ")}
+                        </Text>
+                      )}
+                    </Box>
+                  );
+                })}
+                {note && (
+                  <Text fontSize="sm" color="fg.muted">
+                    {note}
+                  </Text>
+                )}
                 <Button
                   size="xs"
                   variant="ghost"
                   alignSelf="start"
-                  onClick={() =>
-                    change({
-                      filters: [
-                        ...definition.filters,
-                        { column: baseColumns[0]?.name ?? "", op: "=", required: false },
-                      ],
-                    })
-                  }
+                  disabled={!nextColumn}
+                  onClick={() => {
+                    if (nextColumn) {
+                      addFilter({ column: nextColumn.name, op: "=", required: false });
+                    }
+                  }}
                 >
                   <FiPlus /> Agregar filtro
                 </Button>
