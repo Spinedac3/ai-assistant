@@ -5,12 +5,12 @@ import { logAudit } from "../audit.js";
 import type { Database } from "../db/client.js";
 import { openPdf } from "../lib/pdf.js";
 import { MAX_PAGES, type PdfConverter } from "../rag/convert.js";
-import { DOC_CODE, writeDocument } from "../rag/document.js";
+import { DOC_CODE } from "../rag/document.js";
 import { type Index, isCurrent, removeDocument } from "../rag/ingest.js";
 import { enqueue, findJob } from "../rag/jobs.js";
 import { scopeFilter } from "../rag/search.js";
 import { CONTENT_TYPES, type DocumentStorage } from "../rag/storage.js";
-import { MAX_MARKDOWN_BYTES, storeDocument } from "../rag/upload.js";
+import { MAX_MARKDOWN_BYTES, storeDocument, writeDocument } from "../rag/upload.js";
 
 export interface DocsRoutesOptions {
   db: Database;
@@ -28,24 +28,32 @@ const CONVERSION_NOT_FOUND = {
   message: "Esa conversión no existe o ya se publicó",
 };
 const conversionParams = z.object({ id: z.string().uuid() });
-// The header of a converted PDF as the person left it; the document checks it again on publishing
+// The header of a converted PDF as the person left it; the text is the one the server converted,
+// and the document checks all of it again on publishing
 const publishBody = z
   .object({
     header: z
       .object({
-        doc_code: z.string().trim().min(1).max(100),
-        doc_title: z.string().trim().min(1).max(300),
-        doc_version: z.string().trim().min(1).max(30),
-        area: z.string().trim().min(1).max(40),
-        doc_type: z.string().trim().max(60).optional(),
-        effective_date: z.string().trim().max(10).optional(),
-        tags: z.array(z.string().trim().min(1).max(60)).max(30).optional(),
+        doc_code: z.string().trim().min(1, "Falta el código").max(100, "El código es muy largo"),
+        doc_title: z.string().trim().min(1, "Falta el título").max(300, "El título es muy largo"),
+        doc_version: z
+          .string()
+          .trim()
+          .min(1, "Falta la versión")
+          .max(30, "La versión es muy larga"),
+        area: z.string().trim().min(1, "Falta el área").max(40, "El área no existe"),
+        doc_type: z.string().trim().max(60, "El tipo es muy largo").optional(),
+        tags: z
+          .array(z.string().trim().min(1).max(60, "Una etiqueta es muy larga"))
+          .max(30, "Son demasiadas etiquetas")
+          .optional(),
       })
       .strict(),
-    markdown: z.string().min(1),
   })
   .strict();
 
+// PDFs of one person converting at once; the queue is shared by everyone
+const MAX_PENDING_CONVERSIONS = 2;
 // The PDF original can be much larger than its markdown
 const MAX_ORIGINAL_BYTES = 50 * 1024 * 1024;
 // Every document has a first chunk, so listing those lists each document once
@@ -231,6 +239,14 @@ export default async function docsRoutes(
     const areas = [...(request.authUser?.scopes ?? [])]
       .map((scope) => AREA_SCOPE.exec(scope)?.[1])
       .filter((area): area is string => Boolean(area));
+    // One person's PDFs never hold the queue for everyone else
+    if ((await converter.pending(request.authUser?.id ?? 0)) >= MAX_PENDING_CONVERSIONS) {
+      return reply.code(409).send({
+        ok: false,
+        error: "too_many_conversions",
+        message: `Ya tienes ${MAX_PENDING_CONVERSIONS} PDF convirtiéndose; espera a que terminen`,
+      });
+    }
     // Refused now, not after minutes of waiting: a file that does not open, or too long to review
     const opened = await openPdf(pdf);
     if (!opened) {
@@ -302,13 +318,6 @@ export default async function docsRoutes(
     if (!found) {
       return reply;
     }
-    if (found.status !== "done") {
-      return reply.code(409).send({
-        ok: false,
-        error: "conversion_not_done",
-        message: "La conversión todavía no terminó",
-      });
-    }
     const body = publishBody.safeParse(request.body);
     if (!body.success) {
       return reply
@@ -317,7 +326,7 @@ export default async function docsRoutes(
     }
     const markdown = writeDocument(
       { ...body.data.header, tags: body.data.header.tags ?? [] },
-      body.data.markdown,
+      found.markdown ?? "",
     );
     if (Buffer.byteLength(markdown) > MAX_MARKDOWN_BYTES) {
       return reply.code(413).send({
@@ -327,6 +336,14 @@ export default async function docsRoutes(
       });
     }
     const converter = options.converter as PdfConverter;
+    // Taken once: a second publish at the same time finds it no longer finished
+    if (found.status !== "done" || !(await converter.claim(found.id))) {
+      return reply.code(409).send({
+        ok: false,
+        error: "conversion_not_done",
+        message: "La conversión todavía no terminó o ya se está publicando",
+      });
+    }
     const stored = await storeDocument(
       { db, index, storage },
       markdown,
@@ -338,13 +355,15 @@ export default async function docsRoutes(
       await converter.read(found.id),
     );
     if (!stored.ok) {
+      await converter.release(found.id);
       return reply
         .code(
           stored.error === "older_version" ? 409 : stored.error === "area_not_readable" ? 403 : 400,
         )
         .send({ ok: false, error: stored.error, message: stored.message });
     }
-    await converter.remove(found.id);
+    // Published either way; a conversion left over is purged with the old ones
+    await converter.remove(found.id).catch(() => undefined);
 
     return reply
       .code(202)

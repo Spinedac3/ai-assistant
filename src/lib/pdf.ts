@@ -41,26 +41,30 @@ export async function pagesOf(source: PDFDocument, from: number, to: number): Pr
 }
 
 /**
- * Splits a PDF into files the CLI reads whole, each with the range of pages it holds
+ * Splits the first pages of a PDF into files the CLI reads whole, each with the range it holds
  *
- * @param   pdf  File
+ * @param   pdf       File
+ * @param   maxPages  Pages read at most; the rest are left out
  *
- * @return  The parts in order, or the file as it is when it is short or cannot be opened
+ * @return  The parts in order, or the file as it is when it is short or cannot be opened, and how
+ *          many pages the file has
  */
 export async function splitPdf(
   pdf: Buffer,
-): Promise<Array<{ file: Buffer; from: number; to: number }>> {
+  maxPages: number,
+): Promise<{ parts: Array<{ file: Buffer; from: number; to: number }>; pages: number }> {
   const source = await openPdf(pdf);
   const pages = source?.getPageCount() ?? 0;
   if (!source || pages <= PAGES_PER_READ) {
-    return [{ file: pdf, from: 1, to: Math.max(pages, 1) }];
+    return { parts: [{ file: pdf, from: 1, to: Math.max(pages, 1) }], pages };
   }
 
+  const last = Math.min(pages, maxPages);
   const parts: Array<{ file: Buffer; from: number; to: number }> = [];
-  for (let from = 1; from <= pages; from += PAGES_PER_READ) {
-    const to = Math.min(from + PAGES_PER_READ - 1, pages);
+  for (let from = 1; from <= last; from += PAGES_PER_READ) {
+    const to = Math.min(from + PAGES_PER_READ - 1, last);
     parts.push({ file: await pagesOf(source, from, to), from, to });
   }
 
-  return parts;
+  return { parts, pages };
 }

@@ -64,44 +64,6 @@ export function areaScope(area: string): string {
 }
 
 /**
- * Writes a document as a file: its header between --- lines, then its body; values go on one line
- * each, as the header reader takes them
- *
- * @param   meta  Header
- * @param   body  Markdown
- *
- * @return  The file
- */
-export function writeDocument(meta: Frontmatter, body: string): string {
-  const line = (value: string) => value.replace(/[\r\n]+/g, " ").trim();
-  const fields: Array<[string, string | undefined]> = [
-    ["doc_code", meta.doc_code],
-    ["doc_title", meta.doc_title],
-    ["doc_version", meta.doc_version],
-    ["doc_revision", meta.doc_revision],
-    ["doc_type", meta.doc_type],
-    ["area", meta.area],
-    ["effective_date", meta.effective_date],
-  ];
-  const header = fields
-    .filter((field): field is [string, string] => Boolean(field[1]?.trim()))
-    .map(([name, value]) => `${name}: ${line(value)}`);
-  // A tag holding a comma or a bracket would split into two, or end the list
-  const tags = meta.tags
-    .map((tag) =>
-      line(tag)
-        .replace(/[,[\]]/g, " ")
-        .trim(),
-    )
-    .filter(Boolean);
-  if (tags.length > 0) {
-    header.push(`tags: [${tags.join(", ")}]`);
-  }
-
-  return `---\n${header.join("\n")}\n---\n\n${body.trim()}\n`;
-}
-
-/**
  * Derives the family of a code: versions of one document share it, as in GUIDE-V001 and GUIDE-V002
  *
  * @param   docCode  Document code

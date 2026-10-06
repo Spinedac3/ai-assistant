@@ -26,7 +26,7 @@ export function attachmentNames(count: number): string[] {
     ? [ATTACHMENT_NAME]
     : Array.from({ length: count }, (_, index) => `document-${index + 1}.pdf`);
 }
-// Reading a long PDF takes several reads of up to twenty pages each, then the answer
+// Reading a long PDF takes a read of each of its parts, then the answer
 const ATTACHMENT_TURNS = 12;
 // Reading a long PDF takes longer than a plain answer, yet well within the chat attempt that asked
 // for it, so the attempt still has time to answer with what was read
@@ -59,12 +59,14 @@ export async function askOnce(
     const files =
       attachment === undefined ? [] : Array.isArray(attachment) ? attachment : [attachment];
     const names = attachmentNames(files.length);
+    // With no file there is nothing to read, and Read stays blocked
+    const reading = files.length > 0;
     for (const [index, file] of files.entries()) {
       await writeFile(join(workspace, names[index] ?? ATTACHMENT_NAME), file);
     }
     const args = cliArgs({
       model: deps.model,
-      maxTurns: limits?.maxTurns ?? (attachment ? ATTACHMENT_TURNS : 1),
+      maxTurns: limits?.maxTurns ?? (reading ? ATTACHMENT_TURNS : 1),
       mcpConfigPath,
       // Read stays blocked unless there is a file, and then it reaches that file alone
       disallowedTools: attachment
@@ -72,9 +74,9 @@ export async function askOnce(
             .filter((tool) => tool !== "Read")
             .join(" ")
         : DISALLOWED_CLI_TOOLS,
-      ...(attachment ? { allowedTools: names.map((name) => `Read(./${name})`).join(" ") } : {}),
+      ...(reading ? { allowedTools: names.map((name) => `Read(./${name})`).join(" ") } : {}),
       // A list of what is allowed, so a tool a newer CLI adds is not left open
-      tools: attachment ? "Read" : "",
+      tools: reading ? "Read" : "",
       // Anything beyond that one read is denied, whatever the machine allows elsewhere
       permissionMode: "dontAsk",
     });
@@ -84,7 +86,7 @@ export async function askOnce(
       prompt,
       workspace,
       AbortSignal.timeout(
-        limits?.timeoutMs ?? (attachment ? ATTACHMENT_TIMEOUT_MS : ONE_SHOT_TIMEOUT_MS),
+        limits?.timeoutMs ?? (reading ? ATTACHMENT_TIMEOUT_MS : ONE_SHOT_TIMEOUT_MS),
       ),
     );
 

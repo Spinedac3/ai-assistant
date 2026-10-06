@@ -15,15 +15,30 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { FiFileText } from "react-icons/fi";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ApiError, api } from "../api/http";
 import { useSession } from "../api/session";
 
+// The converted text comes from a PDF nobody checked: an image would be fetched from wherever it
+// points the moment the review opens, and a link could lead anywhere
+const UNTRUSTED: Components = {
+  img: ({ alt }) => (
+    <Text as="span" color="fg.muted">
+      {`[imagen${alt ? `: ${alt}` : ""}]`}
+    </Text>
+  ),
+  a: ({ children }) => (
+    <Text as="span" textDecoration="underline">
+      {children}
+    </Text>
+  ),
+};
+
 interface ConversionRow {
   id: string;
   file_name: string;
-  status: "queued" | "running" | "done" | "failed";
+  status: "queued" | "running" | "done" | "failed" | "publishing";
   pages_done: number;
   pages_total: number | null;
   error: string | null;
@@ -199,7 +214,7 @@ export function Conversions({ onQueued }: { onQueued: (job: number) => void }) {
                 }}
               />
             )}
-            {(row.status === "done" || row.status === "failed") && (
+            {row.status !== "publishing" && (
               <Button
                 size="xs"
                 variant="ghost"
@@ -280,7 +295,6 @@ function ReviewButton({ id, onPublished }: { id: string; onPublished: (job: numb
             ...(header.doc_type?.trim() ? { doc_type: header.doc_type.trim() } : {}),
             tags: header.tags.map((tag) => tag.trim()).filter(Boolean),
           },
-          markdown,
         },
       });
       onPublished(queued.job_id);
@@ -411,7 +425,9 @@ function ReviewButton({ id, onPublished }: { id: string; onPublished: (job: numb
                       },
                     }}
                   >
-                    <Markdown remarkPlugins={[remarkGfm]}>{markdown}</Markdown>
+                    <Markdown remarkPlugins={[remarkGfm]} components={UNTRUSTED}>
+                      {markdown}
+                    </Markdown>
                   </Box>
                   {error && (
                     <Text role="alert" color="fg.error" fontSize="sm">

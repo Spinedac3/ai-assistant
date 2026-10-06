@@ -3,9 +3,10 @@ import { and, desc, eq, inArray, lte } from "drizzle-orm";
 import type { Database } from "../db/client.js";
 import { pdfConversions } from "../db/schema.js";
 import { promptData, removeHidden } from "../lib/hiddenText.js";
+import { answerText, jsonIn } from "../lib/modelAnswer.js";
 import { openPdf, PAGES_PER_READ, pagesOf } from "../lib/pdf.js";
 import { DOC_CODE } from "./document.js";
-import { isMissing, type StorageConfig, s3Client } from "./storage.js";
+import type { DocumentStorage } from "./storage.js";
 
 // A longer file is several documents, and reviewing it whole is no review
 export const MAX_PAGES = 300;
@@ -25,23 +26,12 @@ export interface SuggestedHeader {
 
 export interface ConverterDependencies {
   db: Database;
-  storage: StorageConfig;
+  storage: DocumentStorage;
   // Has the model read the attached PDF, a few pages of the whole; the answer is their Markdown
   convert: (prompt: string, pdf: Buffer) => Promise<string>;
   // Asks the model one question with no file
   ask: (prompt: string) => Promise<string>;
   logger?: { error: (details: object, message: string) => void };
-}
-
-/**
- * Names where a conversion keeps its PDF
- *
- * @param   id  Conversion id
- *
- * @return  The object key
- */
-function pdfKey(id: string): string {
-  return `conversions/${id}.pdf`;
 }
 
 /**
@@ -129,16 +119,9 @@ export function headerPrompt(fileName: string, start: string, areas: string[]): 
  * @return  The header to review
  */
 export function readHeader(answer: string, areas: string[], fileName: string): SuggestedHeader {
-  let parsed: Record<string, unknown> = {};
-  try {
-    const json = /\{[\s\S]*\}/.exec(answer)?.[0];
-    const value: unknown = json ? JSON.parse(json) : {};
-    parsed = value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  } catch {
-    parsed = {};
-  }
+  const parsed = jsonIn(answer);
   const text = (value: unknown, max: number) =>
-    typeof value === "string" ? removeHidden(value).replace(/\s+/g, " ").trim().slice(0, max) : "";
+    answerText(typeof value === "string" ? value.replace(/\s+/g, " ") : value, max) ?? "";
   const fromName = fileName
     .replace(/\.pdf$/i, "")
     .normalize("NFD")
@@ -202,28 +185,43 @@ export class PdfConverter {
     areas: string[],
   ): Promise<string> {
     const id = randomUUID();
+    // The file first: a row whose file could not be kept would wait for a run that never comes
+    await this.deps.storage.saveConversion(id, pdf);
     await this.deps.db.insert(pdfConversions).values({
       id,
       userId,
       fileName: fileName.slice(0, 200),
       pagesTotal: pages,
     });
-    await s3Client(this.deps.storage).putObject(
-      this.deps.storage.bucket,
-      pdfKey(id),
-      pdf,
-      pdf.length,
-      {
-        "Content-Type": "application/pdf",
-      },
-    );
-    this.queue = this.queue.then(() => this.run(id, areas));
+    // One conversion that fails in a way run() did not foresee never stops the ones after it
+    this.queue = this.queue.then(() => this.run(id, areas)).catch(() => undefined);
 
     return id;
   }
 
   /**
-   * Waits for every queued conversion, for a server that stops or a test that reads the result
+   * Counts the conversions of a person still waiting or being written
+   *
+   * @param   userId  Person
+   *
+   * @return  How many
+   */
+  async pending(userId: number): Promise<number> {
+    const rows = await this.deps.db
+      .select({ id: pdfConversions.id })
+      .from(pdfConversions)
+      .where(
+        and(
+          eq(pdfConversions.userId, userId),
+          inArray(pdfConversions.status, ["queued", "running"]),
+        ),
+      );
+
+    return rows.length;
+  }
+
+  /**
+   * Waits for every queued conversion, for a test that reads the result
    */
   async idle(): Promise<void> {
     await this.queue;
@@ -247,10 +245,18 @@ export class PdfConverter {
       if (!source) {
         throw new Error("The PDF could not be opened");
       }
-      const last = Math.min(source.getPageCount(), MAX_PAGES);
+      const last = source.getPageCount();
       const parts: string[] = [];
       for (let from = 1; from <= last; from += PAGES_PER_READ) {
         const to = Math.min(from + PAGES_PER_READ - 1, last);
+        // Discarded halfway: nobody is waiting for the rest
+        const [still] = await db
+          .select({ id: pdfConversions.id })
+          .from(pdfConversions)
+          .where(eq(pdfConversions.id, id));
+        if (!still) {
+          return;
+        }
         const answer = await this.deps.convert(
           pagesPrompt(from, to),
           await pagesOf(source, from, to),
@@ -295,16 +301,7 @@ export class PdfConverter {
    * @return  The file
    */
   async read(id: string): Promise<Buffer> {
-    const stream = await s3Client(this.deps.storage).getObject(
-      this.deps.storage.bucket,
-      pdfKey(id),
-    );
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk as Buffer);
-    }
-
-    return Buffer.concat(chunks);
+    return this.deps.storage.readConversion(id);
   }
 
   /**
@@ -348,23 +345,47 @@ export class PdfConverter {
   }
 
   /**
+   * Takes a finished conversion to publish it, so two publishes at once never both go ahead
+   *
+   * @param   id  Conversion id
+   *
+   * @return  Whether it was taken
+   */
+  async claim(id: string): Promise<boolean> {
+    const taken = await this.deps.db
+      .update(pdfConversions)
+      .set({ status: "publishing" })
+      .where(and(eq(pdfConversions.id, id), eq(pdfConversions.status, "done")))
+      .returning({ id: pdfConversions.id });
+
+    return taken.length > 0;
+  }
+
+  /**
+   * Gives back a conversion whose publishing failed, for the person to correct and try again
+   *
+   * @param   id  Conversion id
+   */
+  async release(id: string): Promise<void> {
+    await this.deps.db
+      .update(pdfConversions)
+      .set({ status: "done" })
+      .where(and(eq(pdfConversions.id, id), eq(pdfConversions.status, "publishing")));
+  }
+
+  /**
    * Forgets a conversion and its file
    *
    * @param   id  Conversion id
    */
   async remove(id: string): Promise<void> {
-    await s3Client(this.deps.storage)
-      .removeObject(this.deps.storage.bucket, pdfKey(id))
-      .catch((error: unknown) => {
-        if (!isMissing(error)) {
-          throw error;
-        }
-      });
+    await this.deps.storage.removeConversion(id);
     await this.deps.db.delete(pdfConversions).where(eq(pdfConversions.id, id));
   }
 
   /**
-   * Marks the conversions a stopped server left unfinished, so nobody waits for them forever
+   * Marks the conversions a stopped server left unfinished, so nobody waits for them forever; the
+   * server runs as one process, so any still running belong to the one that stopped
    */
   async recover(): Promise<void> {
     await this.deps.db

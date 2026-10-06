@@ -346,7 +346,6 @@ export const sources = pgTable(
   (t) => [uniqueIndex("sources_code_unique").on(t.code)],
 );
 
-// Excel files with the detail a tool result could not carry; deleted when they expire
 // A PDF being turned into a document: its pages are written as Markdown in the background, and
 // the person reviews the result and its suggested header before it is published
 export const pdfConversions = pgTable(
@@ -355,7 +354,10 @@ export const pdfConversions = pgTable(
     id: varchar("id", { length: 36 }).primaryKey(),
     userId: integer("user_id").notNull(),
     fileName: varchar("file_name", { length: 200 }).notNull(),
-    status: varchar("status", { length: 10, enum: ["queued", "running", "done", "failed"] })
+    status: varchar("status", {
+      length: 10,
+      enum: ["queued", "running", "done", "failed", "publishing"],
+    })
       .notNull()
       .default("queued"),
     // Pages written so far, and how many the file has when that can be told from it
@@ -370,6 +372,7 @@ export const pdfConversions = pgTable(
   (t) => [index("pdf_conversions_user_idx").on(t.userId, t.createdAt)],
 );
 
+// Excel files with the detail a tool result could not carry; deleted when they expire
 export const exportFiles = pgTable(
   "export_files",
   {

@@ -108,7 +108,7 @@ const askModel = async (prompt: string, attachment?: Buffer | Buffer[]) =>
 // A PDF uploaded alone is read by the same model, ten pages per call, to become a document to review
 const converter = new PdfConverter({
   db: database.db,
-  storage: s3Config(env),
+  storage,
   convert: async (prompt, pdf) =>
     askOnce(
       {

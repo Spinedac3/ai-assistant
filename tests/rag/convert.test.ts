@@ -1,8 +1,10 @@
 import { PDFDocument } from "pdf-lib";
 import { describe, expect, it } from "vitest";
 import { openPdf, pagesOf, splitPdf } from "../../src/lib/pdf.js";
+import { attachmentNames } from "../../src/llm/oneShot.js";
 import { headerPrompt, pagesPrompt, readHeader, readPages } from "../../src/rag/convert.js";
-import { parseDocument, writeDocument } from "../../src/rag/document.js";
+import { parseDocument } from "../../src/rag/document.js";
+import { writeDocument } from "../../src/rag/upload.js";
 
 /**
  * Builds a PDF with some empty pages
@@ -34,18 +36,21 @@ describe("pdf conversion", () => {
 
   it("splits a long PDF into files the CLI reads whole, and leaves a short one as it is", async () => {
     // Performs the test.
-    const long = await splitPdf(await pdfWith(23));
+    const long = await splitPdf(await pdfWith(23), 100);
+    const capped = await splitPdf(await pdfWith(35), 20);
     const short = await pdfWith(4);
-    const kept = await splitPdf(short);
+    const kept = await splitPdf(short, 100);
 
     // Performs assertions.
-    expect(long.map((part) => [part.from, part.to])).toEqual([
+    expect(long.parts.map((part) => [part.from, part.to])).toEqual([
       [1, 10],
       [11, 20],
       [21, 23],
     ]);
-    expect((await openPdf(long[2]?.file ?? Buffer.alloc(0)))?.getPageCount()).toBe(3);
-    expect(kept).toEqual([{ file: short, from: 1, to: 4 }]);
+    expect((await openPdf(long.parts[2]?.file ?? Buffer.alloc(0)))?.getPageCount()).toBe(3);
+    expect(capped.parts.map((part) => part.to)).toEqual([10, 20]);
+    expect(capped.pages).toBe(35);
+    expect(kept).toEqual({ parts: [{ file: short, from: 1, to: 4 }], pages: 4 });
   });
 
   it("asks for the pages numbered as in the original", () => {
@@ -139,5 +144,28 @@ describe("pdf conversion", () => {
       tags: ["devoluciones", "plazo  días"],
     });
     expect(parsed.body.trim()).toBe("<!-- page: 1 -->\n# Política");
+  });
+
+  it("names one attachment as the model always read it, and several by their order", () => {
+    // Performs assertions.
+    expect(attachmentNames(1)).toEqual(["document.pdf"]);
+    expect(attachmentNames(3)).toEqual(["document-1.pdf", "document-2.pdf", "document-3.pdf"]);
+  });
+
+  it("falls back on a header that is no object at all, and on a name with no Latin letters", () => {
+    // Performs the test.
+    const none = readHeader("no hay JSON aquí", [], "報告.pdf");
+    const list = readHeader("[1, 2]", ["ventas"], "x.pdf");
+
+    // Performs assertions.
+    expect(none).toEqual({
+      doc_code: "DOCUMENTO",
+      doc_title: "報告",
+      doc_version: "V001",
+      doc_type: null,
+      area: "general",
+      tags: [],
+    });
+    expect(list.area).toBe("ventas");
   });
 });

@@ -109,13 +109,56 @@ export class DocumentStorage {
    * @return  Its text
    */
   async readMarkdown(docCode: string): Promise<string> {
-    const stream = await this.client.getObject(this.config.bucket, key(docCode, "md"));
+    return (await this.readAll(key(docCode, "md"))).toString("utf8");
+  }
+
+  /**
+   * Keeps the PDF of a conversion until it is published or discarded
+   *
+   * @param   id   Conversion id
+   * @param   pdf  File
+   */
+  async saveConversion(id: string, pdf: Buffer): Promise<void> {
+    await this.client.putObject(this.config.bucket, conversionKey(id), pdf, pdf.length, {
+      "Content-Type": CONTENT_TYPES.pdf,
+    });
+  }
+
+  /**
+   * Reads the PDF of a conversion
+   *
+   * @param   id  Conversion id
+   *
+   * @return  The file
+   */
+  async readConversion(id: string): Promise<Buffer> {
+    return this.readAll(conversionKey(id));
+  }
+
+  /**
+   * Drops the PDF of a conversion; one already gone is no error
+   *
+   * @param   id  Conversion id
+   */
+  async removeConversion(id: string): Promise<void> {
+    await this.removeKeys([conversionKey(id)]);
+  }
+
+  /**
+   * Reads a whole object
+   *
+   * @param   objectKey  Its key
+   *
+   * @return  Its contents
+   */
+  private async readAll(objectKey: string): Promise<Buffer> {
+    const stream = await this.client.getObject(this.config.bucket, objectKey);
     const parts: Buffer[] = [];
     for await (const part of stream) {
       parts.push(part as Buffer);
     }
 
-    return Buffer.concat(parts).toString("utf8");
+    return Buffer.concat(parts);
   }
 
   /**
@@ -323,12 +366,23 @@ export function partKey(
 }
 
 /**
- * Builds the object key, refusing a code that could escape its name
+ * Names the object of a PDF being converted
+ *
+ * @param   id  Conversion id
+ *
+ * @return  The object key
+ */
+export function conversionKey(id: string): string {
+  return `conversions/${id}.pdf`;
+}
+
+/**
+ * Names the object of an original
  *
  * @param   docCode  Document code
  * @param   kind     Markdown or PDF
  *
- * @return  The key
+ * @return  The object key
  */
 export function key(docCode: string, kind: OriginalKind): string {
   if (!DOC_CODE.test(docCode)) {
