@@ -55,7 +55,9 @@ function pdfKey(id: string): string {
  */
 export async function openPdf(pdf: Buffer): Promise<PDFDocument | null> {
   try {
-    return await PDFDocument.load(pdf, { updateMetadata: false });
+    const document = await PDFDocument.load(pdf, { updateMetadata: false });
+    // A damaged file can open with no pages at all, which leaves nothing to convert
+    return document.getPageCount() > 0 ? document : null;
   } catch {
     return null;
   }
