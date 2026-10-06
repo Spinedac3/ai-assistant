@@ -35,7 +35,8 @@ function repositoryFiles(): SourceFile[] {
   const walk = (dir: string): string[] =>
     readdirSync(dir).flatMap((name) => {
       const path = join(dir, name);
-      if (SKIPPED.has(name) || name.startsWith(".env")) {
+      // A local .env may hold anything; the example that is committed is checked like the rest
+      if (SKIPPED.has(name) || (name.startsWith(".env") && name !== ".env.example")) {
         return [];
       }
       if (statSync(path).isDirectory()) {
@@ -93,7 +94,13 @@ function namingVerdict(
     }
   }
   for (const file of all) {
-    const words = new Set(file.text.toLowerCase().match(/[a-z]+/g) ?? []);
+    // Whole words and each piece of a camelCase name, so a name glued into an identifier shows
+    const words = new Set(
+      (file.text.match(/[A-Za-z]+/g) ?? []).flatMap((word) => [
+        word.toLowerCase(),
+        ...word.split(/(?=[A-Z])/).map((piece) => piece.toLowerCase()),
+      ]),
+    );
     if ([...words].some((word) => origin.has(createHash("sha256").update(word).digest("hex")))) {
       verdict.origin.push(file.path);
     }
@@ -154,6 +161,7 @@ describe("naming, fed a breach of each rule", () => {
       [
         { path: "README.md", text: "Un asistente genérico" },
         { path: "docs/origin.md", text: "Antes se llamaba ACME." },
+        { path: "src/legacy.ts", text: "const acmeClient = connect();" },
       ],
       new Set(["822b33ad87c148a0a20a5ba7cd5ebcaa68d36a18e7aad165554903f52ca82757"]),
     );
@@ -166,6 +174,6 @@ describe("naming, fed a breach of each rule", () => {
       "src/tools/native/constant.ts: sendNotice",
       "src/tools/native/hidden.ts: sin nombre legible",
     ]);
-    expect(found.origin).toEqual(["docs/origin.md"]);
+    expect(found.origin).toEqual(["docs/origin.md", "src/legacy.ts"]);
   });
 });

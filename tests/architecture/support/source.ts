@@ -62,10 +62,17 @@ export function commentsOf(text: string, path = "file.ts"): Array<{ line: number
       found.set(range.pos, text.slice(range.pos, range.end));
     }
   };
+  // Every token, punctuation included, since a comment can sit before a closing brace or after a
+  // last comma where no node starts; the text of JSX is prose, never a comment
   const visit = (node: ts.Node): void => {
+    if (node.kind === ts.SyntaxKind.JsxText) {
+      return;
+    }
     collect(node.getFullStart());
     collect(node.getEnd());
-    ts.forEachChild(node, visit);
+    for (const child of node.getChildren(file)) {
+      visit(child);
+    }
   };
   visit(file);
 

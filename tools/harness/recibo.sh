@@ -113,6 +113,17 @@ leer_junit() { # $1 = junit file; prints the parser's JSON or stops loudly
     printf '%s' "$r"
 }
 
+no_corrieron() { # $1 = the parser's JSON; prints each listed test file that did not run
+    # vitest takes its arguments as filters, so a misspelled or excluded path runs nothing, quietly
+    node -e '
+        const ran = JSON.parse(process.argv[1]).files;
+        for (const path of process.argv.slice(2)) {
+            const wanted = path.replace(/\\/g, "/").replace(/^\.\//, "");
+            if (!ran.includes(wanted)) console.log(wanted);
+        }
+    ' -- "$1" "${TESTS[@]}"
+}
+
 case "$FASE" in
 rojo)
     # The form is checked BEFORE freezing: a malformed spec would be built whole and break in verde
@@ -128,6 +139,11 @@ rojo)
     correr_tests "$DIR/rojo.xml" || true
     # leer_junit's exit dies in the subshell: passed on, or the failure cascades
     R=$(leer_junit "$DIR/rojo.xml") || exit 2
+    FALTAN=$(no_corrieron "$R")
+    if [ -n "$FALTAN" ]; then
+        echo "rojo: estos archivos de la lista no corrieron (¿ruta mal escrita o excluida?): $FALTAN" >&2
+        exit 2
+    fi
     T=$(campo "$R" tests)
     F=$(campo "$R" failures)
     campo "$R" failed >> "$DIR/rojos.txt"
@@ -157,22 +173,11 @@ verde)
     touch "$DIR/rojos.txt"
     comm -23 "$DIR/verde-nombres.txt" "$DIR/rojos.txt" > "$DIR/nunca-rojos-crudo.txt"
     # Only NEW tests must be seen failing: one that already existed on the base was born green,
-    # and counting it would degrade every receipt that extends a test file. When the lookup
-    # cannot tell, the test counts as new: the instrument errs toward degrading, never silence.
+    # and counting it would degrade every receipt that extends a test file
     BASE_BRANCH="${BASE_BRANCH:-${GITHUB_BASE_REF:-main}}"
     BASE_REF="origin/$BASE_BRANCH"
     git rev-parse -q --verify "$BASE_REF" > /dev/null 2>&1 || BASE_REF="$BASE_BRANCH"
-    : > "$DIR/nunca-rojos.txt"
-    while IFS= read -r t; do
-        [ -z "$t" ] && continue
-        archivo="${t%%::*}"
-        nombre="${t##* > }"
-        nombre="${nombre##*::}"
-        if git show "$BASE_REF:$archivo" 2>/dev/null | grep -qF "\"$nombre\""; then
-            continue
-        fi
-        printf '%s\n' "$t" >> "$DIR/nunca-rojos.txt"
-    done < "$DIR/nunca-rojos-crudo.txt"
+    node "$S/newTests.mjs" "$BASE_REF" < "$DIR/nunca-rojos-crudo.txt" > "$DIR/nunca-rojos.txt"
     TESTS_JSON="{\"corridos\":$TV,\"fallas\":$FV,\"nunca_rojos\":$(json_lineas "$DIR/nunca-rojos.txt")}"
 
     # The repository's gates: exit 2 means the gate could not run, which is neither green nor red
@@ -180,6 +185,12 @@ verde)
     GATE_FALLO=0
     GATE_NO_CORRIO=0
     : > "$DIR/no-revisado.txt"
+    # A listed file that did not run, or a run with no test, measures nothing
+    FALTAN=$(no_corrieron "$RV")
+    if [ -n "$FALTAN" ] || [ "$TV" -eq 0 ]; then
+        GATE_NO_CORRIO=1
+        echo "tests: no corrieron todos los archivos de la lista (${FALTAN:-ningún test}): no dice ni verde ni rojo" >> "$DIR/no-revisado.txt"
+    fi
     correr_gate() { # $1 = name; the rest is the command
         local nombre="$1" out e res
         shift

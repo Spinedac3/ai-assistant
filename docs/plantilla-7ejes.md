@@ -75,7 +75,7 @@ exige una fila por cada una.
 
 ## 4. Contrato hacia afuera
 - ruta HTTP, tool MCP o comando: [nueva | reusa `archivo:línea`]
-- entrada: el esquema (zod o JSON Schema), con cada tope y su razón (`tests/architecture/caps.test.ts`)
+- entrada: su JSON Schema (o el zod de una ruta), con cada tope de una tool y su razón (`tests/architecture/caps.test.ts`)
 - **permiso**: el scope que la habilita y quién lo tiene hoy [evidencia: `src/db/seed.ts`]
 - **rechazos: una fila por cada forma de decir que no.**
 

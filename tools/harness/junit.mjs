@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
 const files = process.argv.slice(2);
-const empty = { tests: 0, failures: 0, failed: [], names: [] };
+const empty = { tests: 0, failures: 0, failed: [], names: [], files: [] };
 
 /**
  * Prints an error the receipt cannot pass and stops
@@ -35,7 +35,7 @@ if (files.length === 0) {
   refuse("no-junit");
 }
 
-const result = { tests: 0, failures: 0, failed: [], names: [] };
+const result = { tests: 0, failures: 0, failed: [], names: [], files: [] };
 for (const file of files) {
   // A missing file voids the whole phase: an instrument that can only record success always does
   if (!existsSync(file)) {
@@ -52,11 +52,14 @@ for (const file of files) {
     if (/<skipped\b/.test(body)) {
       continue;
     }
-    const file = unescape(/classname="([^"]*)"/.exec(attributes)?.[1] ?? "");
+    const source = unescape(/classname="([^"]*)"/.exec(attributes)?.[1] ?? "");
     const name = unescape(/\bname="([^"]*)"/.exec(attributes)?.[1] ?? "");
-    const full = `${file}::${name}`;
+    const full = `${source}::${name}`;
     result.tests++;
     result.names.push(full);
+    if (!result.files.includes(source)) {
+      result.files.push(source);
+    }
     if (/<(failure|error)\b/.test(body)) {
       result.failures++;
       result.failed.push(full);

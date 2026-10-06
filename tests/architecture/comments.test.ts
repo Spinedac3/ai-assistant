@@ -9,9 +9,13 @@ const CITATIONS: Array<[string, RegExp]> = [
   ["decisión", /\bD\d{1,3}\b/],
   ["pendiente", /\b(TODO|FIXME|XXX)\b/],
 ];
-// Words only a Spanish sentence has; quoted text is an example and does not count
-const SPANISH = /[¿¡]|\b(que|para|los|las|una|por|cuando|también|está|porque|pero|esto)\b/i;
-const QUOTED = /"[^"]*"|'[^']*'|`[^`]*`|«[^»]*»/g;
+// Words only a Spanish sentence has, bounded by letters of any language so an accent ends no word;
+// double-quoted text is an example and does not count, single quotes are English apostrophes
+const SPANISH =
+  /[¿¡]|(?<!\p{L})(que|para|los|las|una|por|cuando|también|está|porque|pero|esto)(?!\p{L})/iu;
+const QUOTED = /"[^"]*"|`[^`]*`|«[^»]*»/g;
+// it, test and their variants: it.each([...]), it.skip, test.concurrent
+const TEST_CALL = /^(it|test)(\.(each|skip|only|concurrent|fails))*$/;
 
 interface CommentVerdict {
   cited: string[];
@@ -57,7 +61,7 @@ function testsWithoutMarker(file: SourceFile): string[] {
   const visit = (node: ts.Node): void => {
     if (
       ts.isCallExpression(node) &&
-      /^(it|test)$/.test(node.expression.getText()) &&
+      TEST_CALL.test(node.expression.getText().split("(")[0] ?? "") &&
       node.arguments.length >= 2 &&
       !(node.arguments[1]?.getText() ?? "").includes("// Performs assertions.")
     ) {
@@ -161,6 +165,25 @@ describe("comments, fed a breach of each rule", () => {
           "function read(path: string) {",
           '  return "// not a comment, 2026-01-05";',
           "}",
+          "const options = {",
+          "  retries: 2,",
+          "  // Ver #7",
+          "};",
+          "if (options) {",
+          "  // Aquí está",
+          "}",
+          "// The person's file and the reader's copy",
+        ].join("\n"),
+      },
+      {
+        path: "Page.tsx",
+        text: [
+          "export const Page = () => (",
+          "  <div>",
+          "    {/* Revisado el 2026-01-05 */}",
+          "    <span>Escribe // aquí</span>",
+          "  </div>",
+          ");",
         ].join("\n"),
       },
       {
@@ -173,6 +196,9 @@ describe("comments, fed a breach of each rule", () => {
           'it("forgets", () => {',
           "  expect(1).toBe(1);",
           "});",
+          'it.each([1, 2])("forgets each", (n) => {',
+          "  expect(n).toBeGreaterThan(0);",
+          "});",
         ].join("\n"),
       },
     ]);
@@ -183,9 +209,14 @@ describe("comments, fed a breach of each rule", () => {
       "a.ts:2 (issue)",
       "a.ts:3 (decisión)",
       "a.ts:4 (pendiente)",
+      "a.ts:19 (issue)",
+      "Page.tsx:3 (fecha)",
     ]);
-    expect(found.spanish).toEqual(["a.ts:5"]);
+    expect(found.spanish).toEqual(["a.ts:5", "a.ts:22"]);
     expect(found.longDocblocks).toEqual(["a.ts:7"]);
-    expect(found.testsWithoutAssertions).toEqual(['a.test.ts: "forgets"']);
+    expect(found.testsWithoutAssertions).toEqual([
+      'a.test.ts: "forgets"',
+      'a.test.ts: "forgets each"',
+    ]);
   });
 });

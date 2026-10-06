@@ -1,3 +1,4 @@
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { type SourceFile, sourceFiles } from "./support/source.js";
 
@@ -6,8 +7,8 @@ const LEAVES = ["lib", "config", "vault"];
 // What composes the application: nothing below it may lean on it
 const COMPOSITION = ["routes", "plugins", "app", "index"];
 // Drivers of the databases a person registers, and of our own
-const DATABASE_DRIVER = /from "(mssql|mysql2(\/[^"]*)?|pg)"/;
-const SUBPROCESS = /from "(node:)?child_process"/;
+const DATABASE_DRIVER = /^(mssql|mysql2(\/.*)?|pg)$/;
+const SUBPROCESS = /^(node:)?child_process$/;
 
 interface Violations {
   leavesLean: string[];
@@ -31,23 +32,65 @@ function folderOf(path: string): string {
 }
 
 /**
+ * Lists every module a file reaches: imports, re-exports, `import()` and `require`
+ *
+ * @param   file   File, with its path relative to src/
+ * @param   types  Whether a reach for types alone counts
+ *
+ * @return  The module specifiers as written
+ */
+function modulesOf(file: SourceFile, types = true): string[] {
+  const source = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    let specifier: ts.Expression | undefined;
+    let typeOnly = false;
+    if (ts.isImportDeclaration(node)) {
+      specifier = node.moduleSpecifier;
+      const clause = node.importClause;
+      const named = clause?.namedBindings;
+      typeOnly =
+        clause?.isTypeOnly === true ||
+        (clause?.name === undefined &&
+          named !== undefined &&
+          ts.isNamedImports(named) &&
+          named.elements.length > 0 &&
+          named.elements.every((element) => element.isTypeOnly));
+    } else if (ts.isExportDeclaration(node)) {
+      specifier = node.moduleSpecifier;
+      typeOnly = node.isTypeOnly;
+    } else if (
+      ts.isCallExpression(node) &&
+      (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+        (ts.isIdentifier(node.expression) && node.expression.text === "require"))
+    ) {
+      specifier = node.arguments[0];
+    }
+    if (specifier && ts.isStringLiteralLike(specifier) && (types || !typeOnly)) {
+      found.push(specifier.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+
+  return found;
+}
+
+/**
  * Lists the folders a file imports from, besides its own
  *
- * @param   file       File, with its path relative to src/
- * @param   typesOnly  Whether `import type` counts
+ * @param   file   File, with its path relative to src/
+ * @param   types  Whether a reach for types alone counts
  *
  * @return  The folders
  */
-function importsOf(file: SourceFile, typesOnly = true): string[] {
+function importsOf(file: SourceFile, types = true): string[] {
   const own = folderOf(file.path);
   const depth = file.path.split("/").length - 1;
   const found = new Set<string>();
-  for (const match of file.text.matchAll(/^import (type )?[^;]*?from "(\.[^"]+)"/gm)) {
-    if (!typesOnly && match[1]) {
-      continue;
-    }
+  for (const specifier of modulesOf(file, types).filter((module) => module.startsWith("."))) {
     const parts = [...file.path.split("/").slice(0, depth)];
-    for (const step of (match[2] ?? "").split("/")) {
+    for (const step of specifier.split("/")) {
       if (step === "..") {
         parts.pop();
       } else if (step !== ".") {
@@ -96,10 +139,14 @@ function layerViolations(files: SourceFile[]): Violations {
         importsOf(file).some((folder) => !["db", "vault", "lib", "config"].includes(folder)),
     ),
     driversLoose: breaking(
-      (file) => !where(file.path, ["sources", "db", "cli"]) && DATABASE_DRIVER.test(file.text),
+      (file) =>
+        !where(file.path, ["sources", "db", "cli"]) &&
+        modulesOf(file).some((module) => DATABASE_DRIVER.test(module)),
     ),
     subprocessLoose: breaking(
-      (file) => !where(file.path, ["llm", "index"]) && SUBPROCESS.test(file.text),
+      (file) =>
+        !where(file.path, ["llm", "index"]) &&
+        modulesOf(file).some((module) => SUBPROCESS.test(module)),
     ),
   };
 }
@@ -198,5 +245,34 @@ describe("layers, fed a breach of each rule", () => {
     expect(found.sources.sourcesLean).toEqual(["sources/bad.ts"]);
     expect(found.driver.driversLoose).toEqual(["tools/bad.ts"]);
     expect(found.subprocess.subprocessLoose).toEqual(["rag/bad.ts"]);
+  });
+
+  it("sees a module reached by re-export, bare import, import() or require", () => {
+    // Performs the test.
+    const found = {
+      reexport: withOne({ path: "lib/bad.ts", text: 'export { x } from "../chat/turn.js";\n' }),
+      bare: withOne({ path: "rag/bad.ts", text: 'import "../routes/docs.js";\n' }),
+      dynamic: withOne({ path: "tools/bad.ts", text: 'const pg = await import("pg");\n' }),
+      required: withOne({
+        path: "rag/bad.ts",
+        text: 'const cp = require("node:child_process");\n',
+      }),
+      typeExport: withOne({
+        path: "db/bad.ts",
+        text: 'export type { X } from "../chat/trace.js";\n',
+      }),
+      inlineTypes: withOne({
+        path: "db/bad.ts",
+        text: 'import { type X, type Y } from "../chat/trace.js";\n',
+      }),
+    };
+
+    // Performs assertions.
+    expect(found.reexport.leavesLean).toEqual(["lib/bad.ts"]);
+    expect(found.bare.composedFromBelow).toEqual(["rag/bad.ts"]);
+    expect(found.dynamic.driversLoose).toEqual(["tools/bad.ts"]);
+    expect(found.required.subprocessLoose).toEqual(["rag/bad.ts"]);
+    expect(found.typeExport.dbImportsCode).toEqual([]);
+    expect(found.inlineTypes.dbImportsCode).toEqual([]);
   });
 });

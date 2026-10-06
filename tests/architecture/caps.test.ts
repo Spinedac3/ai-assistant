@@ -5,7 +5,7 @@ import { type SourceFile, sourceFiles } from "./support/source.js";
 // The one bound on rows is by size, in the registry, which keeps the whole detail as an Excel.
 // A row count a model can ask for, or a query that stops early, cuts before that can happen and
 // teaches the model to page by hand.
-const ROW_PARAMETER = /^\s+(limit|top|max_rows|page|page_size|per_page|offset):\s*\{/m;
+const ROW_PARAMETER = /^\s+"?(limit|top|max_rows|page|page_size|per_page|offset)"?:\s*\{/m;
 const EARLY_STOP = /\bLIMIT\b|\bTOP\b|\bFETCH\s+(NEXT|FIRST)\b/i;
 const PAGING_TEXT =
   /next page|paginat|page_size|página siguiente|at most \d+ rows|máximo \d+ filas/i;
@@ -38,6 +38,7 @@ const CAPS_WITH_REASON: Record<string, { max: number; why: string }> = {
   "sendNotice.ts:notices.items.subject.maxLength": { max: 200, why: "a mail subject line" },
   "sendNotice.ts:notices.items.message.maxLength": { max: 20_000, why: "a notice, not a report" },
   "tool.ts:value.maxItems": { max: 2, why: "a range has two ends" },
+  "capabilities.ts:top_k.maximum": { max: 15, why: "tools to choose from, not rows of data" },
 };
 
 interface CapsVerdict {
@@ -114,6 +115,7 @@ describe("caps", () => {
   const tools = [
     ...sourceFiles("src/tools/native"),
     ...sourceFiles("src/creator").filter((file) => file.path.endsWith("/tool.ts")),
+    ...sourceFiles("src/mcp").filter((file) => file.path.endsWith("/capabilities.ts")),
   ];
   const sql = sourceFiles("src/creator").find((file) => file.path.endsWith("/sql.ts"));
   const query = functionSource(sql?.text ?? "", "buildQuery");
@@ -168,8 +170,18 @@ describe("caps, fed a breach of each rule", () => {
         "},",
       ].join("\n"),
     };
+    const quoted = {
+      path: "src/tools/native/paged.ts",
+      text: [
+        "inputSchema: {",
+        "  properties: {",
+        '    "page_size": { type: "integer" },',
+        "  },",
+        "},",
+      ].join("\n"),
+    };
     const found = capsVerdict(
-      [tool],
+      [tool, quoted],
       "SELECT TOP 100 * FROM base",
       [
         {
@@ -185,7 +197,7 @@ describe("caps, fed a breach of each rule", () => {
     );
 
     // Performs assertions.
-    expect(found.rowParameters).toEqual(["src/tools/native/list.ts"]);
+    expect(found.rowParameters).toEqual(["src/tools/native/list.ts", "src/tools/native/paged.ts"]);
     expect(found.unexplained).toEqual(["list.ts:title.maxLength"]);
     expect(found.lowered).toEqual(["list.ts:question.maxLength: 1000 < 2000"]);
     expect(found.gone).toEqual(["list.ts:gone.maxLength"]);

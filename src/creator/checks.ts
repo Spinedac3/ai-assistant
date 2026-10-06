@@ -145,8 +145,8 @@ async function guarded(
  * @return  One result per check
  */
 export async function runChecks(tool: CreatedTool, runner: Runner): Promise<CheckResult[]> {
-  // They compare counts and sums the source computes, so a base of any size is checked without
-  // bringing its rows over.
+  // The checks compare counts and sums the source computes, so a base of any size is checked
+  // without bringing its rows over.
   const { spec } = tool;
   const kinds = new Map(tool.columns.map((column) => [column.name, column.kind]));
 

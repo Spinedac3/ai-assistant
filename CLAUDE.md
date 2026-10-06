@@ -127,8 +127,8 @@ Each one is a test in `tests/architecture/layers.test.ts`.
 
 A change starts as an issue and ends as a pull request with its receipt:
 
-1. `/grill` — the design questions, one at a time, each with a recommended answer; the spec goes
-   in the issue.
+1. `/grill` — the design questions in rounds, each with a recommended answer; the spec goes in
+   the issue.
 2. `bash tools/harness/spec-dump.sh <owner/repo> <n>` — the issue as it is today, in
    `docs/specs/<n>/issue.md`.
 3. `/implementar <n>` — tests first: `bash tools/harness/recibo.sh rojo ...` must see them fail,
@@ -147,8 +147,10 @@ mutants of the critical changes: a check that has never been seen failing proves
 
 ## Three ways a document like this goes wrong
 
-1. **A rule written from impression instead of counted against the tree.** Every rule above is a
-   test that measures the tree.
+1. **A rule written from impression instead of counted against the tree.** The direction rules,
+   the pieces, the caps, the names, the size of functions and what comments may say are tests
+   that measure the tree. The rest (aligned docblock tags, no argv from people, credentials in
+   files) is checked in review.
 2. **A check that returns zero is worth nothing until it has been seen returning one.** Every
    gate in `tests/architecture/` is fed a breach of each of its rules.
 3. **An agent's own report is not evidence.** Run the gates yourself and read the diff.

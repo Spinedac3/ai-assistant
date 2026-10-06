@@ -17,23 +17,31 @@ export interface Ranking {
 
 const DRIVER = /from "(mssql|mysql2(\/[^"]*)?|pg|node:child_process|child_process)"/;
 const ROUTE = /app\.(get|post|put|patch|delete)\(/g;
-const GUARDED_ROUTE = /app\.(get|post|put|patch|delete)\("[^"]+",\s*[a-zA-Z]+,/g;
+// A route passes its guard by name or inline, on one line or several
+const GUARDED_ROUTE =
+  /app\.(get|post|put|patch|delete)\(\s*"[^"]+",\s*(\{\s*preHandler\b|[a-zA-Z]+,)/g;
 const BIGGEST_FUNCTION = 80;
 // Read once: every piece asks it for each candidate
-let testNames: Set<string> | undefined;
+let testPaths: string[] | undefined;
 
 /**
- * Tells whether a source file has a test of its own, by name, under tests/
+ * Tells whether a source file has a test of its own: its name under the tests of its area, or
+ * among the integration tests
  *
  * @param   file  Source file
  *
- * @return  Whether a unit or an integration test carries its name
+ * @return  Whether such a test exists
  */
 function tested(file: SourceFile): boolean {
-  const name = `${file.path.split("/").pop()?.replace(/\.ts$/, "")}.test.ts`;
-  testNames ??= new Set(sourceFiles("tests").map((test) => test.path.split("/").pop() ?? ""));
+  const name = `/${file.path.split("/").pop()?.replace(/\.ts$/, "")}.test.ts`;
+  const area = file.path.split("/")[1] ?? "";
+  testPaths ??= sourceFiles("tests").map((test) => test.path);
 
-  return testNames.has(name);
+  return testPaths.some(
+    (path) =>
+      path.endsWith(name) &&
+      (path.startsWith(`tests/${area}/`) || path.startsWith("tests/integration/")),
+  );
 }
 
 /**
