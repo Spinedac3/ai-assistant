@@ -50,12 +50,15 @@ export async function mintRunToken(
     runTools: info.persisted && info.tools !== null ? [...info.tools] : null,
     accessExpiresAt: sql`now() + make_interval(mins => ${ttlMinutes})`,
   });
-  runs.set(token, {
-    tools: info.tools === null ? null : [...info.tools],
-    conversationId: info.conversationId,
-    registry: info.registry,
-    trial: info.trial,
-  });
+  // A kept run is read from its row, so nothing waits in memory for a revoke that may never come
+  if (!info.persisted) {
+    runs.set(token, {
+      tools: info.tools === null ? null : [...info.tools],
+      conversationId: info.conversationId,
+      registry: info.registry,
+      trial: info.trial,
+    });
+  }
 
   return token;
 }

@@ -30,7 +30,7 @@
     "db:seed": "tsx --env-file-if-exists=.env src/cli/seed.ts",
     "keys:generate": "tsx src/cli/generateKeys.ts",
     "kek:generate": "tsx src/cli/generateKek.ts",
-    "machine:create": "tsx src/cli/createMachineClient.ts",
+    "machine:create": "tsx --env-file-if-exists=.env src/cli/createMachineClient.ts",
     "demo:seed": "tsx src/cli/seedDemo.ts",
     "admin:create": "tsx --env-file-if-exists=.env src/cli/createAdmin.ts",
     "docs:load": "tsx --env-file-if-exists=.env src/cli/loadDocuments.ts"

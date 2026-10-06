@@ -208,6 +208,35 @@ describe("run tokens for another system", () => {
     expect((await toolsOf(forgotten)).status).toBe(401);
   });
 
+  it("takes the tools away when the owner loses them mid-run, and the run when the owner leaves", async () => {
+    // Performs the test.
+    const [role] = await database.db.select().from(roles).where(eq(roles.code, "user"));
+    const [person] = await database.db
+      .insert(users)
+      .values({ email: "breve@example.com", displayName: "Breve", primaryRoleId: role?.id ?? null })
+      .returning({ id: users.id });
+    const id = person?.id ?? 0;
+    const ask = async () =>
+      (await issue({ owner_id: id, tools: ["calculate"], minutes: 5, run_id: "run-4" })).json().data
+        .token;
+    const demoted = await ask();
+    const before = await toolsOf(demoted);
+    await database.db.update(users).set({ primaryRoleId: null }).where(eq(users.id, id));
+    const afterRole = await toolsOf(demoted);
+    await database.db
+      .update(users)
+      .set({ primaryRoleId: role?.id ?? null })
+      .where(eq(users.id, id));
+    const leaving = await ask();
+    await database.db.update(users).set({ active: false }).where(eq(users.id, id));
+    const afterLeaving = await toolsOf(leaving);
+
+    // Performs assertions.
+    expect(before).toEqual({ status: 200, names: ["calculate"] });
+    expect(afterRole).toEqual({ status: 200, names: [] });
+    expect(afterLeaving.status).toBe(401);
+  });
+
   it("lets only the system that asked for a token end it", async () => {
     // Performs the test.
     const token = (
