@@ -113,6 +113,8 @@ export const definitionSchema = z
               .strict(),
           )
           .min(1),
+        // The rows behind the totals too; a long detail travels whole in the Excel
+        with_detail: z.boolean().optional(),
       })
       .strict()
       .optional(),

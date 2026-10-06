@@ -52,7 +52,7 @@ describe("result cap", () => {
     expect(capped).toEqual({ ok: true, data, truncated: false });
   });
 
-  it("keeps the totals and the summaries, archives the heavy lists and leads with the link", async () => {
+  it("keeps the totals and the summaries, archives every list and leads with the link", async () => {
     // Performs the test.
     const { archive, saved } = recordingArchive();
     const data = {
@@ -76,6 +76,7 @@ describe("result cap", () => {
     expect(saved[0]?.map((sheet) => [sheet.name, sheet.rows.length])).toEqual([
       ["pedidos", 1000],
       ["detalle", 200],
+      ["resumen", 1],
     ]);
     expect(result.archivo).toMatchObject({
       filas: { pedidos: 1000, detalle: 200 },

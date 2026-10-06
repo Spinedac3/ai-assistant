@@ -196,7 +196,11 @@ export async function capResult(
   }
 
   if (saved && archive) {
-    saved = await archive.save(heavy.map((entry) => sheetOf(entry.name, entry.list)));
+    // The small lists go along as sheets of their own, so the file has the totals beside the detail
+    const small = lists.filter((entry) => entry.bytes <= SMALL_LIST_BYTES && entry.list.length > 0);
+    saved = await archive.save(
+      [...heavy, ...small].map((entry) => sheetOf(entry.name, entry.list)),
+    );
     shrink();
     // A real link longer than the room kept for it can still push the result over
     if (!fits()) {

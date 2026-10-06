@@ -166,6 +166,24 @@ export function outputColumnsOf(tool: CreatedTool): BaseColumn[] {
 }
 
 /**
+ * The same definition without its summary: each row of the chosen columns, ordered by those of
+ * them the order names, for a summary that also brings its detail
+ *
+ * @param   spec  Tool definition
+ *
+ * @return  The definition of the detail
+ */
+export function detailOf(spec: ToolDefinitionSpec): ToolDefinitionSpec {
+  const chosen = new Set(spec.columns.map((column) => column.name));
+
+  return {
+    ...spec,
+    summary: undefined,
+    order_by: spec.order_by.filter((order) => chosen.has(order.column)),
+  };
+}
+
+/**
  * Builds the output schema of a created tool: its rows and how many there are
  *
  * @param   tool  Created tool
@@ -180,24 +198,34 @@ export function outputSchemaOf(tool: CreatedTool): JsonSchema {
     date: "string",
     datetime: "string",
   };
-  const columns = outputColumnsOf(tool);
+  const rowsOf = (columns: BaseColumn[]) => ({
+    type: "array",
+    items: {
+      type: "object",
+      properties: Object.fromEntries(
+        columns.map((column) => [column.name, { type: [json[column.kind], "null"] }]),
+      ),
+      required: columns.map((column) => column.name),
+    },
+  });
+  const detail = tool.spec.summary?.with_detail
+    ? {
+        properties: {
+          detalle: rowsOf(outputColumnsOf({ ...tool, spec: detailOf(tool.spec) })),
+          total_detalle: { type: "integer" },
+        },
+        required: ["detalle", "total_detalle"],
+      }
+    : { properties: {}, required: [] };
 
   return {
     type: "object",
     properties: {
-      filas: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: Object.fromEntries(
-            columns.map((column) => [column.name, { type: [json[column.kind], "null"] }]),
-          ),
-          required: columns.map((column) => column.name),
-        },
-      },
+      filas: rowsOf(outputColumnsOf(tool)),
       total_filas: { type: "integer" },
+      ...detail.properties,
     },
-    required: ["filas", "total_filas"],
+    required: ["filas", "total_filas", ...detail.required],
   };
 }
 
@@ -220,6 +248,12 @@ export function descriptionOf(tool: CreatedTool, timeZone: string): string {
   const parts = [
     meaning.definition,
     `Cada fila es: ${meaning.grain}. Columnas: ${columns}.`,
+    ...(tool.spec.summary?.with_detail
+      ? [
+          "filas trae los totales; detalle trae cada registro detrás de ellos, con las columnas " +
+            `${tool.spec.columns.map((column) => column.name).join(", ")}.`,
+        ]
+      : []),
     meaning.additive
       ? "Las cantidades se pueden sumar entre filas."
       : "Las cantidades NO se suman entre filas: cada fila ya es un valor completo.",
@@ -285,8 +319,35 @@ export function toolFrom(
           timeZone,
         });
         const rows = normalizeRows(result);
+        if (!tool.spec.summary?.with_detail) {
+          return { ok: true, data: { filas: rows, total_filas: rows.length }, rows: rows.length };
+        }
 
-        return { ok: true, data: { filas: rows, total_filas: rows.length }, rows: rows.length };
+        // The detail reads the same rows the totals came from, with the same filters
+        const detailQuery = buildQuery(
+          detailOf(tool.spec),
+          source.info.engine,
+          pasted,
+          args,
+          kinds,
+        );
+        const detail = normalizeRows(
+          await runQuery(source.info, detailQuery.sql, detailQuery.params, {
+            timeoutMs: QUERY_TIMEOUT_MS,
+            maxRows: MAX_ROWS,
+            timeZone,
+          }),
+        );
+        return {
+          ok: true,
+          data: {
+            filas: rows,
+            total_filas: rows.length,
+            detalle: detail,
+            total_detalle: detail.length,
+          },
+          rows: detail.length,
+        };
       } catch (error) {
         if (error instanceof TooManyRowsError) {
           return { ok: false, error: "too_many_rows", message: error.message };
