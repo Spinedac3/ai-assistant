@@ -1,4 +1,14 @@
-import { Box, Button, Dialog, Portal, Spinner, Table, Tabs, Text } from "@chakra-ui/react";
+import {
+  Box,
+  Button,
+  CloseButton,
+  Dialog,
+  Portal,
+  Spinner,
+  Table,
+  Tabs,
+  Text,
+} from "@chakra-ui/react";
 import { useState } from "react";
 import { FiDownload, FiEye } from "react-icons/fi";
 import type { Components } from "react-markdown";
@@ -128,6 +138,9 @@ export function ExportActions({ path }: { path: string }) {
               <Dialog.Header>
                 <Dialog.Title>Vista previa del Excel</Dialog.Title>
               </Dialog.Header>
+              <Dialog.CloseTrigger asChild>
+                <CloseButton size="sm" aria-label="Cerrar" />
+              </Dialog.CloseTrigger>
               <Dialog.Body>
                 {!preview ? (
                   problem ? (
@@ -184,6 +197,9 @@ export function ExportActions({ path }: { path: string }) {
                 )}
               </Dialog.Body>
               <Dialog.Footer>
+                <Dialog.ActionTrigger asChild>
+                  <Button variant="outline">Cerrar</Button>
+                </Dialog.ActionTrigger>
                 <Button
                   colorPalette="brand"
                   onClick={() =>

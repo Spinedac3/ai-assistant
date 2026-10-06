@@ -97,7 +97,15 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
   });
 
   const messages = conversationId ? (open.data?.messages ?? []) : [];
-  const shown = `${messages.length}:${draft?.text.length ?? 0}:${draft?.tools.length ?? 0}`;
+  // Anything new on screen follows the person down: their question, each tool as it runs and ends,
+  // and the answer as it arrives
+  const shown = [
+    messages.length,
+    draft ? draft.question.length : -1,
+    draft?.text.length ?? 0,
+    draft?.tools.map((tool) => tool.state).join(",") ?? "",
+    error ?? "",
+  ].join(":");
   useEffect(() => {
     if (shown) {
       bottom.current?.scrollIntoView({ block: "end" });
@@ -274,7 +282,7 @@ function ChatPage({ conversationId }: { conversationId: number | null }) {
       </Stack>
 
       <Flex direction="column" flex={1} minW={0} bg="bg.surface" borderWidth="1px" rounded="panel">
-        <Stack flex={1} overflow="auto" p={5} gap={4}>
+        <Stack flex={1} minH={0} overflow="auto" p={5} gap={4}>
           {conversationId && open.isLoading && <Spinner color="brand.solid" />}
           {!conversationId && !draft && (
             <Text color="fg.muted">
