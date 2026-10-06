@@ -126,7 +126,7 @@ export function guidePrompt(input: GuideInput): string {
  *
  * @return  Its canonical JSON
  */
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(canonical).join(",")}]`;
   }

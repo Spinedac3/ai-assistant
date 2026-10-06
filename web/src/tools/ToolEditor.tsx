@@ -154,6 +154,7 @@ function ToolEditor({
   const [search, setSearch] = useState("");
   // Why the model could not describe the base, when it could not
   const [note, setNote] = useState<string | null>(null);
+  const isNew = initialName === null;
   // The folded options of the last step, and the trial beside a saved tool
   const [more, setMore] = useState(false);
   const [trying, setTrying] = useState(false);
@@ -174,42 +175,81 @@ function ToolEditor({
     }
   }, [saved.data]);
 
-  // The name and the other words are suggested once, when the last step opens with them empty
-  useEffect(() => {
-    if (step !== 5 || suggested || definition.meaning.definition.trim() === "") {
-      return;
-    }
-    if (name !== "" && definition.meaning.synonyms.length > 0) {
-      return;
-    }
-    setSuggested(true);
+  /**
+   * Has the model write what the tool returns, what a row is, its name and other ways to ask for
+   * it, from everything built so far; what the person wrote stays unless they ask for it again
+   *
+   * @param   redo  Whether to replace what is already written
+   */
+  const suggestMeaning = (redo: boolean) => {
     setBusy("suggest");
-    api<{ name: string | null; grain: string | null; synonyms: string[] }>("/admin/tools/suggest", {
+    const about = (autoDescription ?? definition.meaning.definition).trim();
+    const summary = definition.summary;
+    api<{
+      name: string | null;
+      definition: string | null;
+      grain: string | null;
+      synonyms: string[];
+    }>("/admin/tools/suggest", {
       method: "POST",
       body: {
-        about: definition.meaning.definition.trim(),
+        about: about || "Sin descripción",
         columns: definition.columns.map((column) => column.name),
-        groups: definition.summary?.group_by,
+        filters: definition.filters.map((filter) => filter.column),
+        totals: summary
+          ? {
+              by: summary.group_by,
+              calculations: summary.aggregates.map((aggregate) =>
+                aggregate.fn === "count"
+                  ? `${aggregate.as}: cantidad de filas`
+                  : `${aggregate.as}: ${AGGREGATE_LABELS[aggregate.fn].toLowerCase()} de ${aggregate.column}`,
+              ),
+              detail: summary.with_detail === true,
+            }
+          : null,
       },
     })
       .then((suggestion) => {
-        if (suggestion.name) {
-          setName((current) => current || (suggestion.name ?? ""));
+        if (suggestion.name && isNew) {
+          setName((current) => (redo || !current ? (suggestion.name ?? current) : current));
         }
-        setDefinition((current) => ({
-          ...current,
-          meaning: {
-            ...current.meaning,
-            grain: current.meaning.grain || suggestion.grain || current.meaning.grain,
-            synonyms:
-              current.meaning.synonyms.length > 0 ? current.meaning.synonyms : suggestion.synonyms,
-          },
-        }));
+        setDefinition((current) => {
+          // The base's own description is only a start; the model's says what the tool returns
+          const written =
+            current.meaning.definition.trim() !== "" &&
+            current.meaning.definition !== autoDescription;
+          return {
+            ...current,
+            meaning: {
+              ...current.meaning,
+              definition:
+                suggestion.definition && (redo || !written)
+                  ? suggestion.definition
+                  : current.meaning.definition,
+              grain:
+                suggestion.grain && (redo || !current.meaning.grain)
+                  ? suggestion.grain
+                  : current.meaning.grain,
+              synonyms:
+                redo || current.meaning.synonyms.length === 0
+                  ? suggestion.synonyms
+                  : current.meaning.synonyms,
+            },
+          };
+        });
       })
       // Without a suggestion the person writes them; nothing else depends on it
       .catch(() => undefined)
       .finally(() => setBusy(null));
-  }, [step, suggested, name, definition]);
+  };
+
+  // The meaning is written once, when the last step opens; the person can ask for it again
+  useEffect(() => {
+    if (step === 5 && !suggested && definition.columns.length > 0) {
+      setSuggested(true);
+      suggestMeaning(false);
+    }
+  });
 
   // Every change drops what no longer fits, so what the form shows is what gets saved
   const change = (patch: Partial<Definition>) =>
@@ -354,7 +394,6 @@ function ToolEditor({
       </Text>
     );
   }
-  const isNew = initialName === null;
   const chosen = definition.columns.map((column) => column.name);
   const kindOf = (column: string) => baseColumns.find((base) => base.name === column)?.kind;
   // What each step needs before the next one opens
@@ -1165,6 +1204,21 @@ function ToolEditor({
                     Minúsculas, números y guion bajo; empieza con una letra.
                   </Field.HelperText>
                 </Field.Root>
+                <HStack justify="space-between">
+                  <Text fontSize="sm" color="fg.muted">
+                    {busy === "suggest"
+                      ? "La IA está redactando el nombre, qué devuelve y qué es cada fila…"
+                      : "Redactado por la IA a partir de lo que armaste; corrígelo si hace falta."}
+                  </Text>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    loading={busy === "suggest"}
+                    onClick={() => suggestMeaning(true)}
+                  >
+                    Redactar de nuevo
+                  </Button>
+                </HStack>
                 <Field.Root required>
                   <Field.Label>Qué devuelve</Field.Label>
                   <Textarea
@@ -1172,6 +1226,16 @@ function ToolEditor({
                     value={definition.meaning.definition}
                     onChange={(event) =>
                       change({ meaning: { ...definition.meaning, definition: event.target.value } })
+                    }
+                  />
+                </Field.Root>
+                <Field.Root>
+                  <Field.Label>Qué es cada fila</Field.Label>
+                  <Input
+                    placeholder="por ejemplo: el total de una zona"
+                    value={definition.meaning.grain ?? ""}
+                    onChange={(event) =>
+                      change({ meaning: { ...definition.meaning, grain: event.target.value } })
                     }
                   />
                 </Field.Root>
@@ -1185,16 +1249,6 @@ function ToolEditor({
                 </Button>
                 {more && (
                   <Stack gap={3} ps={3} borderStartWidth="2px">
-                    <Field.Root>
-                      <Field.Label>Qué es cada fila</Field.Label>
-                      <Input
-                        placeholder="si lo dejas vacío, se deduce de los totales"
-                        value={definition.meaning.grain ?? ""}
-                        onChange={(event) =>
-                          change({ meaning: { ...definition.meaning, grain: event.target.value } })
-                        }
-                      />
-                    </Field.Root>
                     <Switch.Root
                       checked={definition.meaning.additive}
                       onCheckedChange={(details) =>
@@ -1283,6 +1337,17 @@ function ToolEditor({
                     : `Se puede pedir por ${definition.filters.map((filter) => `${filter.column}${filter.required ? " (obligatorio)" : ""}`).join(", ")}.`}
                 </Text>
               </Stack>
+              {status === "published" && dirty && (
+                <Text fontSize="sm" color="fg.warning" mt={3}>
+                  Tienes cambios sin guardar. Al guardarlos la herramienta vuelve a borrador y el
+                  Chat deja de usarla hasta que la publiques otra vez.
+                </Text>
+              )}
+              {status === "draft" && !dirty && (
+                <Text fontSize="sm" color="fg.warning" mt={3}>
+                  Borrador: el Chat todavía no la usa. Publícala cuando los chequeos estén bien.
+                </Text>
+              )}
               {status === "published" && !dirty && (
                 <Text fontSize="sm" color="fg.success" mt={3}>
                   Publicada: ya está en el Chat para quien tenga el permiso de la fuente. Pregúntale
@@ -1370,7 +1435,7 @@ function ToolEditor({
               </Button>
               <Button
                 colorPalette="brand"
-                disabled={!ready[step] || busy === "columns"}
+                disabled={!ready[step] || busy === "columns" || busy === "suggest"}
                 onClick={() => setStep(step + 1)}
               >
                 Siguiente: {STEPS[step + 1]}

@@ -30,7 +30,7 @@ import {
   TOOL_NAME,
   VALUE_OPS,
 } from "../creator/definition.js";
-import { guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
+import { canonical, guidePrompt, readGuide, unknownColumns } from "../creator/guide.js";
 import { checkPasted } from "../creator/pasted.js";
 import { distinctQuery } from "../creator/sql.js";
 import {
@@ -117,7 +117,16 @@ const suggestBody = z
   .object({
     about: z.string().trim().min(1).max(2_000),
     columns: z.array(columnName).min(1).max(200),
-    groups: z.array(columnName).max(200).optional(),
+    filters: z.array(columnName).max(200).default([]),
+    totals: z
+      .object({
+        by: z.array(columnName).max(200),
+        calculations: z.array(z.string().trim().min(1).max(200)).max(50),
+        detail: z.boolean(),
+      })
+      .strict()
+      .nullable()
+      .default(null),
   })
   .strict();
 const saveBody = z
@@ -629,7 +638,7 @@ export default async function toolsRoutes(
     }
     const ask = options.ask;
     if (!ask) {
-      return { ok: true, data: { name: null, grain: null, synonyms: [] } };
+      return { ok: true, data: { name: null, definition: null, grain: null, synonyms: [] } };
     }
     const userId = request.authUser?.id;
     let reservation: Reservation | null = null;
@@ -639,11 +648,7 @@ export default async function toolsRoutes(
       if (limits && userId !== undefined) {
         reservation = await reserveMessage(db, userId, limits, options.appTimeZone);
       }
-      const { about, columns, groups } = body.data;
-      return {
-        ok: true,
-        data: readSuggestion(await ask(suggestPrompt(about, columns, groups ?? null))),
-      };
+      return { ok: true, data: readSuggestion(await ask(suggestPrompt(body.data))) };
     } catch (error) {
       if (error instanceof RateLimitExceededError) {
         return reply.code(429).send({ ok: false, error: "rate_limited", message: error.message });
@@ -653,7 +658,7 @@ export default async function toolsRoutes(
       }
       request.log.warn({ err: error }, "tool suggestion failed");
       // The person fills them in; nothing is lost
-      return { ok: true, data: { name: null, grain: null, synonyms: [] } };
+      return { ok: true, data: { name: null, definition: null, grain: null, synonyms: [] } };
     }
   });
 
@@ -734,6 +739,18 @@ export default async function toolsRoutes(
         message: `La base no tiene: ${unknown.join(", ")}`,
         columns: columns.map((column) => column.name),
       });
+    }
+
+    // Saving the very version that is published changes nothing, so it stays published
+    if (
+      existing?.tool.status === "published" &&
+      canonical(existing.tool.spec) === canonical(spec) &&
+      canonical(existing.tool.columns) === canonical(columns)
+    ) {
+      return {
+        ok: true,
+        data: { name, status: existing.tool.status, columns, checks: await check(existing.tool) },
+      };
     }
 
     const userId = request.authUser.id;
