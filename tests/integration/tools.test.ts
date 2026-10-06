@@ -614,4 +614,53 @@ describe("tool creator", () => {
     expect(changed.body.data.status).toBe("draft");
     expect(outside.body.data.error ?? outside.body.error).toBeDefined();
   });
+
+  it("lists few values only when they are short enough to be categories", async () => {
+    // Performs the test.
+    answer = () => "Una nota.";
+    const help = await api("POST", "/admin/tools/filter-help", {
+      source: `demo-${available[0]}`,
+      base: {
+        kind: "query",
+        sql: "select case when id < 3 then repeat('x', 70) else 'corta' end as nota from clientes",
+      },
+      column: "nota",
+      op: "=",
+    });
+
+    // Performs assertions.
+    expect(help.body.data.values).toBeNull();
+    expect(help.body.data.examples).toHaveLength(2);
+  });
+
+  it("keeps every total whole when the detail behind them does not fit the answer", async () => {
+    // Performs the test.
+    const url = "/admin/tools/compras_por_cliente";
+    await api("PUT", url, {
+      source: `demo-${available[0]}`,
+      create: true,
+      definition: {
+        base: { kind: "table", name: "pedidos_con_cliente" },
+        columns: [{ name: "pedido_id" }, { name: "fecha" }, { name: "cliente" }, { name: "total" }],
+        summary: {
+          group_by: ["cliente"],
+          aggregates: [
+            { fn: "sum", column: "total", as: "comprado" },
+            { fn: "count", as: "pedidos" },
+          ],
+          with_detail: true,
+        },
+        meaning: { definition: "Compras por cliente." },
+      },
+    });
+    const run = await api("POST", `${url}/run`, { args: {} });
+    await api("DELETE", url);
+    const data = run.body.data;
+
+    // Performs assertions.
+    expect(data.filas).toHaveLength(data.total_filas);
+    expect(data.total_filas).toBe(40);
+    expect(data.detalle.length).toBeLessThan(data.total_detalle);
+    expect(Object.keys(data.filas_omitidas)).toEqual(["detalle"]);
+  });
 });

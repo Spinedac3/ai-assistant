@@ -444,4 +444,36 @@ describe("exports", () => {
       expect(preview).toBe("gone");
     });
   });
+
+  it("keeps the row while its preview could not be removed", async () => {
+    // Performs the test.
+    const { url } = (await runBig("chat")).archivo as { url: string };
+    const id = idOf(url);
+    await database.db.update(exportFiles).set({ expiresAt: sql`now() - interval '1 second'` });
+    const refusing = s3Client(STORAGE);
+    const remove = refusing.removeObjects.bind(refusing);
+    // The file goes; only its preview is refused
+    refusing.removeObjects = (async (bucket: string, keys: string[]) => {
+      await remove(
+        bucket,
+        keys.filter((key) => !key.endsWith(".preview.json")),
+      );
+      return keys
+        .filter((key) => key.endsWith(".preview.json"))
+        .map((Key) => ({ Key, Code: "AccessDenied" }));
+    }) as unknown as typeof refusing.removeObjects;
+    const purged = await new ExportStore(
+      database.db,
+      STORAGE,
+      randomBytes(32),
+      BASE,
+      refusing,
+    ).purge();
+    const left = await database.db.select({ id: exportFiles.id }).from(exportFiles);
+    await store.purge();
+
+    // Performs assertions.
+    expect(purged).toBe(0);
+    expect(left.map((row) => row.id)).toEqual([id]);
+  });
 });
