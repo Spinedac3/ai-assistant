@@ -250,6 +250,7 @@ function ToolEditor({
   const [ideasLoading, setIdeasLoading] = useState(false);
   // The idea in use leaves the list, so what remains are the ones still to choose from
   const [appliedIdea, setAppliedIdea] = useState<string | null>(null);
+  const [usedIdeas, setUsedIdeas] = useState<string[]>([]);
   useEffect(() => {
     if (step !== 4 || ideasAsked || baseColumns.length === 0) {
       return;
@@ -278,6 +279,7 @@ function ToolEditor({
    */
   const applyIdea = (idea: TotalsIdea) => {
     setAppliedIdea(idea.label);
+    setUsedIdeas((current) => [...current, idea.label]);
     const needed = [
       ...idea.group_by,
       ...idea.aggregates.flatMap((aggregate) => (aggregate.column ? [aggregate.column] : [])),
@@ -534,7 +536,11 @@ function ToolEditor({
     }
   };
 
-  const shownIdeas = ideas.filter((idea) => !(definition.summary && idea.label === appliedIdea));
+  const shownIdeas = ideas.filter((idea) => !usedIdeas.includes(idea.label));
+  const inUse = definition.summary ? appliedIdea : null;
+  // An order names each column once, so the next one offered is one not ordered yet
+  const ordered = new Set(definition.order_by.map((order) => order.column));
+  const nextOrder = outputNames(definition).find((column) => !ordered.has(column));
 
   const addFilter = (filter: Definition["filters"][number]) => {
     change({ filters: [...definition.filters, filter] });
@@ -1016,11 +1022,21 @@ function ToolEditor({
             </Section>
           )}
 
-          {step === 4 && (ideasLoading || shownIdeas.length > 0) && (
+          {step === 4 && (ideasLoading || shownIdeas.length > 0 || inUse) && (
             <Section
               title="Ideas de la IA"
               hint="Resúmenes que suelen pedirse con estos datos. Un clic lo aplica y abajo lo ajustas."
             >
+              {inUse && (
+                <Text fontSize="sm" mb={3}>
+                  <Text as="span" fontWeight="medium">
+                    En uso: {inUse}.
+                  </Text>{" "}
+                  <Text as="span" color="fg.muted">
+                    Una herramienta lleva un solo resumen: elegir otra idea lo reemplaza.
+                  </Text>
+                </Text>
+              )}
               {ideasLoading ? (
                 <HStack gap={2}>
                   <Spinner size="sm" color="brand.solid" />
@@ -1237,7 +1253,9 @@ function ToolEditor({
                   <HStack key={index} gap={2}>
                     <Select
                       value={order.column}
-                      options={outputNames(definition).map((column) => [column, column])}
+                      options={outputNames(definition)
+                        .filter((column) => column === order.column || !ordered.has(column))
+                        .map((column) => [column, column])}
                       onChange={(value) =>
                         change({
                           order_by: replace(definition.order_by, index, {
@@ -1278,15 +1296,17 @@ function ToolEditor({
                   size="xs"
                   variant="ghost"
                   alignSelf="start"
-                  disabled={outputNames(definition).length === 0}
-                  onClick={() =>
-                    change({
-                      order_by: [
-                        ...definition.order_by,
-                        { column: outputNames(definition)[0] ?? "", direction: "asc" },
-                      ],
-                    })
-                  }
+                  disabled={!nextOrder}
+                  onClick={() => {
+                    if (nextOrder) {
+                      change({
+                        order_by: [
+                          ...definition.order_by,
+                          { column: nextOrder, direction: "desc" },
+                        ],
+                      });
+                    }
+                  }}
                 >
                   <FiPlus /> Agregar orden
                 </Button>
