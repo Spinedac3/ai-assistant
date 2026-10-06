@@ -23,6 +23,7 @@ import { FiCheck, FiMinus, FiPlus, FiTrash2, FiX } from "react-icons/fi";
 import { useLocation, useNavigate, useParams } from "react-router";
 import { ApiError, api } from "../api/http";
 import { useSession } from "../api/session";
+import { TimeZoneSelect } from "../shell/TimeZoneSelect";
 import { ToolLab } from "./ToolLab";
 import {
   AGGREGATE_LABELS,
@@ -764,10 +765,10 @@ function ToolEditor({
                 </Field.Root>
                 <Field.Root maxW="sm">
                   <Field.Label>Zona horaria de sus fechas</Field.Label>
-                  <Input
-                    placeholder="vacío = la de la fuente"
+                  <TimeZoneSelect
                     value={definition.time_zone ?? ""}
-                    onChange={(event) => change({ time_zone: event.target.value || undefined })}
+                    onChange={(zone) => change({ time_zone: zone || undefined })}
+                    inherited="la fuente"
                   />
                 </Field.Root>
               </Stack>

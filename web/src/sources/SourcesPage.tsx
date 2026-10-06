@@ -19,6 +19,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { FiActivity, FiEdit2, FiPlus, FiTrash2 } from "react-icons/fi";
 import { ApiError, api } from "../api/http";
+import { TimeZoneSelect } from "../shell/TimeZoneSelect";
 
 interface Source {
   code: string;
@@ -364,10 +365,10 @@ function SourceForm({ existing, onSaved }: { existing?: Source; onSaved: () => v
                 <HStack gap={3} align="end">
                   <Field.Root>
                     <Field.Label>Zona horaria de los datos</Field.Label>
-                    <Input
+                    <TimeZoneSelect
                       value={form.timeZone}
-                      onChange={(event) => set("timeZone")(event.target.value)}
-                      placeholder="America/Mexico_City; vacío = la del asistente"
+                      onChange={set("timeZone")}
+                      inherited="el asistente"
                     />
                   </Field.Root>
                   <Switch.Root
@@ -380,6 +381,10 @@ function SourceForm({ existing, onSaved }: { existing?: Source; onSaved: () => v
                     <Switch.Label>TLS</Switch.Label>
                   </Switch.Root>
                 </HStack>
+                <Text fontSize="xs" color="fg.muted">
+                  TLS cifra la conexión con la base. Apágalo solo para una base local sin
+                  certificado.
+                </Text>
                 {error && (
                   <Text role="alert" color="fg.error" fontSize="sm">
                     {error}
