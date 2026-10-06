@@ -69,7 +69,7 @@ export async function askOnce(
       maxTurns: limits?.maxTurns ?? (reading ? ATTACHMENT_TURNS : 1),
       mcpConfigPath,
       // Read stays blocked unless there is a file, and then it reaches that file alone
-      disallowedTools: attachment
+      disallowedTools: reading
         ? DISALLOWED_CLI_TOOLS.split(" ")
             .filter((tool) => tool !== "Read")
             .join(" ")

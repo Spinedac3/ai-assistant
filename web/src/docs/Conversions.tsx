@@ -155,9 +155,9 @@ export function Conversions({ onQueued }: { onQueued: (job: number) => void }) {
   const list = useQuery({
     queryKey: ["conversions"],
     queryFn: () => api<ConversionRow[]>("/docs/conversions"),
-    // Asked again while any is still being written, so the progress moves on its own
+    // Asked again while any is still moving, so the progress shows on its own
     refetchInterval: (query) =>
-      query.state.data?.some((row) => row.status === "queued" || row.status === "running")
+      query.state.data?.some((row) => row.status !== "done" && row.status !== "failed")
         ? 3_000
         : false,
   });
@@ -201,7 +201,9 @@ export function Conversions({ onQueued }: { onQueued: (job: number) => void }) {
                 <Text fontSize="sm" color="fg.muted">
                   {row.status === "queued"
                     ? "En espera"
-                    : `Convirtiendo: ${row.pages_done} de ${row.pages_total ?? "?"} páginas`}
+                    : row.status === "publishing"
+                      ? "Publicando"
+                      : `Convirtiendo: ${row.pages_done} de ${row.pages_total ?? "?"} páginas`}
                 </Text>
               </HStack>
             )}

@@ -843,6 +843,55 @@ describe("docs", () => {
       expect(third.json().error).toBe("too_many_conversions");
     });
 
+    it("gives a conversion back when publishing breaks, or when the server stopped while publishing", async () => {
+      // Performs the test.
+      const id = (await convert(adminToken, await pdfWith(1))).json().data.id;
+      await converter.idle();
+      const read = converter.read.bind(converter);
+      converter.read = async () => {
+        throw new Error("el almacenamiento no responde");
+      };
+      const broken = await publish(id, header);
+      converter.read = read;
+      const afterBroken = (await seen(id)).json().data.status;
+      await database.db.execute(
+        sql`update pdf_conversions set status = 'publishing' where id = ${id}`,
+      );
+      await converter.recover();
+      const afterRestart = (await seen(id)).json().data.status;
+      await converter.remove(id);
+
+      // Performs assertions.
+      expect(broken.statusCode).toBe(500);
+      expect(afterBroken).toBe("done");
+      expect(afterRestart).toBe("done");
+    });
+
+    it("keeps no file when the conversion could not be written down", async () => {
+      // Performs the test.
+      let kept = "";
+      const failing = new PdfConverter({
+        db: database.db,
+        storage: {
+          saveConversion: async (id: string) => {
+            kept = id;
+          },
+          removeConversion: async (id: string) => {
+            kept = kept === id ? "" : kept;
+          },
+        } as unknown as DocumentStorage,
+        convert: async () => "",
+        ask: async () => "{}",
+      });
+      const attempt = await failing
+        .start(userId, "huerfano.pdf", await pdfWith(1), 0.5, ["general"])
+        .catch(() => "refused");
+
+      // Performs assertions.
+      expect(attempt).toBe("refused");
+      expect(kept).toBe("");
+    });
+
     it("removes old reviewed conversions with their files, and keeps the rest", async () => {
       // Performs the test.
       const old = (await convert(adminToken, await pdfWith(1))).json().data.id;

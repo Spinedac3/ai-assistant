@@ -41,7 +41,7 @@ const publishBody = z
           .trim()
           .min(1, "Falta la versión")
           .max(30, "La versión es muy larga"),
-        area: z.string().trim().min(1, "Falta el área").max(40, "El área no existe"),
+        area: z.string().trim().min(1, "Falta el área").max(40, "El área es muy larga"),
         doc_type: z.string().trim().max(60, "El tipo es muy largo").optional(),
         tags: z
           .array(z.string().trim().min(1).max(60, "Una etiqueta es muy larga"))
@@ -312,7 +312,7 @@ export default async function docsRoutes(
     };
   });
 
-  // The person's header and Markdown, with the PDF as the original: published as any upload
+  // The person's header over the converted text, with the PDF as the original: published as any upload
   app.post("/docs/conversions/:id/publish", manage, async (request, reply) => {
     const found = await ownConversion(request, reply);
     if (!found) {
@@ -344,16 +344,25 @@ export default async function docsRoutes(
         message: "La conversión todavía no terminó o ya se está publicando",
       });
     }
-    const stored = await storeDocument(
-      { db, index, storage },
-      markdown,
-      {
-        userId: request.authUser?.id ?? 0,
-        scopes: request.authUser?.scopes ?? new Set<string>(),
-        ip: request.ip,
-      },
-      await converter.read(found.id),
-    );
+    // Given back on any failure, or it would stay publishing with no way to retry or discard it
+    const stored = await converter
+      .read(found.id)
+      .then((original) =>
+        storeDocument(
+          { db, index, storage },
+          markdown,
+          {
+            userId: request.authUser?.id ?? 0,
+            scopes: request.authUser?.scopes ?? new Set<string>(),
+            ip: request.ip,
+          },
+          original,
+        ),
+      )
+      .catch(async (error: unknown) => {
+        await converter.release(found.id);
+        throw error;
+      });
     if (!stored.ok) {
       await converter.release(found.id);
       return reply

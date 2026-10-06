@@ -187,12 +187,14 @@ export class PdfConverter {
     const id = randomUUID();
     // The file first: a row whose file could not be kept would wait for a run that never comes
     await this.deps.storage.saveConversion(id, pdf);
-    await this.deps.db.insert(pdfConversions).values({
-      id,
-      userId,
-      fileName: fileName.slice(0, 200),
-      pagesTotal: pages,
-    });
+    await this.deps.db
+      .insert(pdfConversions)
+      .values({ id, userId, fileName: fileName.slice(0, 200), pagesTotal: pages })
+      .catch(async (error: unknown) => {
+        // With no row the purge would never find the file
+        await this.deps.storage.removeConversion(id).catch(() => undefined);
+        throw error;
+      });
     // One conversion that fails in a way run() did not foresee never stops the ones after it
     this.queue = this.queue.then(() => this.run(id, areas)).catch(() => undefined);
 
@@ -396,6 +398,11 @@ export class PdfConverter {
         finishedAt: new Date(),
       })
       .where(inArray(pdfConversions.status, ["queued", "running"]));
+    // Its text was finished, so it goes back to review instead of being lost
+    await this.deps.db
+      .update(pdfConversions)
+      .set({ status: "done" })
+      .where(eq(pdfConversions.status, "publishing"));
   }
 
   /**
