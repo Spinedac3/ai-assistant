@@ -366,6 +366,18 @@ export class ToolRegistry {
     if (!capped.ok) {
       return this.fail(name, args, caller, context, started, "result_too_large", capped.message);
     }
+    // A program counts what it reads: a cut list would give it wrong totals without a word
+    if (context.origin === "run" && capped.truncated) {
+      return this.fail(
+        name,
+        args,
+        caller,
+        context,
+        started,
+        "result_too_large",
+        `El resultado pasa de ${PROGRAM_MAX_BYTES / 1_000_000} MB: el programa necesita una consulta más angosta`,
+      );
+    }
 
     const text = JSON.stringify(capped.data);
     await this.audit(name, args, caller, context, started, {

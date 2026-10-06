@@ -120,6 +120,24 @@ describe("run tokens for another system", () => {
         },
       }),
     });
+    registry.register({
+      definition: {
+        name: "huge_list",
+        description: "Lists more than a program may read at once.",
+        inputSchema: { type: "object", properties: {} },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({
+        ok: true,
+        data: {
+          rows: Array.from({ length: 220_000 }, (_, index) => ({
+            id: index,
+            text: "una fila de unos cien bytes para pasar de veinte megas en total, más o menos",
+          })),
+        },
+      }),
+    });
     const clients = new Map<string, MachineClient>(
       ["agent-factory", "other-system"].map((clientId) => [
         clientId,
@@ -283,6 +301,34 @@ describe("run tokens for another system", () => {
     expect(Buffer.byteLength(JSON.stringify(result.structuredContent))).toBeGreaterThan(250_000);
     expect(orders).toHaveLength(6_000);
     expect(result.structuredContent).not.toHaveProperty("archivo");
+  });
+
+  it("refuses a program a result it would have to cut, instead of a partial list", async () => {
+    // Performs the test.
+    const token = (
+      await issue({ owner_id: ownerId, tools: ["huge_list"], minutes: 5, run_id: "run-6" })
+    ).json().data.token;
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: {
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+      },
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "huge_list", arguments: {} },
+      },
+    });
+    const result = response.json().result;
+
+    // Performs assertions.
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('"error":"result_too_large"');
+    expect(result.structuredContent).toBeUndefined();
   });
 
   it("lets only the system that asked for a token end it", async () => {
