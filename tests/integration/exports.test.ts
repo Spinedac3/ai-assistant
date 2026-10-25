@@ -119,6 +119,22 @@ describe("exports", () => {
         },
       }),
     });
+    // Too large even for a program's run
+    registry.register({
+      definition: {
+        name: "pedidos_enormes",
+        description: "Every order with a very long note.",
+        inputSchema: { type: "object" },
+        requiredScopes: ["chat.use"],
+        readOnly: true,
+      },
+      execute: async () => ({
+        ok: true,
+        data: {
+          pedidos: Array.from({ length: 3000 }, (_, id) => ({ id, nota: "x".repeat(8_000) })),
+        },
+      }),
+    });
     app = await buildApp({
       db: database.db,
       signer: testSigner(),
@@ -178,6 +194,21 @@ describe("exports", () => {
     expect((external.pedidos as unknown[]).length).toBeGreaterThan(
       (chat.pedidos as unknown[]).length,
     );
+  });
+
+  it("refuses a run a result too large for it, without leaving an Excel behind", async () => {
+    // Performs the test.
+    const before = await database.db.select({ id: exportFiles.id }).from(exportFiles);
+    const outcome = await registry.execute("pedidos_enormes", {}, caller, {
+      origin: "run",
+      timeZone: "UTC",
+    });
+    const after = await database.db.select({ id: exportFiles.id }).from(exportFiles);
+
+    // Performs assertions.
+    expect(outcome.ok).toBe(false);
+    expect(outcome.text).toContain('"error":"result_too_large"');
+    expect(after).toHaveLength(before.length);
   });
 
   it("refuses a link with a changed signature, expiry or id", async () => {
@@ -380,7 +411,7 @@ describe("exports", () => {
      *
      * @return  The link of its Excel
      */
-    const linkFor = async (origin: "chat" | "trial" | "mcp" | "run") =>
+    const linkFor = async (origin: "chat" | "trial" | "mcp") =>
       ((await runBig(origin, "pedidos_grandes")).archivo as { url: string }).url;
 
     it("serves an unsigned file and its preview only to the person who ran the tool", async () => {
@@ -408,14 +439,14 @@ describe("exports", () => {
       expect(nobody.statusCode).toBe(401);
     });
 
-    it("signs the link only for outside clients and scheduled runs", async () => {
+    it("signs the link only for outside clients, and leaves no file for a run", async () => {
       // Performs the test.
       const links = {
         chat: await linkFor("chat"),
         trial: await linkFor("trial"),
         mcp: await linkFor("mcp"),
-        run: await linkFor("run"),
       };
+      const run = await runBig("run", "pedidos_grandes");
       const signed = new URL(links.mcp);
       const preview = await app.inject({
         url: `${signed.pathname}/preview${signed.search}`,
@@ -425,7 +456,7 @@ describe("exports", () => {
       expect(links.chat).not.toContain("sig=");
       expect(links.trial).not.toContain("sig=");
       expect(links.mcp).toContain("sig=");
-      expect(links.run).toContain("sig=");
+      expect(run).not.toHaveProperty("archivo");
       expect(preview.statusCode).toBe(200);
     });
 

@@ -322,6 +322,9 @@ token solo alcanza las herramientas que esa persona puede usar en ese momento; l
 en `denied`. Cada pedido queda en la auditoría, y la fábrica cierra el token al terminar
 (`POST /runs/tokens/revoke`). Un token de corrida sobrevive a un reinicio del asistente.
 
+Una corrida lee el resultado completo de cada herramienta, sin el recorte que aplica el chat
+(hasta 20 MB): el programa cuenta y cruza en código, y ningún modelo lee esas filas crudas.
+
 ## Personas, permisos y uso
 
 En **Usuarios** (`users.manage`) se dan de alta personas con un rol y, si hace falta, permisos
